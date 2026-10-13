@@ -185,6 +185,12 @@ async function handleMessage(msg: unknown, scope: RequestScope): Promise<object 
 }
 
 export async function POST(request: NextRequest) {
+  // Credentialed browser tools use this fixed read-only boundary. Reject a
+  // foreign browser origin before reader cookies can widen its content view.
+  const requestOrigin = request.headers.get('origin')
+  if (requestOrigin && requestOrigin !== request.nextUrl.origin) {
+    return errorResponse(403, -32000, 'Origin is not allowed.')
+  }
   // Admins can disable the public MCP endpoint from the dashboard.
   if ((await getAdminSettings()).mcpEnabled === false) {
     return errorResponse(404, -32601, 'MCP endpoint is disabled.')

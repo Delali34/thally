@@ -84,6 +84,14 @@ afterEach(() => {
 })
 
 describe('lifecycle and protocol', () => {
+  it('rejects foreign browser origins and accepts same-origin or remote clients', async () => {
+    const rejected = await rpc('tools/call', { name: 'list_pages', arguments: {} }, { origin: 'https://evil.test' })
+    expect(rejected.response.status).toBe(403)
+    expect(state.counters.size).toBe(0)
+    expect((await rpc('ping', undefined, { origin: 'https://docs.acme.test' })).body.result).toEqual({})
+    expect((await rpc('ping')).body.result).toEqual({})
+  })
+
   it('negotiates the newest protocol and advertises tools and resources', async () => {
     const { response, body } = await rpc('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 't', version: '1' } })
     expect(response.headers.get('mcp-session-id')).toBeTruthy()
@@ -298,6 +306,8 @@ describe('tools/call', () => {
     expect(JSON.stringify(result)).not.toContain(PLAYGROUND_SECRET)
 
     expect((await callTool('get_api_operation', { operationId: '/api/default/users/post' })).structuredContent).toMatchObject({ id: 'default/users/post' })
+    expect((await callTool('get_api_operation', { operationId: '/api/users/post' })).structuredContent).toMatchObject({ id: 'default/users/post' })
+    expect((await callTool('get_api_operation', { operationId: '/api/internal/get' })).isError).toBe(true)
     const byKey = await callTool('get_api_operation', { method: 'post', path: '/users' })
     expect(byKey.structuredContent).toMatchObject({ id: 'default/users/post' })
     expect((await callTool('get_api_operation', { operationId: 'default/internal/get' })).isError).toBe(true)

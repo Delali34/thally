@@ -333,7 +333,7 @@ export default async function RootLayout({ children }: Readonly<{ children: Reac
         <Providers appearance={appearance}>{children}</Providers>
         <CloudHandshake />
         <AnalyticsProvider config={analyticsConfig} />
-        <WebMcpTools />
+        <WebMcpTools defaultLocale={defaultLang} locales={i18n.locales.map((locale) => locale.code)} />
         {customScripts.map((script) => (
           <Script key={script.src} src={script.src} strategy={script.strategy ?? 'afterInteractive'} />
         ))}
