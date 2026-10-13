@@ -76,7 +76,7 @@ describe('native deployed-site tools', () => {
     pathname = '/es/api/users/get'
     fetchMock.mockResolvedValueOnce(result({ id: 'default/users/get', title: 'Users', url: `${origin}/api/default/users/get`, parameters: [] }))
     expect(await tool('get_current_page').execute({})).toMatchObject({ pageId: 'default/users/get', locale: 'en', viewLocale: 'es', openapi: { parameters: [] } })
-    expect(JSON.parse(fetchMock.mock.calls[0][1]!.body as string).params.arguments.operationId).toBe('api/users/get')
+    expect(JSON.parse(fetchMock.mock.calls[0][1]!.body as string).params.arguments.operationId).toBe('/api/users/get')
   })
   it('falls back to authored /api documentation when it is not an operation', async () => {
     pathname = '/api/overview'
@@ -107,6 +107,33 @@ describe('native deployed-site tools', () => {
     fetchMock.mockResolvedValueOnce(Response.json({ pages: [] })).mockResolvedValueOnce(Response.json({ pages: [{ type: 'api_operation', id: 'default/users/get', url: `${origin}/api/default/users/get` }] }))
     expect(await tool('navigate_to_page').execute({ pageId: 'default/users/get' })).toMatchObject({ status: 'navigation_started' })
     expect(navigate).toHaveBeenCalledWith('/es/api/default/users/get')
+  })
+  it('distinguishes API page paths from exact operation IDs during navigation', async () => {
+    const pages = [
+      { type: 'api_operation', id: 'default/users/get', url: `${origin}/api/default/users/get` },
+      { type: 'api_operation', id: 'api/users/get', url: `${origin}/api/api/users/get` },
+    ]
+    fetchMock.mockResolvedValueOnce(Response.json({ pages })).mockResolvedValueOnce(result({ id: 'default/users/get', url: pages[0].url }))
+    expect(await tool('navigate_to_page').execute({ pageId: '/api/users/get' })).toMatchObject({ status: 'navigation_started' })
+    expect(JSON.parse(fetchMock.mock.calls[1][1]!.body as string).params.arguments.operationId).toBe('/api/users/get')
+    expect(navigate).toHaveBeenLastCalledWith('/api/default/users/get')
+
+    fetchMock.mockResolvedValueOnce(Response.json({ pages }))
+    expect(await tool('navigate_to_page').execute({ pageId: 'api/users/get' })).toMatchObject({ status: 'navigation_started' })
+    expect(navigate).toHaveBeenLastCalledWith('/api/api/users/get')
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+  it('retains authored API path fallback and heading validation despite colliding operation IDs', async () => {
+    const pages = [
+      { type: 'doc', id: 'api/users/get', url: `${origin}/api/users/get` },
+      { type: 'api_operation', id: 'api/users/get', url: `${origin}/api/api/users/get` },
+    ]
+    fetchMock.mockResolvedValueOnce(Response.json({ pages })).mockResolvedValueOnce(result({}, true)).mockResolvedValueOnce(result({ ...page, page_id: 'api/users/get' }))
+    expect(await tool('navigate_to_page').execute({ pageId: '/api/users/get', heading: 'tokens' })).toMatchObject({ status: 'navigation_started' })
+    expect(navigate).toHaveBeenCalledWith('/api/users/get#tokens')
+    fetchMock.mockResolvedValueOnce(Response.json({ pages }))
+    expect(await tool('navigate_to_page').execute({ pageId: 'api/users/get' })).toMatchObject({ status: 'navigation_started' })
+    expect(navigate).toHaveBeenLastCalledWith('/api/api/users/get')
   })
   it('passes cancellation through fetch and never starts aborted navigation', async () => {
     const controller = new AbortController()

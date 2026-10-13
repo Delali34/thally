@@ -204,6 +204,7 @@ describe('generated API operations on a private-by-default site', () => {
     await expect(getSiteTool('get_api_operation')!.handler({ method: 'GET', path: '/widgets' }, { origin: ORIGIN })).rejects.toThrow(/No published API operation/)
     expect(await readResource('docs://api/default/widgets/get', ORIGIN)).toBeNull()
     await expect(getSiteTool('get_api_operation')!.handler({ operationId: 'api/widgets/get' }, { origin: ORIGIN })).rejects.toThrow(/No published API operation/)
+    await expect(getSiteTool('get_api_operation')!.handler({ operationId: '/api/widgets/get' }, { origin: ORIGIN })).rejects.toThrow(/No published API operation/)
   })
 
   it('the anonymous search corpus carries no API operation records', async () => {
