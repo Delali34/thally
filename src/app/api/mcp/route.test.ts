@@ -45,7 +45,9 @@ vi.mock('@/lib/storage', () => ({
 }))
 
 import { GET, POST } from './route'
-import { HUMAN_ONLY, AGENT_ONLY, PLAYGROUND_SECRET } from '@/lib/mcp/__tests__/agent-surface-fixture'
+import { HUMAN_ONLY, AGENT_ONLY, PLAYGROUND_SECRET, apiReferenceConfigModule, entries, sources } from '@/lib/mcp/__tests__/agent-surface-fixture'
+import { getApiOperationBySlug } from '@/data/api-reference'
+import { createWebMcpTools } from '@/lib/mcp/web-mcp'
 import { resetSearchEngine } from '@/lib/search/engine'
 
 const ENDPOINT = 'https://docs.acme.test/api/mcp'
@@ -70,6 +72,21 @@ async function rpc(method: string, params?: Record<string, unknown>, headers?: R
 async function callTool(name: string, args: Record<string, unknown> = {}) {
   const { body } = await rpc('tools/call', { name, arguments: args })
   return body.result as { content: Array<{ type: string; text: string }>; structuredContent?: Record<string, unknown>; isError: boolean }
+}
+
+/** Exercise native context through the actual MCP route and normalized API graph. */
+async function currentApiPage() {
+  const tools = createWebMcpTools({
+    defaultLocale: 'en', locales: ['en', 'es'],
+    location: () => ({ origin: 'https://docs.acme.test', pathname: '/api/users/post', hash: '' }),
+    navigate: () => {},
+    fetch: async (input, init) => {
+      if (input === '/api/mcp') return post(String(init?.body))
+      if (input === '/api/docs/api/users/post?format=json') return Response.json({ nav: {} })
+      throw new Error(`Unexpected content request: ${String(input)}`)
+    },
+  })
+  return tools.find((tool) => tool.name === 'get_current_page')!.execute({})
 }
 
 beforeEach(() => {
@@ -199,6 +216,44 @@ describe('tools/list', () => {
 })
 
 describe('tools/call', () => {
+  it('distinguishes exact operation IDs from rendered API paths in native context', async () => {
+    const specs = apiReferenceConfigModule.apiReferenceConfig.specs
+    const apiSpec = { ...specs[0], id: 'api' }
+    specs.push(apiSpec)
+    try {
+      expect((await getApiOperationBySlug(['users', 'post']))?.href).toBe('/api/default/users/post')
+      expect((await callTool('get_api_operation', { operationId: 'api/users/post' })).structuredContent).toMatchObject({ id: 'api/users/post' })
+      expect((await callTool('get_api_operation', { operationId: '/api/users/post' })).structuredContent).toMatchObject({ id: 'default/users/post' })
+      expect((await callTool('get_api_operation', { operationId: '/api/api/users/post' })).structuredContent).toMatchObject({ id: 'api/users/post' })
+      expect(await currentApiPage()).toMatchObject({ pageId: 'default/users/post', url: 'https://docs.acme.test/api/default/users/post' })
+    } finally {
+      specs.splice(specs.indexOf(apiSpec), 1)
+    }
+  })
+
+  it('keeps authored API paths when only another spec has the colliding operation ID', async () => {
+    const specs = apiReferenceConfigModule.apiReferenceConfig.specs
+    const defaultSpec = specs[0]
+    const apiSpec = { ...defaultSpec, id: 'api' }
+    const pageId = 'api/users/post'
+    const entry = { ...entries[0], id: pageId, slug: pageId.split('/'), href: `/${pageId}` }
+    specs.push(apiSpec)
+    Object.assign(defaultSpec, { pageOnly: true })
+    entries.push(entry)
+    sources[pageId] = '---\ntitle: Authored API guide\n---\n\nRead the authored guide.'
+    try {
+      expect(await getApiOperationBySlug(['users', 'post'])).toBeNull()
+      expect((await callTool('get_api_operation', { operationId: 'api/users/post' })).structuredContent).toMatchObject({ id: 'api/users/post' })
+      expect((await callTool('get_api_operation', { operationId: '/api/users/post' })).isError).toBe(true)
+      expect(await currentApiPage()).toMatchObject({ pageId, title: 'Authored API guide' })
+    } finally {
+      specs.splice(specs.indexOf(apiSpec), 1)
+      Reflect.deleteProperty(defaultSpec, 'pageOnly')
+      entries.splice(entries.indexOf(entry), 1)
+      delete sources[pageId]
+    }
+  })
+
   it('reports an unknown tool as a protocol error', async () => {
     const { body } = await rpc('tools/call', { name: 'drop_database' })
     expect(body.error).toMatchObject({ code: -32602 })

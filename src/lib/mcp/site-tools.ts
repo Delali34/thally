@@ -179,13 +179,21 @@ function plural(count: number, noun: string): string {
 }
 
 async function findOperation(args: Record<string, unknown>, reader: ReaderContext) {
-  const operationId = optionalString(args, 'operationId')?.replace(/^\/+|\/+$/g, '')
+  const requestedOperationId = optionalString(args, 'operationId')
+  const operationId = requestedOperationId?.replace(/^\/+|\/+$/g, '')
   const method = optionalString(args, 'method')?.toUpperCase()
   const path = optionalString(args, 'path')
   if (!operationId && !(method && path)) throw toolInputError('Provide "operationId", or both "method" and "path".')
   const nodes = await loadVisibleApiOperationNodes(reader)
   if (nodes.length === 0) return undefined
   if (operationId) {
+    // A leading slash explicitly selects the rendered page, not an operation
+    // id: /api/users/post may render the default spec while api/users/post is
+    // the exact id of an operation in a different spec named "api".
+    if (requestedOperationId?.startsWith('/api/')) {
+      const page = await getApiOperationBySlug(operationId.slice(4).split('/'))
+      return page ? nodes.find((node) => apiOperationId(node) === apiOperationId(page)) : undefined
+    }
     // Also accept the page path ("api/default/users/post"); an exact id wins,
     // since a spec may itself be named "api".
     const exact = nodes.find((node) => apiOperationId(node) === operationId)

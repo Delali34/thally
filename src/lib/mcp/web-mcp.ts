@@ -73,7 +73,7 @@ async function getCurrentPage(browser: WebMcpBrowser, signal?: AbortSignal) {
   const location = browser.location()
   const resolved = route(browser, location.pathname)
   if (resolved.pageId.startsWith('api/')) {
-    const operation = await callSiteTool(browser, metadata('get_api_operation'), { operationId: resolved.pageId }, signal)
+    const operation = await callSiteTool(browser, metadata('get_api_operation'), { operationId: `/${resolved.pageId}` }, signal)
     if (!operation.isError) {
       const detail = structured(operation)
       return { pageId: detail.id, url: detail.url, currentUrl: `${location.origin}${location.pathname}${location.hash}`, title: detail.title, description: detail.description, locale: browser.defaultLocale, viewLocale: resolved.locale, heading: location.hash.slice(1), headings: [], openapi: detail }
@@ -95,6 +95,7 @@ function sameOriginUrl(browser: WebMcpBrowser, raw: string) {
 }
 
 async function navigateToPage(browser: WebMcpBrowser, args: Record<string, unknown>, signal?: AbortSignal) {
+  const isPagePath = (args.pageId as string).trim().startsWith('/')
   const requested = route(browser, args.pageId as string)
   const locale = typeof args.locale === 'string' ? args.locale : requested.locale !== browser.defaultLocale ? requested.locale : currentLocale(browser)
   if (!browser.locales.includes(locale)) throw new Error(`Unsupported language "${locale}".`)
@@ -106,14 +107,25 @@ async function navigateToPage(browser: WebMcpBrowser, args: Record<string, unkno
     if (!Array.isArray(primary.pages)) throw new Error('Invalid documentation index.')
     pages.push(...(primary.pages as Array<IndexPage>).filter((page) => page.type === 'api_operation'))
   }
-  let entry = pages.find((candidate) => candidate.id === requested.pageId || route(browser, sameOriginUrl(browser, candidate.url).pathname).pageId === requested.pageId)
+  // Keep exact IDs distinct from slash-prefixed page paths. A spec called
+  // "api" otherwise steals the default spec's /api/<operation> page aliases.
+  let entry = isPagePath ? undefined : (
+    pages.find((candidate) => candidate.type === 'api_operation' && candidate.id === requested.pageId)
+    ?? pages.find((candidate) => candidate.id === requested.pageId)
+  )
   if (!entry && requested.pageId.startsWith('api/')) {
-    const operation = structured(await callSiteTool(browser, metadata('get_api_operation'), { operationId: requested.pageId }, signal))
-    // Generated operations have source-language prose with localized shells.
-    // Only a reader-visible operation may supply this canonical destination.
-    if (typeof operation.url !== 'string') throw new Error('Invalid operation URL.')
-    entry = { type: 'api_operation', id: String(operation.id), url: operation.url }
+    const result = await callSiteTool(browser, metadata('get_api_operation'), { operationId: `${isPagePath ? '/' : ''}${requested.pageId}` }, signal)
+    if (!result.isError) {
+      const operation = structured(result)
+      // Generated operations have source-language prose with localized shells.
+      // Only a reader-visible operation may supply this canonical destination.
+      if (typeof operation.url !== 'string') throw new Error('Invalid operation URL.')
+      entry = { type: 'api_operation', id: String(operation.id), url: operation.url }
+    }
   }
+  // An API path with no generated operation can still be authored MDX, exactly
+  // as in the renderer. Its index entry and headings remain reader-scoped.
+  entry ??= pages.find((candidate) => route(browser, sameOriginUrl(browser, candidate.url).pathname).pageId === requested.pageId)
   if (!entry) throw new Error('Unknown documentation page. Use list_pages or list_api_operations to find its ID.')
   const url = sameOriginUrl(browser, entry.url)
   const heading = typeof args.heading === 'string' ? args.heading : ''
