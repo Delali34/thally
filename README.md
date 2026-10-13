@@ -50,6 +50,7 @@ no-change result is valid. Nothing publishes without human approval.
 - **Hybrid search** — instant client-side command palette plus a server-side full-text + vector `/api/search`
 - **Retrieval-grounded AI chat** — Q&A with retrieval over your docs and inline citations, available when the site is linked to Thally Cloud; the widget stays hidden otherwise
 - **Agent endpoints** — `/llms.txt`, `/ai.txt`, `/api/docs-index`, `/api/docs/{slug}`, and an **Agent Readiness Score** at `/api/agent-readiness`
+- **Native WebMCP** — supported browsers expose all eight deployed-site tools plus `get_current_page` and `navigate_to_page` through `document.modelContext`; reader sessions and MCP rate limits apply automatically
 - **Remote MCP server** — every deployed site is an MCP endpoint at `/api/mcp` with read-only tools (`search_docs`, `search_sections`, `read_page`, `list_pages`, `list_api_operations`, `get_api_operation`, `list_changes`, `agent_readiness`) and pages as resources; attach with `claude mcp add --transport http <site>/api/mcp`
 - **Docs agent** — `thally agent "…"` (or `@thally` on a product PR) drafts docs as a **reviewed pull request**, self-checked with `thally check`; it never merges
 - **Provenance & drift** — machine-legible `lastVerified` dates + `thally check --drift` to catch pages stale against the code they document

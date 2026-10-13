@@ -2,7 +2,7 @@ import { searchDocs, searchSections } from '@/lib/search/engine'
 import { loadListedDocEntries } from '@/lib/search/register-doc-source'
 import { loadContentDocument } from '@/lib/content'
 import { canReaderViewPage, loadDocEntries } from '@/data/docs'
-import { getAllApiOperationNodes } from '@/data/api-reference'
+import { getAllApiOperationNodes, getApiOperationBySlug } from '@/data/api-reference'
 import { computePublishedAgentReadiness } from '@/lib/agent-readiness'
 import { filterChangesSince, loadChangelog, parseChangelogDate } from '@/lib/changelog'
 import { hasDocTranslation } from '@/lib/i18n/translation-source'
@@ -184,11 +184,19 @@ async function findOperation(args: Record<string, unknown>, reader: ReaderContex
   const path = optionalString(args, 'path')
   if (!operationId && !(method && path)) throw toolInputError('Provide "operationId", or both "method" and "path".')
   const nodes = await loadVisibleApiOperationNodes(reader)
+  if (nodes.length === 0) return undefined
   if (operationId) {
     // Also accept the page path ("api/default/users/post"); an exact id wins,
     // since a spec may itself be named "api".
-    return nodes.find((node) => apiOperationId(node) === operationId)
+    const exact = nodes.find((node) => apiOperationId(node) === operationId)
       ?? nodes.find((node) => `api/${apiOperationId(node)}` === operationId)
+    if (exact) return exact
+    // Browser context may use the default-spec alias the renderer accepts.
+    // Resolve through the renderer's helper, then enforce the visible registry.
+    const alias = operationId.startsWith('api/')
+      ? await getApiOperationBySlug(operationId.slice(4).split('/'))
+      : null
+    return alias ? nodes.find((node) => apiOperationId(node) === apiOperationId(alias)) : undefined
   }
   return nodes.find((node) => node.operation.method.toUpperCase() === method && node.operation.path === path)
 }

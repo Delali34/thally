@@ -40,6 +40,7 @@ vi.mock('@/lib/content-index', () => ({ getContentIndex: () => null, loadContent
 vi.mock('@/config/api-reference', () => ({ apiReferenceConfig: { defaultSpecId: 'default', specs: [] }, getOpenApiSpecUrl: () => null }))
 vi.mock('@/data/api-reference', () => ({
   getAllApiOperationNodes: async () => [operationNode],
+  getApiOperationBySlug: async (slug: Array<string>) => slug.join('/') === 'widgets/get' ? operationNode : null,
   getApiOperationSearchIndex: async () => [{
     id: operationNode.slug.join('/'),
     type: 'api_operation',
@@ -202,6 +203,7 @@ describe('generated API operations on a private-by-default site', () => {
     expect(listed.structured.total).toBe(0)
     await expect(getSiteTool('get_api_operation')!.handler({ method: 'GET', path: '/widgets' }, { origin: ORIGIN })).rejects.toThrow(/No published API operation/)
     expect(await readResource('docs://api/default/widgets/get', ORIGIN)).toBeNull()
+    await expect(getSiteTool('get_api_operation')!.handler({ operationId: 'api/widgets/get' }, { origin: ORIGIN })).rejects.toThrow(/No published API operation/)
   })
 
   it('the anonymous search corpus carries no API operation records', async () => {

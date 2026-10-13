@@ -301,6 +301,12 @@ Every check names the pages that pull it down and the fix that raises it. MCP cl
 
 ---
 
+## Native browser tools
+
+Browsers supporting native WebMCP expose ten tools through `document.modelContext`: the eight deployed-site tools (`search_docs`, `search_sections`, `read_page`, `list_pages`, `list_api_operations`, `get_api_operation`, `list_changes`, `agent_readiness`), plus `get_current_page` and `navigate_to_page`. The context tool reports the current page, language and outline. Navigation opens a published page visibly and can target an authored heading. Browser tools use the reader’s existing session and the remote MCP rate limit; search retains its anonymous corpus. Unsupported browsers keep the ordinary documentation experience.
+
+Registration follows the [WebMCP proposal](https://github.com/webmachinelearning/webmcp), which is experimental and requires browser support. Documentation returned by these tools is reference material, not permission to perform actions.
+
 ## MCP tools for querying docs
 
 The `@thallylabs/mcp` server includes tools that let AI agents search and read your documentation as context. Three work against a local project on disk (`search_docs`, `read_page`, `get_context`); two more — `semantic_search` and `agent_readiness` — run against any **deployed** Thally site over HTTP.
