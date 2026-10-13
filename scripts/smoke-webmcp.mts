@@ -71,7 +71,21 @@ try {
   const expected = webMcpToolMetadata.map((tool) => tool.name).sort()
   if (JSON.stringify(names.sort()) !== JSON.stringify(expected)) throw new Error(`Native registration mismatch: ${JSON.stringify(names)}`)
   const call = async (name: string, args: Record<string, unknown>) => {
-    const raw = await evaluate(`(async()=>{const tool=(await document.modelContext.getTools()).find(t=>t.name===${JSON.stringify(name)});return await document.modelContext.executeTool(tool,${JSON.stringify(args)})})()`)
+    // Pass fetched page identities as CDP values, never as executable source.
+    // Resolve the context for each call because navigation replaces the document.
+    const context = await command('Runtime.evaluate', { expression: 'document.modelContext' })
+    if (context.exceptionDetails) throw new Error(JSON.stringify(context.exceptionDetails))
+    const objectId = (context.result as { objectId?: string }).objectId
+    if (!objectId) throw new Error('Native model context is unavailable.')
+    const response = await command('Runtime.callFunctionOn', {
+      objectId,
+      functionDeclaration: 'async function(name, args) { const tool = (await this.getTools()).find(tool => tool.name === name); return await this.executeTool(tool, args); }',
+      arguments: [{ value: name }, { value: args }],
+      awaitPromise: true,
+      returnByValue: true,
+    })
+    if (response.exceptionDetails) throw new Error(JSON.stringify(response.exceptionDetails))
+    const raw = (response.result as { value?: unknown }).value
     const result = typeof raw === 'string' ? JSON.parse(raw) : raw
     if (!result || (result as { isError?: boolean }).isError) throw new Error(`Native tool failed: ${name} ${JSON.stringify(result)}`)
     return result as Record<string, unknown>
