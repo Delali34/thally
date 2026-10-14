@@ -168,6 +168,9 @@ jobs:
           node-version: 24
           package-manager-cache: false
 
+      - name: Freeze outgoing stable upgrade baseline
+        run: cp packages/create-thally-docs/src/stable-scaffold-release.json "$RUNNER_TEMP/outgoing-scaffold-release.json"
+
       - name: Compute the new scaffold release record
         id: record
         env:
@@ -180,6 +183,19 @@ jobs:
         run: |
           node .github/scripts/bump-release-packages.mjs
           npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+
+      # A candidate must upgrade existing customers before its record reaches
+      # main or npm. This gate also covers manual promotion and full-release.
+      - name: Install historical upgrade gate dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Verify complete historical scaffold upgrades
+        run: >-
+          npx tsx .github/scripts/verify-scaffold-upgrades.mts
+          packages/create-thally-docs/src/stable-scaffold-release.json
+          starter-source
+          packages/create-thally-docs/src/previous-scaffold-releases.json
+          "$RUNNER_TEMP/outgoing-scaffold-release.json"
 
       - name: Open the release-record PR
         id: pull-request

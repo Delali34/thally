@@ -195,6 +195,20 @@ jobs:
         working-directory: release-source
         run: npm test
 
+      # Recheck in the unprivileged verification job, so a record edited in a
+      # reviewed PR or recovered manually cannot bypass the promotion gate.
+      - name: Verify complete historical scaffold upgrades before packing
+        working-directory: release-source
+        env:
+          BASE_SHA: ${{ needs.plan.outputs.base_sha }}
+        run: |
+          git show "$BASE_SHA:packages/create-thally-docs/src/stable-scaffold-release.json" > "$RUNNER_TEMP/outgoing-scaffold-release.json"
+          npx tsx .github/scripts/verify-scaffold-upgrades.mts \
+            packages/create-thally-docs/src/stable-scaffold-release.json \
+            download \
+            packages/create-thally-docs/src/previous-scaffold-releases.json \
+            "$RUNNER_TEMP/outgoing-scaffold-release.json"
+
       - name: Pack immutable release artifacts
         run: |
           cd release-source

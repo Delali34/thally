@@ -267,3 +267,29 @@ test("does not bump runtime packages after the starter source is frozen", () => 
   assert.doesNotMatch(openPullRequest.run, /packages\/core\/package\.json/);
   assert.doesNotMatch(openPullRequest.run, /packages\/migrate\/package\.json/);
 });
+
+
+test("proves historical upgrades before opening any immutable release record PR", () => {
+  const steps = promotionWorkflow.jobs.promote.steps;
+  const freeze = steps.findIndex(step => step.name === "Freeze outgoing stable upgrade baseline");
+  const compute = steps.findIndex(step => step.name === "Compute the new scaffold release record");
+  const gate = steps.findIndex(step => step.name === "Verify complete historical scaffold upgrades");
+  const open = steps.findIndex(step => step.name === "Open the release-record PR");
+  assert.ok(freeze >= 0 && freeze < compute && compute < gate && gate < open);
+  assert.equal(steps[gate].if, undefined);
+  assert.match(steps[gate].run, /verify-scaffold-upgrades\.mts/);
+  assert.match(steps[gate].run, /starter-source/);
+  assert.match(steps[gate].run, /outgoing-scaffold-release\.json/);
+});
+
+test("rechecks complete historical upgrades before artifact attestation and npm authority", () => {
+  const steps = workflow.jobs.verify.steps;
+  const gate = steps.findIndex(step => step.name === "Verify complete historical scaffold upgrades before packing");
+  const pack = steps.findIndex(step => step.name === "Pack immutable release artifacts");
+  assert.ok(gate >= 0 && gate < pack);
+  assert.equal(steps[gate].if, undefined);
+  assert.equal(steps[gate]["working-directory"], "release-source");
+  assert.match(steps[gate].run, /BASE_SHA/);
+  assert.match(steps[gate].run, /download/);
+  assert.deepEqual(workflow.jobs.publish.needs, ["plan", "verify", "attest"]);
+});
