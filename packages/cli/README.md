@@ -71,7 +71,7 @@ customer-owned paths during upgrades.
 | `thally start` | Serve the built production site |
 | `thally deploy [--prod] [--cloudflare]` | Build and publish through Vercel or Cloudflare |
 | `thally check [dir] [--agents] [--fix] [--ci] [--drift] [--external]` | Check content and agent readiness; `--external` also checks links to public hosts (warnings only) |
-| `thally starter update [--apply]` | Review or apply a site runtime update |
+| `thally starter update [--apply] [--require-complete]` | Review or apply a complete framework and dependency update |
 | `thally agent "<instruction>"` | Draft updates from product changes for review |
 | `thally track <add\|list\|test\|setup>` | Turn merged product PRs into docs PRs |
 | `thally mcp` | Start the Model Context Protocol server (stdio) |
@@ -100,8 +100,20 @@ score is reported but does not stop the deploy.
 
 `thally starter update` is a dry run by default. It compares the previously
 recorded scaffold, the promoted target scaffold, and the current project. It
-automatically updates unchanged framework-owned files, preserves user-owned
-paths, and reports manual-review conflicts before `--apply` writes anything.
+automatically updates unchanged framework-owned files and merges independent
+package changes while preserving user-owned paths. Conflicting changes stop
+the entire update before `--apply` writes anything. Framework files, reviewed
+configuration, dependencies, and release provenance advance together.
+
+An unrecognized release manifest can recover automatically when the complete
+installed framework and package identity match a verified published snapshot.
+Modified or unverifiable framework files require review; the updater never
+guesses an old version or changes the manifest alone. Automated workflows can
+require the complete-update capability with `--require-complete`.
+
+Use this command, or the template's **Update Thally framework** workflow, for
+customer sites. **Sync Thally runtime** is the canonical starter maintainer
+workflow and cannot run against a customer repository.
 
 ## How it works
 

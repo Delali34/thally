@@ -28,7 +28,10 @@ export function formatStarterUpdateResult(result: StarterUpdateResult): string {
     `  Starter ${result.previousRelease.starterVersion} → ${result.targetRelease.starterVersion}`,
     `  ${result.plan.copyPaths.length} copy/update · ${result.plan.deletePaths.length} delete · ${result.plan.conflictPaths.length} conflict · ${result.plan.manualReviewPaths.length} manual review`,
     '',
+    ...(result.recoveredProvenance ? ['  Verified published framework baseline; canonical provenance will advance.', ''] : []),
     ...formatPaths('Copy/update', result.plan.copyPaths),
+    ...formatPaths('Merged configuration', result.resolvedManualPaths ?? []),
+    ...(result.manualConflicts ?? []).flatMap((conflict) => conflict.fields.map((field) => `    - ${conflict.path}${field}`)),
     ...formatPaths('Delete', result.plan.deletePaths),
     ...formatPaths('Conflicts', result.plan.conflictPaths),
     ...formatPaths('Manual review', result.plan.manualReviewPaths),
@@ -46,9 +49,13 @@ export function formatStarterUpdateResult(result: StarterUpdateResult): string {
 
 /** Run `thally starter update`; all other starter subcommands fail closed. */
 export async function runStarterCommand(args: ParsedArgs): Promise<number> {
+  const allowedFlags = new Set(['--apply', '--require-complete', '--help', '-h'])
+  if ([...args.flags].some((flag) => !allowedFlags.has(flag))) {
+    throw new Error('Unknown starter update option.')
+  }
   const subcommand = args.positionals[0]
   if (subcommand !== 'update' || args.hasFlag('--help', '-h')) {
-    process.stdout.write('\n  Usage: thally starter update [--apply]\n\n')
+    process.stdout.write('\n  Usage: thally starter update [--apply] [--require-complete]\n\n')
     return subcommand && subcommand !== 'update' ? 1 : 0
   }
   const apply = args.hasFlag('--apply')

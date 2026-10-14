@@ -175,10 +175,11 @@ export const COMMANDS: Array<CommandInfo> = [
   {
     name: 'starter',
     summary: 'Review or apply a site runtime update',
-    usage: 'thally starter update [--apply]',
+    usage: 'thally starter update [--apply] [--require-complete]',
     maxPositionals: 1,
     options: [
       { names: ['--apply'], description: 'Apply the reviewed update (dry run by default)' },
+      { names: ['--require-complete'], description: 'Require complete transactional framework and configuration updates' },
     ],
   },
 ]

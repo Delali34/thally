@@ -3,8 +3,8 @@
  *
  * The ownership contract comes from the pinned starter archive's
  * `starter-release.json`. Automatic updates touch only framework-eligible files
- * that still match the recorded old starter; owner and manual-review paths are
- * never included in an apply plan.
+ * that still match the recorded old starter. Owner paths are never mutated;
+ * manual-review files join the transaction only after a separate safe merge.
  */
 
 import { createHash } from 'node:crypto'
@@ -17,6 +17,7 @@ import {
   readFileSync,
   readdirSync,
   renameSync,
+  writeFileSync,
   rmSync,
 } from 'node:fs'
 import { dirname, join, relative, resolve, sep } from 'node:path'
@@ -64,6 +65,12 @@ export interface ApplyStarterRuntimeSyncOptions {
   /** Optional immutable provenance file, atomically replaced after mutations. */
   provenance?: StarterApplyProvenance
   /** Integration hook; an exception aborts and rolls back the transaction. */
+  /** Owner-reviewed paths explicitly resolved by the shared three-way merge. */
+  manualMutations?: {
+    writeFiles: ReadonlyMap<string, Buffer>
+    deletePaths: readonly string[]
+    targetPreconditions: Record<string, StarterTargetPrecondition>
+  }
   onMutationApplied?: (path: string, index: number) => void
 }
 
@@ -344,6 +351,9 @@ function collectFiles(
 
   const visit = (absolutePath: string): void => {
     const resolvedPath = resolve(absolutePath)
+    // Exact-file ownership rules can jump directly into nested directories;
+    // validate ancestors too, rather than following a symlink before visiting.
+    if (resolvedPath !== resolve(root)) assertSafeTargetParents(root, resolvedPath)
     if (visited.has(resolvedPath)) return
     visited.add(resolvedPath)
     const repositoryPath = filesystemPathToRepositoryPath(root, resolvedPath)
@@ -388,7 +398,8 @@ function fileSha256(path: string): string {
   return createHash('sha256').update(readFileSync(path)).digest('hex')
 }
 
-function captureTargetPrecondition(path: string): StarterTargetPrecondition {
+/** Capture exact file identity before planning a filesystem mutation. */
+export function captureTargetPrecondition(path: string): StarterTargetPrecondition {
   if (!existsSync(path)) return { kind: 'missing' }
   const entry = lstatSync(path)
   if (!entry.isFile() || entry.isSymbolicLink()) {
@@ -527,15 +538,20 @@ export function applyStarterRuntimeSyncPlan(
   if (plan.conflictPaths.length > 0) {
     throw new Error('Resolve starter synchronization conflicts before applying.')
   }
-  const uniqueMutations = new Set([...plan.copyPaths, ...plan.deletePaths])
-  if (uniqueMutations.size !== plan.copyPaths.length + plan.deletePaths.length) {
+  const manual = options.manualMutations
+  const copyPaths = [...plan.copyPaths, ...(manual?.writeFiles.keys() ?? [])]
+  const deletePaths = [...plan.deletePaths, ...(manual?.deletePaths ?? [])]
+  const preconditions = { ...plan.targetPreconditions, ...manual?.targetPreconditions }
+  const uniqueMutations = new Set([...copyPaths, ...deletePaths])
+  if (uniqueMutations.size !== copyPaths.length + deletePaths.length) {
     throw new Error('Starter synchronization plan contains conflicting mutations.')
   }
   for (const path of uniqueMutations) {
-    if (classifyStarterPath(path, contract) !== 'syncable') {
+    const isManualMutation = manual?.writeFiles.has(path) || manual?.deletePaths.includes(path)
+    if (classifyStarterPath(path, contract) !== (isManualMutation ? 'manual' : 'syncable')) {
       throw new Error(`Starter synchronization refused owner path ${path}.`)
     }
-    if (!plan.targetPreconditions[path]) {
+    if (!preconditions[path]) {
       throw new Error(`Starter synchronization plan lacks a target precondition for ${path}.`)
     }
   }
@@ -609,7 +625,11 @@ export function applyStarterRuntimeSyncPlan(
   }
 
   try {
-    for (const path of plan.copyPaths) {
+    for (const path of copyPaths) {
+      if (manual?.writeFiles.has(path)) {
+        writeFileSync(stagePath(path), manual.writeFiles.get(path)!)
+        continue
+      }
       const sourcePath = ensureContained(newStarterDir, path)
       if (!existsSync(sourcePath) || !lstatSync(sourcePath).isFile()) {
         throw new Error(`Starter synchronization source is missing ${path}.`)
@@ -631,7 +651,7 @@ export function applyStarterRuntimeSyncPlan(
     for (const path of uniqueMutations) {
       const targetPath = ensureContained(targetDir, path)
       assertSafeTargetParents(targetDir, targetPath)
-      if (!matchesTargetPrecondition(targetPath, plan.targetPreconditions[path])) {
+      if (!matchesTargetPrecondition(targetPath, preconditions[path])) {
         throw new Error(`Starter synchronization target changed after planning: ${path}.`)
       }
     }
@@ -643,18 +663,18 @@ export function applyStarterRuntimeSyncPlan(
       }
     }
 
-    for (const path of plan.deletePaths) {
+    for (const path of deletePaths) {
       mutate(
         path,
         ensureContained(targetDir, path),
-        plan.targetPreconditions[path],
+        preconditions[path],
       )
     }
-    for (const path of plan.copyPaths) {
+    for (const path of copyPaths) {
       mutate(
         path,
         ensureContained(targetDir, path),
-        plan.targetPreconditions[path],
+        preconditions[path],
         ensureContained(stagedDir, path),
       )
     }

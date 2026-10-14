@@ -403,3 +403,33 @@ describe('three-way starter runtime planning', () => {
     )
   })
 })
+
+describe('atomic owner-reviewed configuration updates', () => {
+  it('rolls back framework, merged configuration, and provenance together after a failure', () => {
+    const old = directory('thally-manual-old-')
+    const next = directory('thally-manual-next-')
+    const target = directory('thally-manual-target-')
+    for (const root of [old, target]) {
+      write(root, 'src/components/runtime.ts', 'old runtime')
+      write(root, 'package.json', '{"name":"customer","version":"1"}')
+      write(root, 'starter-release.json', 'old provenance')
+    }
+    write(next, 'src/components/runtime.ts', 'next runtime')
+    write(next, 'starter-release.json', 'next provenance')
+    const plan = planStarterRuntimeSync(old, next, target, OWNERSHIP)
+    const packageSource = readFileSync(join(target, 'package.json'))
+    expect(() => applyStarterRuntimeSyncPlan(next, target, plan, OWNERSHIP, {
+      confirmed: true,
+      manualMutations: {
+        writeFiles: new Map([['package.json', Buffer.from('{"name":"customer","version":"2"}')]]),
+        deletePaths: [],
+        targetPreconditions: { 'package.json': { kind: 'file', sha256: starterManifestSha256(packageSource.toString()) } },
+      },
+      provenance: { sourcePath: join(next, 'starter-release.json'), targetPath: join(target, 'starter-release.json'), expectedSha256: starterManifestSha256('old provenance') },
+      onMutationApplied: (path) => { if (path === 'starter-release.json') throw new Error('failure after provenance') },
+    })).toThrow('failure after provenance')
+    expect(readFileSync(join(target, 'src/components/runtime.ts'), 'utf8')).toBe('old runtime')
+    expect(readFileSync(join(target, 'package.json'))).toEqual(packageSource)
+    expect(readFileSync(join(target, 'starter-release.json'), 'utf8')).toBe('old provenance')
+  })
+})

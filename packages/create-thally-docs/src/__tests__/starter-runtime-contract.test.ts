@@ -1,6 +1,6 @@
 /** Runtime-to-starter synchronization contract coverage. */
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   mkdtempSync,
   mkdirSync,
@@ -353,5 +353,84 @@ describe("starter runtime contract", () => {
         runtimeDirectory: runtime.directory,
       }),
     ).toThrow("symbolic-link ancestor");
+  });
+});
+
+
+/** Exercise the actual CLI boundary: exported fixture generation is internal. */
+describe("canonical generator CLI destination", () => {
+  function invoke(command: "sync" | "check", origin?: string, repository?: string, nested = false) {
+    const runtime = createRuntime();
+    const starter = createStarter(runtime);
+    if (origin !== undefined) {
+      execFileSync("git", ["init", "-q"], { cwd: starter });
+      if (origin) execFileSync("git", ["remote", "add", "origin", origin], { cwd: starter });
+    }
+    // Accepted destinations reach this independent safety check, without
+    // installing packages or modifying any framework/provenance bytes.
+    write(runtime.directory, "dirty-marker", "dirty\n");
+    const before = readFileSync(join(starter, "starter-release.json"), "utf8");
+    const env = { ...process.env };
+    delete env.GITHUB_ACTIONS;
+    delete env.GITHUB_REPOSITORY;
+    if (repository) {
+      env.GITHUB_ACTIONS = "true";
+      env.GITHUB_REPOSITORY = repository;
+    }
+    const result = spawnSync(process.execPath, [
+      resolve(".github/scripts/starter-runtime-contract.mjs"), command,
+      "--starter-dir", nested ? join(starter, "src") : starter,
+      "--runtime-dir", runtime.directory,
+    ], { env, encoding: "utf8" });
+    expect(result.status).toBe(1);
+    expect(readFileSync(join(starter, "starter-release.json"), "utf8")).toBe(before);
+    expect(readFileSync(join(starter, "src/components/top-bar.tsx"), "utf8")).toContain("48");
+    return result.stderr;
+  }
+
+  it("rejects an old customer workflow before snapshot mutation", () => {
+    expect(invoke("sync", "https://github.com/thallylabs/starter.git", "customer/docs"))
+      .toContain("restricted to thallylabs/starter");
+  });
+
+  it.each([
+    "https://github.com/customer/docs.git",
+    "git@github.com:customer/docs.git",
+    "https://github.com/thallylabs/starter-imposter.git",
+    "https://github.com.attacker.example/thallylabs/starter.git",
+    "https://attacker.example/thallylabs/starter.git",
+  ])("rejects noncanonical origin %s", origin => {
+    expect(invoke("sync", origin)).toContain("restricted to thallylabs/starter");
+  });
+
+  it.each([
+    "https://github.com/thallylabs/starter.git",
+    "git@github.com:thallylabs/starter.git",
+    "ssh://git@github.com/thallylabs/starter.git",
+  ])("accepts the exact canonical origin %s without mutation", origin => {
+    expect(invoke("sync", origin)).toContain("dirty runtime checkout");
+  });
+
+  it("accepts canonical Actions generation while retaining runtime validation", () => {
+    expect(invoke("sync", "https://github.com/thallylabs/starter.git", "thallylabs/starter"))
+      .toContain("dirty runtime checkout");
+  });
+
+  it("rejects Git-backed targets without an origin", () => {
+    expect(invoke("sync", "")).toContain("restricted to thallylabs/starter");
+  });
+
+  it("rejects nested targets even inside the canonical repository", () => {
+    expect(invoke("sync", "https://github.com/thallylabs/starter.git", undefined, true))
+      .toContain("restricted to thallylabs/starter");
+  });
+
+  it("permits plain local fixture trees while retaining runtime validation", () => {
+    expect(invoke("sync")).toContain("dirty runtime checkout");
+  });
+
+  it("keeps read-only checks available to customer workflows", () => {
+    expect(invoke("check", "https://github.com/customer/docs.git", "customer/docs"))
+      .not.toContain("restricted to thallylabs/starter");
   });
 });
