@@ -111,3 +111,24 @@ describe('thally starter update', () => {
     ).resolves.toBe(1)
   })
 })
+
+describe('complete update capability', () => {
+  it('advertises complete update support without invoking the updater', async () => {
+    const output = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    await runStarterCommand(parseArgs(['starter', 'update', '--help']))
+    expect(output.mock.calls.map(([value]) => value).join('')).toContain('--require-complete')
+    expect(updateStarterProject).not.toHaveBeenCalled()
+  })
+
+  it('accepts the complete-update capability flag with explicit apply', async () => {
+    updateStarterProject.mockResolvedValue({ ...result, applied: true })
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    expect(await runStarterCommand(parseArgs(['starter', 'update', '--apply', '--require-complete']))).toBe(0)
+    expect(updateStarterProject).toHaveBeenCalledWith({ targetDir: process.cwd(), apply: true, confirmed: true })
+  })
+
+  it('rejects unknown flags even when invoked directly before any mutation', async () => {
+    await expect(runStarterCommand(parseArgs(['starter', 'update', '--apply', '--unknown']))).rejects.toThrow('Unknown starter update option')
+    expect(updateStarterProject).not.toHaveBeenCalled()
+  })
+})

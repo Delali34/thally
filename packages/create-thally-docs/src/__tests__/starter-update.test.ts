@@ -11,7 +11,7 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   STABLE_SCAFFOLD_RELEASE,
@@ -22,6 +22,7 @@ import {
 } from '../release.js'
 import { starterManifestSha256 } from '../starter-sync.js'
 import {
+  fetchStarterReleaseHint,
   resolveStarterReleaseFromManifest,
   updateStarterProject,
   type StarterUpdateDownload,
@@ -79,7 +80,7 @@ function releaseFixture(
     runtime: {
       repository: 'thallylabs/thally',
       commitSha: runtimeSha,
-      treeSha: `runtime-tree-${label}`,
+      treeSha: `${String(version + 4).repeat(39)}${revision}`,
     },
     packages: {
       next: `${version}.${revision}.0`,
@@ -121,7 +122,7 @@ function releaseFixture(
     runtime: {
       repository: 'thallylabs/thally',
       commitSha: runtimeSha,
-      treeSha: `runtime-tree-${label}`,
+      treeSha: `${String(version + 4).repeat(39)}${revision}`,
       contentSource: 'assets',
       identityContractVersion: 1,
     },
@@ -189,10 +190,8 @@ describe('immutable starter update orchestration', () => {
 
     expect(result.applied).toBe(false)
     expect(result.plan.copyPaths).toEqual(['framework/runtime.ts'])
-    expect(result.plan.manualReviewPaths).toEqual([
-      'framework/manual.ts',
-      'next.config.ts',
-    ])
+    expect(result.resolvedManualPaths).toEqual(['framework/manual.ts', 'next.config.ts'])
+    expect(result.plan.manualReviewPaths).toEqual([])
     expect(readFileSync(join(target, 'starter-release.json'), 'utf8')).toBe(
       old.manifestSource,
     )
@@ -328,7 +327,7 @@ describe('immutable starter update orchestration', () => {
         [base.release.source.commitSha, base.tree],
         [unregistered.release.source.commitSha, unregistered.tree],
       ])),
-    })).rejects.toThrow('does not contain a newer starter release')
+    })).rejects.toThrow('not in the trusted release catalog')
   })
 
   it('still updates across starterVersions when the catalog retains same-version releases', async () => {
@@ -357,13 +356,16 @@ describe('immutable starter update orchestration', () => {
     const next = releaseFixture(2, newOwnership)
     const target = directory('thally-manifest-edit-')
     copyTree(old.tree, target)
-    write(target, 'starter-release.json', `${old.manifestSource.trim()} \n`)
+    const edited = JSON.parse(old.manifestSource)
+    edited.repository = 'edited/starter'
+    write(target, 'starter-release.json', JSON.stringify(edited))
 
     await expect(updateStarterProject({
       targetDir: target,
       releases: [old.release, next.release],
       targetRelease: next.release,
-    })).rejects.toThrow('edited, unknown, or ambiguously registered')
+      download: fixtureDownload(new Map([[old.release.source.commitSha, old.tree]])),
+    })).rejects.toThrow('edited, unknown')
 
     write(target, 'starter-release.json', old.manifestSource)
     await expect(updateStarterProject({
@@ -373,5 +375,199 @@ describe('immutable starter update orchestration', () => {
       apply: true,
       confirmed: false,
     })).rejects.toThrow('explicit confirmation')
+  })
+})
+
+describe('verified published recovery bases', () => {
+  function setup() {
+    const old = releaseFixture(1, oldOwnership)
+    const next = releaseFixture(2, newOwnership)
+    const target = directory('thally-recovery-')
+    copyTree(old.tree, target)
+    const alias = JSON.parse(old.manifestSource)
+    alias.runtime.commitSha = 'a'.repeat(40)
+    alias.runtime.treeSha = 'b'.repeat(40)
+    write(target, 'starter-release.json', JSON.stringify(alias))
+    return {
+      old, next, target,
+      options: {
+        targetDir: target,
+        targetRelease: next.release,
+        releases: [next.release, old.release],
+        download: fixtureDownload(new Map([
+          [old.release.source.commitSha, old.tree],
+          [next.release.source.commitSha, next.tree],
+        ])),
+        resolveReleaseHint: async () => old.release,
+      },
+    }
+  }
+
+  it('recovers promotion aliases using a real published base and preserves owner content', async () => {
+    const { old, next, target, options } = setup()
+    write(target, 'src/content/index.mdx', 'customer authored content\n')
+    write(target, 'framework/owner.ts', 'customer owned framework exception\n')
+    const before = readFileSync(join(target, 'starter-release.json'), 'utf8')
+    const plan = await updateStarterProject(options)
+    expect(plan.previousRelease).toEqual(old.release)
+    expect(plan.recoveredProvenance).toBe(true)
+    expect(readFileSync(join(target, 'starter-release.json'), 'utf8')).toBe(before)
+    const result = await updateStarterProject({ ...options, apply: true, confirmed: true })
+    expect(result.applied).toBe(true)
+    expect(readFileSync(join(target, 'starter-release.json'), 'utf8')).toBe(next.manifestSource)
+    expect(readFileSync(join(target, 'src/content/index.mdx'), 'utf8')).toBe('customer authored content\n')
+    expect(readFileSync(join(target, 'framework/owner.ts'), 'utf8')).toBe('customer owned framework exception\n')
+  })
+
+  it('canonicalizes recovered provenance even when the published runtime is already current', async () => {
+    const { old, target, options } = setup()
+    const result = await updateStarterProject({ ...options, targetRelease: old.release, apply: true, confirmed: true })
+    expect(result.isUpToDate).toBe(false)
+    expect(result.recoveredProvenance).toBe(true)
+    expect(readFileSync(join(target, 'starter-release.json'), 'utf8')).toBe(old.manifestSource)
+  })
+
+  it('accepts formatting-only differences without requesting a promotion hint', async () => {
+    const { old, target, options } = setup()
+    write(target, 'starter-release.json', JSON.stringify(JSON.parse(old.manifestSource)))
+    const result = await updateStarterProject({ ...options, resolveReleaseHint: async () => { throw new Error('unexpected hint lookup') } })
+    expect(result.recoveredProvenance).toBe(true)
+    expect(result.previousRelease).toEqual(old.release)
+  })
+
+  it.each(['changed', 'missing', 'extra'])('rejects %s framework inventory without writes', async (change) => {
+    const { target, options } = setup()
+    if (change === 'missing') rmSync(join(target, 'framework/runtime.ts'))
+    else write(target, change === 'extra' ? 'framework/extra.ts' : 'framework/runtime.ts', 'custom runtime\n')
+    const before = readFileSync(join(target, 'starter-release.json'), 'utf8')
+    await expect(updateStarterProject({ ...options, apply: true, confirmed: true })).rejects.toThrow('no verified published framework baseline')
+    expect(readFileSync(join(target, 'starter-release.json'), 'utf8')).toBe(before)
+  })
+
+  it.each(['ownership', 'packages', 'repository'])('rejects edited %s contract', async (field) => {
+    const { target, options } = setup()
+    const manifest = JSON.parse(readFileSync(join(target, 'starter-release.json'), 'utf8'))
+    if (field === 'ownership') manifest.ownership.userOwnedNeverOverwrite.push('framework/runtime.ts')
+    else if (field === 'packages') manifest.packages.next = '999.0.0'
+    else manifest.repository = 'attacker/starter'
+    write(target, 'starter-release.json', JSON.stringify(manifest))
+    await expect(updateStarterProject(options)).rejects.toThrow('no verified published framework baseline')
+  })
+
+  it('does not trust a hint that invents a source commit', async () => {
+    const { old, options } = setup()
+    await expect(updateStarterProject({ ...options, resolveReleaseHint: async () => ({ ...old.release, source: { ...old.release.source, commitSha: 'f'.repeat(40) } }) })).rejects.toThrow('no verified published framework baseline')
+  })
+
+  it('requires installed package declarations to agree with the published base', async () => {
+    const { target, options } = setup()
+    write(target, 'package.json', JSON.stringify({ dependencies: { next: '999.0.0' } }))
+    await expect(updateStarterProject(options)).rejects.toThrow('Installed starter packages')
+  })
+
+  it('rejects provenance changes while obtaining the trusted recovery archive', async () => {
+    const { target, options } = setup()
+    const download = options.download
+    await expect(updateStarterProject({ ...options, download: async (directory, release) => {
+      await download(directory, release)
+      write(target, 'starter-release.json', 'changed during verification')
+    } })).rejects.toThrow('manifest changed during update planning')
+  })
+})
+
+describe('complete transactional starter updates', () => {
+  function setup() {
+    const ownership = { ...oldOwnership, manualReview: ['next.config.ts', 'package.json', 'package-lock.json'] }
+    const old = releaseFixture(1, ownership)
+    const next = releaseFixture(2, ownership)
+    for (const fixture of [old, next]) {
+      write(fixture.tree, 'package-lock.json', JSON.stringify({
+        name: 'thally-starter', lockfileVersion: 3,
+        packages: { '': { dependencies: { '@thallylabs/core': `${fixture.release.starterVersion}.0.0` } },
+          'node_modules/@thallylabs/core': { version: `${fixture.release.starterVersion}.0.0`, resolved: `https://registry.npmjs.org/core-${fixture.release.starterVersion}.tgz`, integrity: `canonical-${fixture.release.starterVersion}` },
+          'node_modules/next': { version: `${fixture.release.starterVersion}.0.0` } },
+      }))
+    }
+    const target = directory('thally-complete-')
+    copyTree(old.tree, target)
+    const options = { targetDir: target, targetRelease: next.release, releases: [next.release, old.release],
+      download: fixtureDownload(new Map([[old.release.source.commitSha, old.tree], [next.release.source.commitSha, next.tree]])) }
+    return { old, next, target, options }
+  }
+
+  it('merges packages and lockfiles atomically while retaining independent customer fields', async () => {
+    const { next, target, options } = setup()
+    for (const path of ['package.json', 'package-lock.json']) {
+      const current = JSON.parse(readFileSync(join(target, path), 'utf8'))
+      current.name = 'customer-docs'
+      write(target, path, JSON.stringify(current))
+    }
+    const result = await updateStarterProject({ ...options, apply: true, confirmed: true })
+    expect(result.resolvedManualPaths).toEqual(['next.config.ts', 'package-lock.json', 'package.json'])
+    expect(JSON.parse(readFileSync(join(target, 'package.json'), 'utf8'))).toMatchObject({ name: 'customer-docs', dependencies: { '@thallylabs/core': '2.0.0' } })
+    expect(JSON.parse(readFileSync(join(target, 'package-lock.json'), 'utf8'))).toMatchObject({ name: 'customer-docs', packages: { 'node_modules/@thallylabs/core': { version: '2.0.0' } } })
+    expect(readFileSync(join(target, 'starter-release.json'), 'utf8')).toBe(next.manifestSource)
+  })
+
+  it('reports exact JSON conflicts and performs no partial framework or manifest writes', async () => {
+    const { old, target, options } = setup()
+    const current = JSON.parse(readFileSync(join(target, 'package.json'), 'utf8'))
+    current.dependencies['@thallylabs/core'] = '99.0.0'
+    write(target, 'package.json', JSON.stringify(current))
+    const result = await updateStarterProject(options)
+    expect(result.manualConflicts).toContainEqual({ path: 'package.json', fields: ['/dependencies/@thallylabs~1core'] })
+    await expect(updateStarterProject({ ...options, apply: true, confirmed: true })).rejects.toThrow('conflicts')
+    expect(readFileSync(join(target, 'framework/runtime.ts'), 'utf8')).toBe('runtime 1\n')
+    expect(readFileSync(join(target, 'starter-release.json'), 'utf8')).toBe(old.manifestSource)
+  })
+
+  it('refuses alias recovery when the locked Core artifact changes at the same version', async () => {
+    const { old, target, options } = setup()
+    write(target, 'starter-release.json', JSON.stringify(JSON.parse(old.manifestSource)))
+    const lock = JSON.parse(readFileSync(join(target, 'package-lock.json'), 'utf8'))
+    lock.packages['node_modules/@thallylabs/core'].resolved = 'https://untrusted.invalid/core.tgz'
+    write(target, 'package-lock.json', JSON.stringify(lock))
+    await expect(updateStarterProject(options)).rejects.toThrow('package lock')
+  })
+
+  it('refuses alias recovery with stale locked packages', async () => {
+    const { old, target, options } = setup()
+    write(target, 'starter-release.json', JSON.stringify(JSON.parse(old.manifestSource)))
+    const lock = JSON.parse(readFileSync(join(target, 'package-lock.json'), 'utf8'))
+    lock.packages['node_modules/@thallylabs/core'].version = '0.0.1'
+    write(target, 'package-lock.json', JSON.stringify(lock))
+    await expect(updateStarterProject(options)).rejects.toThrow('package lock')
+  })
+})
+
+
+describe('release provider failures', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it.each([429, 502])('propagates temporary provider status %s as a retryable error', async (status) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status })))
+    await expect(fetchStarterReleaseHint('a'.repeat(40))).rejects.toMatchObject({
+      name: 'StarterReleaseProviderError', code: 'STARTER_RELEASE_PROVIDER_UNAVAILABLE',
+    })
+  })
+
+  it('distinguishes absent hints from network outages', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 404 })))
+    await expect(fetchStarterReleaseHint('a'.repeat(40))).resolves.toBeUndefined()
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network outage')))
+    await expect(fetchStarterReleaseHint('a'.repeat(40))).rejects.toMatchObject({ code: 'STARTER_RELEASE_PROVIDER_UNAVAILABLE' })
+  })
+
+  it('propagates a recovery hint outage instead of declaring the project unsupported', async () => {
+    const old = releaseFixture(1, oldOwnership)
+    const target = directory('thally-provider-recovery-')
+    copyTree(old.tree, target)
+    const manifest = JSON.parse(old.manifestSource)
+    manifest.runtime.commitSha = 'a'.repeat(40)
+    write(target, 'starter-release.json', JSON.stringify(manifest))
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 502 })))
+    await expect(updateStarterProject({ targetDir: target, targetRelease: old.release, releases: [old.release] })).rejects.toMatchObject({
+      code: 'STARTER_RELEASE_PROVIDER_UNAVAILABLE',
+    })
   })
 })

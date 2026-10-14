@@ -14,6 +14,7 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   readdirSync,
   rmSync,
   statSync,
@@ -502,9 +503,73 @@ function readCliArguments(argv) {
   };
 }
 
+/** Resolve only GitHub HTTPS/SSH origins; lookalike hosts and paths fail closed. */
+function isCanonicalStarterOrigin(origin) {
+  const scp = /^git@github\.com:([^?#]+)$/i.exec(origin);
+  let repositoryPath;
+  if (scp) {
+    repositoryPath = scp[1];
+  } else {
+    let url;
+    try {
+      url = new URL(origin);
+    } catch {
+      return false;
+    }
+    if (
+      !["https:", "ssh:"].includes(url.protocol) ||
+      url.hostname.toLowerCase() !== "github.com" ||
+      url.port || url.search || url.hash ||
+      (url.protocol === "ssh:" && url.username !== "git")
+    ) return false;
+    repositoryPath = url.pathname.slice(1);
+  }
+  return repositoryPath.replace(/\/$/, "").replace(/\.git$/i, "").toLowerCase() === EXPECTED_STARTER_REPOSITORY;
+}
+
+/**
+ * Customer copies must use promoted releases, not the destructive generator.
+ * This CLI guard also protects older copied workflows fetching current public
+ * code. Internal programmatic generation remains available for verified fixtures.
+ */
+function assertCanonicalSyncTarget(starterDirectory) {
+  const message = "Runtime snapshot generation is restricted to thallylabs/starter. Customer repositories must use thally starter update.";
+  if (process.env.GITHUB_ACTIONS === "true" || process.env.GITHUB_REPOSITORY) {
+    invariant(process.env.GITHUB_REPOSITORY === EXPECTED_STARTER_REPOSITORY, message);
+  }
+  const target = realpathSync(resolve(starterDirectory));
+  let topLevel;
+  try {
+    topLevel = execFileSync("git", ["-C", target, "rev-parse", "--show-toplevel"], {
+      encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  } catch (error) {
+    // Plain temporary trees support local fixture generation. A broken Git
+    // checkout or unavailable Git executable must never masquerade as one.
+    invariant(String(error.stderr ?? "").includes("not a git repository"), message);
+    for (let parent = target; ; parent = dirname(parent)) {
+      invariant(!existsSync(resolve(parent, ".git")), message);
+      if (dirname(parent) === parent) break;
+    }
+    invariant(process.env.GITHUB_ACTIONS !== "true" && !process.env.GITHUB_REPOSITORY, message);
+    return;
+  }
+  invariant(realpathSync(topLevel) === target, message);
+  let origin;
+  try {
+    origin = execFileSync("git", ["-C", target, "remote", "get-url", "origin"], {
+      encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  } catch {
+    throw new Error(message);
+  }
+  invariant(isCanonicalStarterOrigin(origin), message);
+}
+
 async function main() {
   const input = readCliArguments(process.argv.slice(2));
   if (input.command === "sync") {
+    assertCanonicalSyncTarget(input.starterDirectory);
     syncStarterRuntimeContract(input);
     console.info("Synchronized starter runtime snapshot.");
     return;
