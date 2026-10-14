@@ -1,6 +1,6 @@
 {
   "name": "create-thally-docs",
-  "version": "0.10.91",
+  "version": "0.10.92",
   "description": "Scaffold an open-source Thally docs site for people, search engines, and AI tools.",
   "type": "module",
   "engines": {
