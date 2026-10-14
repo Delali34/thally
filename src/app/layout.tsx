@@ -24,6 +24,7 @@ import { buildOgImageUrl } from '@/lib/og'
 import { buildSiteJsonLd } from '@/lib/json-ld'
 import { getSiteUrl } from '@/lib/site-url'
 import { JsonLdScript } from '@/components/seo/json-ld-script'
+import { WebMcpDiscovery } from '@/components/agent/web-mcp-discovery'
 import { AnalyticsProvider, GtmNoScript } from '@/components/analytics/analytics-provider'
 import { resolveAnalyticsConfig } from '@/lib/analytics-config'
 import { SiteBanner } from '@/components/layout/site-banner'
@@ -300,6 +301,7 @@ export default async function RootLayout({ children }: Readonly<{ children: Reac
           <Script id="thally-locked-appearance" strategy="beforeInteractive" dangerouslySetInnerHTML={{ __html: lockedAppearanceScript(appearance.default) }} />
         )}
         <JsonLdScript data={siteJsonLd} />
+        <WebMcpDiscovery />
         {/* Google Fonts for custom body/heading fonts set in docs.json */}
         {googleFontUrls.length > 0 && (
           <>
