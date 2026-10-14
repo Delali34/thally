@@ -10,6 +10,7 @@ export default defineConfig({
     'src/release.ts',
     'src/starter-sync.ts',
     'src/starter-update.ts',
+    'src/starter-upgrade-canary.ts',
     'src/migrate/index.ts',
   ],
   format: ['esm'],

@@ -15,6 +15,14 @@ A failed phase stops the controller and leaves its pull request or workflow
 run visible for diagnosis. Re-running the controller is safe; already-stable
 inputs are a successful no-op.
 
+Before a candidate record PR is opened, the shared updater must upgrade the
+outgoing stable scaffold and the oldest retained scaffold to the candidate.
+The gate verifies framework and package parity, exact provenance, and owner
+content preservation using immutable archives without executing their code.
+The package verification job repeats this check before packing and attestation,
+so manual recovery and directly reviewed record changes also fail before npm
+publication when existing projects cannot upgrade safely.
+
 The separate **Sync Thally runtime**, **Promote release**, and **Publish
 packages** dispatches remain break-glass recovery tools.
 

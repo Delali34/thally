@@ -1,6 +1,6 @@
 {
   "name": "create-thally-docs",
-  "version": "0.10.89",
+  "version": "0.10.90",
   "description": "Scaffold an open-source Thally docs site for people, search engines, and AI tools.",
   "type": "module",
   "engines": {
@@ -33,6 +33,10 @@
     "./terminal": {
       "types": "./dist/terminal.d.ts",
       "import": "./dist/terminal.js"
+    },
+    "./starter-upgrade-canary": {
+      "types": "./dist/starter-upgrade-canary.d.ts",
+      "import": "./dist/starter-upgrade-canary.js"
     }
   },
   "files": [
