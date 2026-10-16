@@ -41,8 +41,11 @@ Observed locale metadata and URL prefixes are projected onto the runtime layout:
 primary-language files are unprefixed and secondary-language files retain their
 locale prefix. A single-language localized site uses that language as primary.
 Missing primary counterparts and projected path collisions require review; the
-engine does not invent translations. Capture adapters should supply `locale`
-when language is not identified by the imported URL path.
+engine does not invent translations. Fresh HTML captures also observe `html lang`; conflicting or unsupported
+language evidence requires review. Capture adapters can supply `locale` when
+no language is declared in HTML or identified by the scoped URL path.
+The `url-evidence-v2` converter rejects earlier journals: replay retained raw
+captures into a new journal rather than relabelling previously hashed pages.
 
 `stopReason` distinguishes a resumable `capture-limit` from hard `page-limit`
 or `byte-limit` outcomes. Hosts must not automatically retry a hard limit as an

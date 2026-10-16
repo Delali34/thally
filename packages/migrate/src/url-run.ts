@@ -21,7 +21,9 @@ import type {
   UrlMigrationRunOptions, UrlMigrationValidation,
 } from './url-run-types.js'
 
-const CONVERTER_VERSION = 'url-evidence-v1'
+// Version 2 observes declared HTML language on fresh captures. Never relabel
+// a version-1 journal whose stored page hash predates that observation.
+const CONVERTER_VERSION = 'url-evidence-v2'
 const parser = unified().use(remarkParse).use(remarkMdx)
 const ACCEPT = 'text/markdown,text/html,application/xhtml+xml;q=0.9'
 const MAX_RESPONSE_BYTES = 8_000_000
@@ -317,6 +319,34 @@ function navigationConfig(navigation: Array<MigrationNavigationOccurrence>, reco
   return pages.length ? { tabs: [{ tab: 'Documentation', pages }] } : null
 }
 
+/** Bind language to observed capture metadata, scoped URL identity and native HTML evidence. */
+function observedLocale(document: MigrationCapture, id: string, scopePath: string): { locale?: string; issues: Array<UrlMigrationIssue> } {
+  const issues: Array<UrlMigrationIssue> = []
+  const canonicalLanguage = (value: string): string | undefined => {
+    if (!/^[a-z]{2,3}(?:-[a-z0-9]{2,8}){0,4}$/i.test(value)) return undefined
+    try { return Intl.getCanonicalLocales(value)[0] } catch { return undefined }
+  }
+  const candidates: Array<{ source: string; value: string }> = []
+  if (document.locale) {
+    const locale = canonicalLanguage(document.locale)
+    if (!locale) throw new Error('Capture locale is not a portable language code.')
+    candidates.push({ source: 'capture', value: locale })
+  }
+  const urlLocale = [id.split('/', 1)[0], ...scopePath.split('/'), document.finalUrl.pathname.split('/').filter(Boolean)[0]]
+    .find((segment) => segment && LOCALES.has(segment.toLowerCase()))
+  if (urlLocale) candidates.push({ source: 'URL', value: canonicalLanguage(urlLocale)! })
+  const declared = /html/i.test(document.contentType) ? load(document.body)('html').attr('lang')?.trim() : undefined
+  if (declared) {
+    const locale = canonicalLanguage(declared)
+    if (locale) candidates.push({ source: 'html lang', value: locale })
+    else issues.push({ code: 'unsupported-component', source: document.finalUrl.href, message: 'The source declares an unsupported HTML language; review its locale configuration.' })
+  }
+  if (new Set(candidates.map((candidate) => candidate.value)).size > 1) {
+    issues.push({ code: 'unsupported-component', source: document.finalUrl.href, message: `Observed locale metadata disagrees (${candidates.map((candidate) => `${candidate.source}: ${candidate.value}`).join(', ')}); review the source language.` })
+  }
+  return { locale: candidates[0]?.value, issues }
+}
+
 /** Match the runtime: primary files are unprefixed; translations require a primary slug. */
 function localeProjection(checkpoint: UrlMigrationCheckpoint) {
   const pages = checkpoint.records.flatMap((record) => record.page ? [record.page] : [])
@@ -564,11 +594,10 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
       if (sanitizeRemoteMarkdown(page.body.replace(/^<a id="[^"<]*" \/>$/gm, '')) === null) throw new Error('Converted content did not pass inert MDX validation.')
       record.evidence = evidence
       record.page = page
-      const firstSegment = page.id.split('/', 1)[0]
-      const locale = document.locale ?? (LOCALES.has(firstSegment.toLowerCase()) ? firstSegment.toLowerCase() : undefined)
-      if (locale) {
-        if (!/^[a-z]{2,3}(?:-[a-z0-9]{2,8}){0,2}$/i.test(locale)) throw new Error('Capture locale is not a portable language code.')
-        const canonicalLocale = Intl.getCanonicalLocales(locale)[0]
+      const language = observedLocale(document, page.id, scopePath)
+      record.issues.push(...language.issues)
+      const canonicalLocale = language.locale
+      if (canonicalLocale) {
         page.locale = canonicalLocale
         const segments = page.id.split('/')
         const localeIndex = segments.findIndex((segment) => segment.toLowerCase() === canonicalLocale.toLowerCase())
@@ -577,7 +606,7 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
         if (usedIds.has(page.id) && usedIds.get(page.id) !== record.url) throw new Error(`Destination collision for locale page ${page.id}.`)
         usedIds.delete(id); usedIds.set(page.id, record.url)
       }
-      record.version = document.version ?? page.id.split('/').find((segment) => /^v\d+(?:\.\d+)*$/i.test(segment))
+      record.version = document.version ?? [...page.id.split('/'), ...document.finalUrl.pathname.split('/')].find((segment) => /^v\d+(?:\.\d+)*$/i.test(segment))
       record.pageSha256 = pageHash(page)
       record.outcome = 'imported'
       imported++

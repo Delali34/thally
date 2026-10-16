@@ -89,6 +89,47 @@ describe('URL locale output and runtime lookup', () => {
     expect(run.bundle.pages.some((page) => page.id === 'v2/guide')).toBe(false)
   })
 
+  it('observes fresh native HTML language even when the selected scope removes its URL prefix', async () => {
+    const provider: MigrationCaptureProvider = { async capture({ url }) {
+      return { finalUrl: url, contentType: 'text/html', status: url.pathname === '/docs/fr/v2/guide' ? 200 : 404,
+        body: url.pathname === '/docs/fr/v2/guide' ? '<html lang="fr"><article><h1>Guide français</h1><p>Contenu français.</p></article></html>' : '' }
+    } }
+    const run = await runUrlMigration({ sourceUrl: 'https://docs.test/docs/fr/v2/guide', scopePath: '/docs/fr/v2', captureProvider: provider })
+    expect(run.validation.status).toBe('passed')
+    expect(run.bundle.docsConfig.i18n?.defaultLocale).toBe('fr')
+    expect(run.bundle.pages[0]).toMatchObject({ id: 'guide', locale: 'fr' })
+    expect(run.checkpoint.records.find((record) => record.page)?.version).toBe('v2')
+    config.current = normalizeI18nConfig(run.bundle.docsConfig.i18n)
+    expect((await resolvedFile(runtimeSource(renderMigrationFiles(run.bundle)), '/guide'))?.filePath).toBe('src/content/guide.mdx')
+    const oldJournal = { ...run.checkpoint, converterVersion: 'url-evidence-v1' }
+    const unavailable = vi.fn(async () => { throw new Error('Old journals must fail before any capture.') })
+    await expect(runUrlMigration({ sourceUrl: run.checkpoint.sourceUrl, scopePath: run.checkpoint.scopePath,
+      captureProvider: { capture: unavailable }, checkpoint: oldJournal })).rejects.toThrow('Checkpoint does not match')
+    expect(unavailable).not.toHaveBeenCalled()
+  })
+
+  it('uses HTML language on a neutral URL and reports conflicting or unrecognized language evidence', async () => {
+    for (const declared of ['fr', 'en_US']) {
+      const provider: MigrationCaptureProvider = { async capture({ url }) {
+        return { finalUrl: url, contentType: 'text/html', status: url.pathname === '/docs/guide' ? 200 : 404,
+          body: url.pathname === '/docs/guide' ? `<html lang="${declared}"><article><h1>Guide</h1><p>Source payload.</p></article></html>` : '' }
+      } }
+      const run = await runUrlMigration({ sourceUrl: 'https://docs.test/docs/guide', scopePath: '/docs', captureProvider: provider })
+      if (declared === 'fr') {
+        expect(run.validation.status).toBe('passed')
+        expect(run.bundle.docsConfig.i18n?.defaultLocale).toBe('fr')
+      } else {
+        expect(run.validation.status).toBe('partial')
+        expect(run.validation.issues.some((issue) => issue.message.includes('unsupported HTML language'))).toBe(true)
+      }
+    }
+    const capture = fixture(['/docs/fr/v1/guide'])
+    const run = await runUrlMigration({ sourceUrl: 'https://docs.test/docs/fr/v1/guide', scopePath: '/docs',
+      captureProvider: { async capture(request) { const result = await capture.provider.capture(request); return { ...result, body: `<html lang="en">${result.body}</html>` } } } })
+    expect(run.validation.status).toBe('partial')
+    expect(run.validation.issues.some((issue) => issue.message.includes('locale metadata disagrees'))).toBe(true)
+  })
+
   it('reports primary output collisions rather than silently overwriting localized aliases', async () => {
     const capture = fixture(['/docs/en/v1/guide', '/docs/v1/guide'])
     const run = await runUrlMigration({ sourceUrl: 'https://docs.test/docs/en/v1/guide', scopePath: '/docs', captureProvider: capture.provider })
