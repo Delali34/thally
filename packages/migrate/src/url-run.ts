@@ -172,12 +172,13 @@ function sourceNavigation(capture: MigrationCapture): Array<MigrationNavigationO
       if (item.is('a[href]')) {
         result.push({ label: item.text().replace(/\s+/g, ' ').trim(), url: new URL(item.attr('href')!, capture.finalUrl).toString() })
       } else if (item.is('li,details') || item.attr('data-migration-group') !== undefined || item.children('h2,h3,h4,h5,h6').length > 0) {
-        const direct = item.children('a[href]').first()
+        const directLink = item.children('a[href]').first()
+        const direct = directLink.length ? directLink : item.children('div').children('a[href]').first()
         const label = direct.text().trim() || item.children('summary,button,span,h2,h3,h4,h5,h6').first().text().trim()
         const children = walk(node, direct[0])
         if (label) result.push({ label, ...(direct.length ? { url: new URL(direct.attr('href')!, capture.finalUrl).toString() } : {}), ...(children.length ? { children } : {}) })
         else result.push(...children)
-      } else result.push(...walk(node))
+      } else result.push(...walk(node, excluded))
     })
     return result
   }
@@ -481,6 +482,7 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
       if (/html/i.test(document.contentType)) {
         const $ = load(document.body)
         const root = $('main article,article,main,[role="main"]').first()
+        root.find('nav,header,footer,aside,.theme-doc-breadcrumbs,.theme-doc-toc-mobile,.table-of-contents,.hash-link').remove()
         root.find('button svg,a.hash-link svg,[aria-hidden="true"] svg,svg[aria-hidden="true"],svg[data-lucide],svg[data-icon]').remove()
         const unsupported = [...new Set(root.find('iframe,object,embed,canvas,svg,form,input,textarea,select,math,video,audio').toArray().map((node) => node.tagName))]
         if (unsupported.length) record.issues.push({ code: 'unsupported-component', source: record.url, message: `Rendered content requires explicit review for: ${unsupported.join(', ')}.` })
