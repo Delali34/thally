@@ -10,6 +10,7 @@ import remarkParse from 'remark-parse'
 import { unified } from 'unified'
 import { buildNavigationFromPages } from './navigation.js'
 import { pageIdFromReference } from './path.js'
+import { isPassiveSvg } from './svg-policy.js'
 import { defaultMigrationFetcher, htmlPage, markdownPage, sanitizeRemoteMarkdown, validateMigrationUrl } from './url.js'
 import type { MigrationBundle, MigrationFetchResponse, MigrationNavigationGroup, MigrationPage } from './types.js'
 import type {
@@ -247,10 +248,11 @@ async function defaultAssetFetcher(url: URL, signal?: AbortSignal): Promise<Migr
 function acceptedAsset(asset: MigrationCapturedAsset): string | null {
   if (asset.content.byteLength > MAX_ASSET_BYTES) return null
   const mime = asset.contentType.split(';', 1)[0].toLowerCase().trim()
+  if (mime === 'image/svg+xml') return isPassiveSvg(asset.content) ? 'svg' : null
   const signature = Buffer.from(asset.content.slice(0, 16))
   const extensions: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'application/pdf': 'pdf', 'image/avif': 'avif' }
   const extension = extensions[mime]
-  if (!extension) return null // SVG/HTML and executable downloads need a separate serving policy.
+  if (!extension) return null // HTML and executable downloads are never copied into public assets.
   const isSignatureValid = extension === 'png' ? signature.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
     : extension === 'jpg' ? signature[0] === 255 && signature[1] === 216
       : extension === 'gif' ? /^GIF8[79]a/.test(signature.toString())

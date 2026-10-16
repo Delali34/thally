@@ -24,7 +24,9 @@ establish that an arbitrary site can be imported completely. Every inventory
 entry has an explicit outcome; pending/failed pages, missing anchors, technical
 payload differences, unavailable assets and unsupported interactive components
 make validation partial. Raster/PDF assets require matching MIME and signatures;
-SVG and executable downloads require a separate serving policy and are reported.
+SVG must pass the exported `isPassiveSvg` policy: static drawing elements with
+only in-document references, no scripts, external resources, styles or animations.
+Rejected SVG and executable downloads are reported for review.
 Source validation remains independent of generated-site build/browser checks.
 The CLI's programmatic `migrateDocs({ urlMigration: { ... } })` path retains
 those source validation results in its migration report.

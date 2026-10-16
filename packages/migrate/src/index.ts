@@ -17,6 +17,7 @@ export { projectMintlifyIntegrations, validateIntegrations } from './analytics.j
 export { mergeMigrationConfig, renderMigrationFiles } from './render.js'
 export { defaultMigrationFetcher, migrateUrl, validateMigrationUrl } from './url.js'
 export { classifyMigrationResponse, runUrlMigration, validateUrlMigration } from './url-run.js'
+export { isPassiveSvg } from './svg-policy.js'
 export type {
   MigrationCapture, MigrationCaptureProvider, MigrationCapturedAsset, MigrationCaptureState,
   MigrationEvidence, MigrationJournalAsset, MigrationNavigationOccurrence,

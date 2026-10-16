@@ -1123,7 +1123,7 @@ export function htmlPage(
     },
   })
   const escape = turndown.escape.bind(turndown)
-  turndown.escape = (text: string) => escape(text).replace(/[<{]/g, (match) => `\\${match}`)
+  turndown.escape = (text: string) => escape(text).replace(/[<{}]/g, (match) => `\\${match}`)
   const body = turndown.turndown(root.html() ?? '').trim()
   // Docusaurus can intentionally publish title-only reference/partial pages.
   // Keep those real article routes while still rejecting empty search/app

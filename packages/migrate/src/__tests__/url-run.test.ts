@@ -98,6 +98,16 @@ describe('evidence URL runner', () => {
     expect(run.bundle.pages[0].body).toContain('&#123;process.exit(1)&#125;')
   })
 
+  it('preserves literal prose braces and technical delimiters under the inert gate', async () => {
+    const run = await runUrlMigration({ sourceUrl: 'https://docs.test/a', captureProvider: provider({
+      '/a': response('/a', article('A', '<p>Literal {safe} text and closing } remain readable.</p><h2 id="custom">Code</h2><pre><code>const example = `&lt;Tag&gt;{data}&lt;/Tag&gt;`;\n</code></pre><a href="#custom">Code anchor</a>')),
+    }) })
+    expect(run.validation.issues).toEqual([])
+    expect(run.validation.status).toBe('passed')
+    expect(run.bundle.pages[0].body).toContain('Literal \\{safe\\} text and closing \\}')
+    expect(run.bundle.pages[0].body).toContain('const example = `<Tag>{data}</Tag>`;\n')
+  })
+
   it('preserves observed DOM hierarchy, locale/version identity and redirect aliases', async () => {
     const source = response('/fr/v2/guide', `<header><nav><a href="/pricing">Pricing</a></nav></header><aside><section><h3>Guides</h3><ul><li><a href="/fr/v2/next">Next</a></li><li><a href="/fr/v2/guide">Guide short</a></li></ul></section></aside>${article('Guide', '<a href="/legacy#example">Alias</a>')}`)
     const run = await runUrlMigration({ sourceUrl: 'https://docs.test/fr/v2/guide', scopePath: '/', captureProvider: provider({
@@ -112,6 +122,26 @@ describe('evidence URL runner', () => {
     expect(run.bundle.pages[0].navTitle).toBe('Guide short')
     expect(run.checkpoint.records.find((record) => record.page)?.version).toBe('v2')
     expect(run.bundle.docsConfig.i18n?.locales.map((locale) => locale.code)).toContain('fr')
+  })
+
+  it('copies three distinct passive SVG diagrams and rejects an active alias payload', async () => {
+    const diagrams = [
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M0 0L20 20" stroke="blue"/></svg>',
+      '<svg xmlns="http://www.w3.org/2000/svg"><defs><g id="shape"><circle r="4" fill="red"/></g></defs><use href="#shape"/></svg>',
+      '<svg xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="paint"><stop stop-color="green"/></linearGradient></defs><rect width="20" height="20" fill="url(#paint)"/></svg>',
+    ]
+    const source = response('/guide', article('Diagrams', diagrams.map((_svg, index) => `<img src="/diagram-${index}.svg">`).join('')))
+    source.assets = diagrams.map((body, index) => ({ url: `https://docs.test/diagram-${index}.svg`, contentType: 'image/svg+xml', content: Buffer.from(body) }))
+    const run = await runUrlMigration({ sourceUrl: 'https://docs.test/guide', captureProvider: provider({ '/guide': source }) })
+    expect(run.validation.status).toBe('passed')
+    expect(run.bundle.assets).toHaveLength(3)
+    expect(run.bundle.assets.map((asset) => Buffer.from(asset.content).toString())).toEqual(diagrams)
+    expect(new Set(run.bundle.assets.map((asset) => asset.path)).size).toBe(3)
+    const malicious = { ...source, assets: source.assets.map((asset, index) => index === 1 ? { ...asset, content: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><use href="#a"/><defs><use id="a" href="https://evil.test/svg"/></defs></svg>') } : asset) }
+    const rejected = await runUrlMigration({ sourceUrl: 'https://docs.test/guide', captureProvider: provider({ '/guide': malicious }) })
+    expect(rejected.validation.status).toBe('partial')
+    expect(rejected.validation.issues.map((issue) => issue.code)).toContain('asset-failed')
+    expect(rejected.bundle.assets).toHaveLength(2)
   })
 
   it('converts and validates a full 10000-page inventory beyond the former cap', async () => {
