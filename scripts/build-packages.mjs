@@ -20,11 +20,15 @@
  */
 
 import { spawn } from 'node:child_process'
+import { hasCurrentWorkspaceBuild, proofContext, recordWorkspaceBuild } from './workspace-build-proof.mjs'
 
 function buildWorkspace(workspace) {
   return new Promise((resolve, reject) => {
     const child = spawn('npm', ['run', 'build', '-w', workspace], {
       stdio: 'inherit',
+      // OpenNext sets NODE_ENV for its nested build. Keep package compiler
+      // inputs identical to the earlier CI compilation without changing tests.
+      env: context ? { ...process.env, NODE_ENV: 'production' } : process.env,
       // npm resolves via a .cmd shim on Windows, which spawn only finds
       // through a shell.
       shell: process.platform === 'win32',
@@ -40,10 +44,16 @@ function buildWorkspace(workspace) {
   })
 }
 
-await Promise.all(
-  ['packages/core', 'packages/migrate'].map(buildWorkspace),
-)
-await buildWorkspace('packages/create-thally-docs')
-await buildWorkspace('packages/mcp')
-await buildWorkspace('packages/agent')
-await buildWorkspace('packages/cli')
+const context = proofContext()
+if (hasCurrentWorkspaceBuild(context)) {
+  process.stdout.write('Workspace package inputs and outputs match this CI job; reusing compilation.\n')
+} else {
+  await Promise.all(
+    ['packages/core', 'packages/migrate'].map(buildWorkspace),
+  )
+  await buildWorkspace('packages/create-thally-docs')
+  await buildWorkspace('packages/mcp')
+  await buildWorkspace('packages/agent')
+  await buildWorkspace('packages/cli')
+  recordWorkspaceBuild(context)
+}
