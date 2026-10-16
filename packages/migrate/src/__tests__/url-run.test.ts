@@ -17,6 +17,16 @@ function provider(pages: Record<string, MigrationCapture>): MigrationCaptureProv
 const article = (title: string, body = '') => `<html><body><main><article><h1>${title}</h1><p>Technical documentation for this controlled source page.</p>${body}</article></main></body></html>`
 
 describe('evidence URL runner', () => {
+  it('normalizes trailing slash runs linearly and rejects adversarial slash runs with a suffix', async () => {
+    const sourceUrl = 'https://docs.test/docs/intro'
+    const captureProvider = provider({ '/docs/intro': response('/docs/intro', article('Intro')) })
+    for (const [scopePath, expected] of [['/'.repeat(100_000), '/'], ['/docs' + '/'.repeat(100_000), '/docs']]) {
+      const run = await runUrlMigration({ sourceUrl, scopePath, captureProvider, maxCaptures: 1 })
+      expect(run.checkpoint.scopePath).toBe(expected)
+    }
+    await expect(runUrlMigration({ sourceUrl, scopePath: '/'.repeat(100_000) + 'suffix', captureProvider })).rejects.toThrow('scope must contain the source URL')
+  })
+
   it('classifies redirected machine indexes before conversion', async () => {
     expect(classifyMigrationResponse(response('/llms.txt', '# Index', 'text/plain'))).toBe('index')
     const run = await runUrlMigration({ sourceUrl: 'https://docs.test/', captureProvider: provider({

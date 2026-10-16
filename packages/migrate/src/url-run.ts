@@ -429,7 +429,12 @@ export function validateUrlMigration(checkpoint: UrlMigrationCheckpoint, cancell
 export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<UrlMigrationRun> {
   const source = validateMigrationUrl(options.sourceUrl)
   const sourceUrl = canonical(source.toString(), source.toString())!
-  const scopePath = (options.scopePath ?? (source.pathname.endsWith('/') ? source.pathname : source.pathname.slice(0, source.pathname.lastIndexOf('/')) || '/')).replace(/\/+$/, '') || '/'
+  const requestedScope = options.scopePath ?? (source.pathname.endsWith('/') ? source.pathname : source.pathname.slice(0, source.pathname.lastIndexOf('/')) || '/')
+  // A regex anchored only at the end retries every slash-run start when a
+  // hostile suffix prevents a match. Scan the tail once before validation.
+  let scopeEnd = requestedScope.length
+  while (scopeEnd > 0 && requestedScope.charCodeAt(scopeEnd - 1) === 47) scopeEnd--
+  const scopePath = requestedScope.slice(0, scopeEnd) || '/'
   if (!scopePath.startsWith('/') || scopePath.includes('?') || scopePath.includes('#') || !inScope(source, source, scopePath)) throw new Error('The selected documentation scope must contain the source URL.')
   const maxPages = options.maxPages ?? 1_000
   if (!Number.isInteger(maxPages) || maxPages < 1 || maxPages > 10_000) throw new Error('maxPages must be between 1 and 10000.')

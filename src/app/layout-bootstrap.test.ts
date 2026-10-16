@@ -9,6 +9,11 @@ import { describe, expect, it } from 'vitest'
 
 const require = createRequire(import.meta.url)
 
+/** Extract script text from the rendered fixture; HTML tag names are case-insensitive. */
+function extractBootstrap(html: string): string | undefined {
+  return /<script\b[^>]*>([\s\S]*?)<\/script>/iu.exec(html)?.[1]
+}
+
 /** Render the actual dependency after the same name-preserving server transform. */
 function transformedThemeBootstrap(): string {
   const file = require.resolve('next-themes')
@@ -16,12 +21,16 @@ function transformedThemeBootstrap(): string {
   const themeModule = { exports: {} as typeof import('next-themes') }
   runInNewContext(transformed, { module: themeModule, exports: themeModule.exports, require })
   const html = renderToStaticMarkup(createElement(themeModule.exports.ThemeProvider, { attribute: 'class', defaultTheme: 'dark' }))
-  const bootstrap = /<script\b[^>]*>([\s\S]*?)<\/script>/u.exec(html)?.[1]
+  const bootstrap = extractBootstrap(html)
   if (!bootstrap) throw new Error('The actual theme provider emitted no bootstrap.')
   return bootstrap
 }
 
 describe('document bootstrap ordering', () => {
+  it.each(['script', 'SCRIPT', 'sCrIpT'])('extracts %s fixture tags with mixed-case closing tags', (tag) => {
+    expect(extractBootstrap(`<${tag} type="text/javascript">globalThis.marker = 1\n</ScRiPt>`)).toBe('globalThis.marker = 1\n')
+  })
+
   it('runs the fixed native head shim before next-themes accesses esbuild helpers', () => {
     const layout = readFileSync('src/app/layout.tsx', 'utf8')
     // Next/font prevents importing the root layout in unit tests. Bind this
