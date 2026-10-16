@@ -18,12 +18,21 @@ jobs:
   verify:
     name: Test · Build
     runs-on: ubuntu-latest
+    env:
+      # Reused only in this job; no build outputs are restored from a cache.
+      THALLY_CI_PACKAGE_BUILD_PROOF: 'true'
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
           fetch-depth: 0
+
+      - name: Plan validation from changed paths
+        id: plan
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: node .github/scripts/plan-public-ci.mjs "$BASE_SHA"
 
       - name: Set up Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -41,10 +50,14 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
         run: node .github/scripts/release-package-plan.mjs --base "$BASE_SHA" --output "$RUNNER_TEMP/package-plan.json"
 
+      - name: Build workspace packages
+        run: npm run packages:build
+
       - name: Test
+        if: steps.plan.outputs.full == 'true'
         run: npm test
 
-      # Reuse the workspace CLI built by `npm test`; a separate workflow used
+      # Reuse the workspace CLI compiled above; a separate workflow used
       # to repeat checkout and tool installation for the same candidate.
       - name: Check authored content
         run: node packages/cli/dist/index.js check --ci .

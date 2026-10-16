@@ -23,3 +23,19 @@ test("content validation shares the existing checkout and installation", () => {
   );
   assert.ok(steps.some((step) => step.name === "Check authored content"));
 });
+
+
+test("path planning preserves managed build and contract gates for every candidate", () => {
+  const steps = workflow.jobs.verify.steps;
+  const plan = steps.find((step) => step.id === "plan");
+  assert.match(plan.env.BASE_SHA, /pull_request\.base\.sha \|\| github\.event\.merge_group\.base_sha/);
+  assert.equal(steps.find((step) => step.name === "Test").if, "steps.plan.outputs.full == 'true'");
+  for (const name of ["Build workspace packages", "Check authored content", "Test release handoff boundary", "Build and enforce managed Worker size"]) {
+    assert.equal(steps.find((step) => step.name === name).if, undefined, name);
+  }
+});
+
+test("package compilation reuse is local to this job and never restores package artifacts", () => {
+  assert.equal(workflow.jobs.verify.env.THALLY_CI_PACKAGE_BUILD_PROOF, "true");
+  assert.ok(workflow.jobs.verify.steps.every((step) => !/download-artifact|actions\/cache/.test(step.uses ?? "")));
+});
