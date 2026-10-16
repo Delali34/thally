@@ -90,6 +90,29 @@ describe('evidence URL runner', () => {
     expect(run.checkpoint.records[0].outcome).toBe('pending')
   })
 
+  it('escapes expression-bearing admonition headings from rendered HTML', async () => {
+    const run = await runUrlMigration({ sourceUrl: 'https://docs.test/a', captureProvider: provider({
+      '/a': response('/a', article('A', '<div class="theme-admonition"><div class="admonitionHeading">{process.exit(1)}</div><p>Source text remains literal.</p></div>')),
+    }) })
+    expect(run.validation.status).toBe('passed')
+    expect(run.bundle.pages[0].body).toContain('&#123;process.exit(1)&#125;')
+  })
+
+  it('preserves observed DOM hierarchy, locale/version identity and redirect aliases', async () => {
+    const source = response('/fr/v2/guide', `<header><nav><a href="/pricing">Pricing</a></nav></header><aside><section><h3>Guides</h3><ul><li><a href="/fr/v2/next">Next</a></li><li><a href="/fr/v2/guide">Guide</a></li></ul></section></aside>${article('Guide', '<a href="/legacy#example">Alias</a>')}`)
+    const run = await runUrlMigration({ sourceUrl: 'https://docs.test/fr/v2/guide', scopePath: '/', captureProvider: provider({
+      '/fr/v2/guide': source,
+      '/fr/v2/next': response('/fr/v2/next', article('Next', '<h2 id="example">Example</h2>')),
+      '/legacy': response('/fr/v2/next', article('Next', '<h2 id="example">Example</h2>')),
+    }) })
+    expect(run.validation.status).toBe('passed')
+    expect(run.bundle.pages.map((page) => page.id)).toEqual(['fr/v2/guide', 'fr/v2/next'])
+    expect(run.bundle.docsConfig.tabs[0].pages).toEqual([{ group: 'Guides', pages: ['v2/next', 'v2/guide'] }])
+    expect(run.bundle.pages[0].body).toContain('[Alias](/fr/v2/next#example)')
+    expect(run.checkpoint.records.find((record) => record.page)?.version).toBe('v2')
+    expect(run.bundle.docsConfig.i18n?.locales.map((locale) => locale.code)).toContain('fr')
+  })
+
   it('converts and validates a full 10000-page inventory beyond the former cap', async () => {
     const size = 10_000
     const run = await runUrlMigration({ sourceUrl: 'https://docs.test/p0', maxPages: size, concurrency: 24, captureProvider: {

@@ -24,6 +24,7 @@ const ACCEPT = 'text/markdown,text/html,application/xhtml+xml;q=0.9'
 const MAX_RESPONSE_BYTES = 8_000_000
 const MAX_ASSET_BYTES = 10_000_000
 const MAX_RECORDS = 100_000
+const LOCALES = new Set(['ar', 'cs', 'da', 'de', 'el', 'en', 'es', 'fi', 'fr', 'he', 'hi', 'hu', 'id', 'it', 'ja', 'ko', 'ms', 'nl', 'no', 'pl', 'pt', 'pt-br', 'ro', 'ru', 'sk', 'sv', 'th', 'tr', 'uk', 'vi', 'zh', 'zh-cn', 'zh-hans', 'zh-hant'])
 
 interface MarkdownNode {
   type: string
@@ -419,7 +420,7 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
       if (usedIds.has(id) && usedIds.get(id) !== record.url) { record.outcome = 'failed'; record.reason = `Destination collision for ${id}.`; return }
       usedIds.set(id, record.url)
       const evidence = evidenceOf(document)
-      let page = convert(document, id)
+      const page = convert(document, id)
       if (!page) { record.outcome = 'failed'; record.reason = 'Content could not be represented as safe inert MDX.'; return }
       const states = document.states ?? []
       if (states.length > 64) throw new Error('Capture contains too many alternative states.')
@@ -469,10 +470,22 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
         }
       }
       if (options.signal?.aborted) return
+      if (sanitizeRemoteMarkdown(page.body.replace(/^<a id="[^"<]*" \/>$/gm, '')) === null) throw new Error('Converted content did not pass inert MDX validation.')
       record.evidence = evidence
       record.page = page
-      if (document.locale) page.locale = document.locale
-      record.version = document.version
+      const firstSegment = page.id.split('/', 1)[0]
+      const locale = document.locale ?? (LOCALES.has(firstSegment.toLowerCase()) ? firstSegment.toLowerCase() : undefined)
+      if (locale) {
+        if (!/^[a-z]{2}(?:-[a-z0-9]{2,8}){0,2}$/i.test(locale)) throw new Error('Capture locale is not a portable language code.')
+        page.locale = locale
+        const segments = page.id.split('/')
+        const localeIndex = segments.findIndex((segment) => segment.toLowerCase() === locale.toLowerCase())
+        page.navigationId = segments.filter((_segment, index) => index !== localeIndex).join('/') || 'introduction'
+        page.id = `${locale}/${page.navigationId}`
+        if (usedIds.has(page.id) && usedIds.get(page.id) !== record.url) throw new Error(`Destination collision for locale page ${page.id}.`)
+        usedIds.delete(id); usedIds.set(page.id, record.url)
+      }
+      record.version = document.version ?? page.id.split('/').find((segment) => /^v\d+(?:\.\d+)*$/i.test(segment))
       record.pageSha256 = pageHash(page)
       record.outcome = 'imported'
       imported++
@@ -490,9 +503,13 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
       visit(navigation)
     } catch (error) {
       if (options.signal?.aborted) return
+      const wasImported = record.outcome === 'imported'
       record.outcome = record.discoveredBy.every((origin) => origin === 'discovery-index') ? 'excluded' : 'failed'
       record.reason = error instanceof Error ? error.message : String(error)
-      if (record.page) { imported--; usedIds.delete(record.page.id) }
+      if (record.page) {
+        if (wasImported) imported--
+        usedIds.delete(record.page.id)
+      }
       delete record.page; delete record.pageSha256; delete record.assets
     } finally {
       if (record.outcome !== 'pending') {
@@ -514,7 +531,8 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
   for (const record of checkpoint.records) {
     const target = record.outcome === 'alias' ? records.get(record.aliasOf ?? '') : record
     if (target?.page) {
-      const route = target.page.navigationId === 'introduction' ? '/' : `/${target.page.navigationId}`
+      const localePrefix = target.page.locale && target.page.locale !== 'en' ? `/${target.page.locale}` : ''
+      const route = `${localePrefix}${target.page.navigationId === 'introduction' ? '/' : `/${target.page.navigationId}`}`
       routeMap.set(record.url, route)
       if (target.evidence) routeMap.set(canonical(target.evidence.finalUrl, sourceUrl)!, route)
     }
@@ -534,6 +552,8 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
     urlMigrationValidation: validation,
     stats: { discovered: records.size, imported: pages.length, skipped: records.size - pages.length },
   }
+  const locales = [...new Set(pages.map((page) => page.locale).filter((locale): locale is string => Boolean(locale)))]
+  if (locales.length) bundle.docsConfig.i18n = { defaultLocale: 'en', locales: [{ code: 'en', label: 'English' }, ...locales.filter((locale) => locale !== 'en').map((code) => ({ code, label: code }))] }
   return { bundle, checkpoint, validation }
 }
 

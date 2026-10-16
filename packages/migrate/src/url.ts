@@ -1070,7 +1070,7 @@ export function htmlPage(
       const titleText = title.text().trim()
       title.remove()
       const markdown = turndown.turndown(clone.html() ?? '').trim()
-      return `\n\n<${tag}>\n${titleText ? `**${titleText}**\n\n` : ''}${markdown}\n</${tag}>\n\n`
+      return `\n\n<${tag}>\n${titleText ? `**${escapeMarkdownText(titleText)}**\n\n` : ''}${markdown}\n</${tag}>\n\n`
     },
   })
   turndown.addRule('docusaurus-tabs', {
