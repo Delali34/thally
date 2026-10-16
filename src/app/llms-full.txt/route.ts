@@ -1,5 +1,4 @@
 import { type NextRequest } from 'next/server'
-import { estimateTokens } from '@thallylabs/core/embeddings'
 import { type ApiOperationNode } from '@/data/api-reference'
 import { loadDocEntries, loadSidebarCollections } from '@/data/docs'
 import { loadContentDocument } from '@/lib/content'
@@ -33,8 +32,9 @@ import { contentCacheControl } from '@/lib/reader-auth/cache'
  *   readers allowed to open them; such responses are never shared-cached.
  *
  * `?locale=<code>` returns a translated corpus containing only translated
- * pages. `X-Thally-Approx-Tokens` estimates the body size (~4 chars/token)
- * so an agent can decide whether to fetch it whole.
+ * pages. The response is pulled one page at a time, so it deliberately omits
+ * a whole-body token estimate: computing that header would buffer the corpus
+ * or fetch/parse it twice before sending the first byte.
  */
 export async function GET(request: NextRequest) {
   // Under the assets ContentSource this route must render per request — the
@@ -100,8 +100,6 @@ export async function GET(request: NextRequest) {
   for (const entry of listable) if (!seenPages.has(entry.id)) pageOrder.push(entry.id)
   for (const node of apiNodes) if (!seenOperations.has(node)) operationOrder.push(node)
 
-  const documents = await Promise.all(pageOrder.map((id) => loadContentDocument(id, engineLocale)))
-
   const lines: Array<string> = []
   lines.push(`# ${effectiveSite.name} — Complete Documentation`)
   lines.push('')
@@ -120,43 +118,64 @@ export async function GET(request: NextRequest) {
   lines.push('---')
   lines.push('')
 
-  pageOrder.forEach((id, index) => {
-    const entry = listableById.get(id)
-    const document = documents[index]
-    if (!entry || !document) return
-    lines.push(`# ${entry.title}`)
-    lines.push('')
-    if (entry.description) {
-      lines.push(`> ${entry.description}`)
-      lines.push('')
+  // Join the same line sequence as the original buffered response, including
+  // its final newline. Only metadata/order remain corpus-wide; each canonical
+  // document graph and encoded chunk can be released before the next page.
+  async function* chunks(): AsyncGenerator<string> {
+    yield lines.join('\n')
+    for (const id of pageOrder) {
+      const entry = listableById.get(id)
+      if (!entry) continue
+      const document = await loadContentDocument(id, engineLocale)
+      if (!document) continue
+      const page = [`# ${entry.title}`, '']
+      if (entry.description) page.push(`> ${entry.description}`, '')
+      page.push(`URL: ${baseUrl}${entry.href}`, '', document.content.markdown, '', '---', '')
+      yield `\n${page.join('\n')}`
     }
-    lines.push(`URL: ${baseUrl}${entry.href}`)
-    lines.push('')
-    lines.push(document.content.markdown)
-    lines.push('')
-    lines.push('---')
-    lines.push('')
-  })
-
-  if (operationOrder.length > 0) {
-    lines.push('# API reference')
-    lines.push('')
-    lines.push(`Full schemas: MCP \`get_api_operation\` at ${baseUrl}/api/mcp, or the human reference pages below.`)
-    lines.push('')
-    for (const node of operationOrder) {
-      lines.push(apiOperationMarkdown(describeApiOperation(node, baseUrl)))
-      lines.push('')
+    if (operationOrder.length) {
+      yield `\n${['# API reference', '', `Full schemas: MCP \`get_api_operation\` at ${baseUrl}/api/mcp, or the human reference pages below.`, ''].join('\n')}`
+      for (const node of operationOrder) yield `\n${apiOperationMarkdown(describeApiOperation(node, baseUrl))}\n`
     }
   }
 
-  const body = lines.join('\n')
+  const encoder = new TextEncoder()
+  const iterator = chunks()
+  let isStopped = false
+  let onAbort: (() => void) | undefined
+  const stop = () => {
+    if (isStopped) return
+    isStopped = true
+    if (onAbort) request.signal.removeEventListener('abort', onAbort)
+    // Cancellation must return immediately even if an authoritative read is
+    // already in flight. It may finish, but it cannot enqueue or start another.
+    void iterator.return(undefined).catch(() => undefined)
+  }
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      onAbort = () => { stop(); controller.close() }
+      if (request.signal.aborted) onAbort()
+      else request.signal.addEventListener('abort', onAbort, { once: true })
+    },
+    async pull(controller) {
+      if (isStopped) return
+      try {
+        const chunk = await iterator.next()
+        if (isStopped) return
+        if (chunk.done) { stop(); controller.close() }
+        else controller.enqueue(encoder.encode(chunk.value))
+      } catch (error) {
+        if (!isStopped) { stop(); controller.error(error) }
+      }
+    },
+    cancel: stop,
+  }, { highWaterMark: 0 })
 
   return new Response(body, {
     headers: {
       'Content-Type': 'text/plain; charset=utf-8',
       'Content-Language': locale,
       'Cache-Control': contentCacheControl('public, max-age=3600, s-maxage=3600'),
-      'X-Thally-Approx-Tokens': String(estimateTokens(body)),
     },
   })
 }

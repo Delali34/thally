@@ -14,6 +14,7 @@ import {
   importSourceRef,
   hydrateRemoteApiSpecs,
   migrateUrl,
+  runUrlMigration,
   parseGitHubRepositoryUrl,
   sourceRefOversizeReason,
   type MigrationBundle,
@@ -23,6 +24,7 @@ import {
   type MigrationWarning,
   type SourceRefImport,
   type SourceRefMapping,
+  type UrlMigrationRunOptions,
 } from '@thallylabs/migrate'
 
 import { pruneMissingSiteLinks } from '../customize.js'
@@ -48,6 +50,8 @@ export interface MigrateOptions {
   platform?: MigrationPlatform
   /** Optional host fetch boundary; used by Thally Cloud adapters and tests. */
   fetcher?: MigrationFetcher
+  /** Enable evidence-bearing browser capture, durable checkpoints and resume. */
+  urlMigration?: Omit<UrlMigrationRunOptions, 'sourceUrl'>
   /** Explicitly opt out of content/build gates; the report remains unverified. */
   skipValidation?: boolean
   /** Mintlify `sourceRef` repositories to import, from `--source-ref owner/repo=<path>`. */
@@ -143,6 +147,7 @@ async function discoverMigration(options: MigrateOptions): Promise<MigrationBund
         platform: options.platform,
         maxPages: options.maxPages,
       }
+      if (options.urlMigration) return runUrlMigration({ ...discovery, fetcher: options.fetcher, ...options.urlMigration }).then((run) => run.bundle)
       // Host callbacks cannot cross a worker boundary. Normal CLI discovery has
       // no callback, so conversion and per-page normalization can stay off-thread.
       return options.fetcher
@@ -296,6 +301,10 @@ export async function migrateDocs(options: MigrateOptions): Promise<MigrateResul
   }
   terminal.info('Validating imported documentation...')
   const validation = await validateMigration(projectDir, options.skipValidation, installationFailed)
+  if (bundle.urlMigrationValidation && bundle.urlMigrationValidation.status !== 'passed') {
+    validation.content = 'failed'
+    validation.messages.push(`Source evidence validation is ${bundle.urlMigrationValidation.status}; ${bundle.urlMigrationValidation.issues.length} issue(s) require review.`)
+  }
   // Quarantine holds withheld pages and the assets only they use; count them apart.
   const quarantinedPages = (bundle.quarantinedFiles ?? []).filter((file) => /\.mdx?$/i.test(file.path)).length
   const reportPath = projectPath(projectDir, 'migration-report.json')
@@ -312,6 +321,7 @@ export async function migrateDocs(options: MigrateOptions): Promise<MigrateResul
     droppedGatedPages: bundle.droppedGatedPages ?? 0,
     warnings: bundle.warnings,
     validation,
+    ...(bundle.urlMigrationValidation ? { sourceValidation: bundle.urlMigrationValidation } : {}),
   }, null, 2)}\n`)
   for (const message of validation.messages) terminal.warn(message)
   terminal.detail('Migration report', reportPath)

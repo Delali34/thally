@@ -17,6 +17,7 @@ import {
   runtimeSourceModifiedAt,
 } from '@/lib/runtime-sources'
 import { getContentSource } from '@/lib/content-source'
+import { createBoundedCache, estimateRetainedPayloadBytes } from '@/lib/bounded-cache'
 
 const CONTENT_ROOT = 'src/content'
 
@@ -45,7 +46,9 @@ function resolveContentFile(pageId: string, locale?: string): string | null {
 // cache key carries the origin ("embedded" vs the ContentSource kind) because
 // the sync and async paths can read DIFFERENT bytes for the same file path
 // under the assets source, and mtime equality alone must not conflate them.
-const documentCache = new Map<string, { modifiedAtMs: number; document: ContentDocument }>()
+interface CachedDocument { modifiedAtMs: number; document: ContentDocument }
+const documentCache = new Map<string, CachedDocument>()
+const assetDocuments = createBoundedCache<CachedDocument>({ maxEntries: 128, maxBytes: 4 * 1024 * 1024 })
 
 function parseDocument(
   origin: string,
@@ -55,7 +58,7 @@ function parseDocument(
   modifiedAtMs: number,
 ): ContentDocument {
   const cacheKey = `${origin}:${filePath}`
-  const cached = documentCache.get(cacheKey)
+  const cached = origin === 'assets' ? assetDocuments.get(cacheKey) : documentCache.get(cacheKey)
   if (cached?.modifiedAtMs === modifiedAtMs) return cached.document
 
   const { data, content } = parseFrontmatter(raw)
@@ -68,7 +71,9 @@ function parseDocument(
     content: parseMdxContent(content, 'agents'),
   }
 
-  documentCache.set(cacheKey, { modifiedAtMs, document })
+  const entry = { modifiedAtMs, document }
+  if (origin === 'assets') assetDocuments.set(cacheKey, entry, estimateRetainedPayloadBytes(entry, 4 * 1024 * 1024))
+  else documentCache.set(cacheKey, entry)
   return document
 }
 

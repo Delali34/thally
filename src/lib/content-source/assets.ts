@@ -5,7 +5,7 @@
  * A content publish uploads customer files under a reserved asset prefix and
  * a manifest listing them, reusing the previous release's Worker modules.
  * Because assets are immutable per deployment (a publish mints a new script),
- * everything here may be cached for the isolate's lifetime.
+ * successful values may be reused while bounded cache capacity permits.
  *
  * Layout (the contract the publish pipeline must produce):
  *   /_thally/content/manifest.json                 — ContentManifest (below)
@@ -20,6 +20,7 @@
  */
 
 import type { ContentSource, ContentSourceFile } from './types'
+import { createBoundedPromiseCache } from '@/lib/bounded-cache'
 import { getContentAssetFetcher, type ContentAssetFetcher } from './runtime'
 
 /** Reserved asset prefix for published content. Shared with the publish pipeline. */
@@ -68,9 +69,13 @@ export function createAssetsContentSource(
   fallback: ContentSource,
   resolveFetcher: () => ContentAssetFetcher | null = getContentAssetFetcher,
 ): ContentSource {
-  // Isolate-lifetime caches — safe because a publish deploys a new script.
+  // Release identity makes reuse correct; budgets keep a long-lived isolate
+  // from retaining every page that a crawler or reader has ever requested.
   let manifestPromise: Promise<ContentManifest | null> | null = null
-  const filePromises = new Map<string, Promise<ContentSourceFile | null>>()
+  const files = createBoundedPromiseCache<ContentSourceFile | null>({
+    maxEntries: 128, maxBytes: 4 * 1024 * 1024,
+    sizeOf: (file) => file ? file.content.length * 2 + 128 : 0,
+  })
   let warnedUnavailable = false
 
   function readFallback(projectPath: string): Promise<ContentSourceFile | null> {
@@ -135,41 +140,26 @@ export function createAssetsContentSource(
   }
 
   function readAsset(projectPath: string, manifest: ContentManifest): Promise<ContentSourceFile | null> {
-    let pending = filePromises.get(projectPath)
-    if (!pending) {
-      pending = (async () => {
-        const fetchAsset = resolveFetcher()
-        if (!fetchAsset) return readFallback(projectPath)
-        try {
-          const response = await fetchAsset(assetUrlPath(projectPath))
-          if (!response.ok) {
-            // The manifest promised this file; a miss means the asset set and
-            // manifest disagree. Surface it as missing rather than guessing.
-            console.warn(`[thally] published content asset missing: ${projectPath} (${response.status})`)
-            return null
-          }
-          return {
-            content: await response.text(),
-            modifiedAtMs: manifest.files[projectPath]?.modifiedAtMs ?? 0,
-          }
-        } catch (error) {
-          console.warn(
-            `[thally] published content asset read failed: ${projectPath} (${
-              error instanceof Error ? error.message : 'fetch failed'
-            })`,
-          )
+    const fetchAsset = resolveFetcher()
+    // A temporarily unavailable binding must not turn embedded fallback bytes
+    // into a successful asset-cache entry for the rest of the deployment.
+    if (!fetchAsset) return readFallback(projectPath)
+    return files.getOrLoad(projectPath, async () => {
+      try {
+        const response = await fetchAsset(assetUrlPath(projectPath))
+        if (!response.ok) {
+          console.warn(`[thally] published content asset missing: ${projectPath} (${response.status})`)
           return null
         }
-      })()
-      filePromises.set(projectPath, pending)
-      // Only successful reads may cache for the isolate lifetime — a
-      // transient fetch failure must not pin a page to "missing" until the
-      // isolate recycles.
-      void pending.then((file) => {
-        if (file === null) filePromises.delete(projectPath)
-      })
-    }
-    return pending
+        return {
+          content: await response.text(),
+          modifiedAtMs: manifest.files[projectPath]?.modifiedAtMs ?? 0,
+        }
+      } catch (error) {
+        console.warn(`[thally] published content asset read failed: ${projectPath} (${error instanceof Error ? error.message : 'fetch failed'})`)
+        return null
+      }
+    })
   }
 
   return {

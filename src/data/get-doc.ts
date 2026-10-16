@@ -17,6 +17,7 @@ import { getContentSource, type ContentSource } from '@/lib/content-source'
 import { docPathFromSlug } from '@/lib/i18n/doc-route'
 import { parseFrontmatter } from '@/lib/frontmatter'
 import { findDocSource } from '@/lib/i18n/translation-source'
+import { createBoundedPromiseCache, estimateRetainedPayloadBytes } from '@/lib/bounded-cache'
 import { MALFORMED_PAGE_ACCESS, mergePageAccess, parsePageAccess, type PageAccess } from '@/lib/reader-auth/access'
 
 interface DocFrontmatter {
@@ -63,6 +64,14 @@ function projectJoin(...segments: Array<string>): string {
 }
 
 const dynamicDocCache = new Map<string, Promise<(DocEntry & { isFallback: boolean; isStale: boolean }) | null>>()
+// Component closures hide their rendered tree from an external estimator. Record
+// its approximate payload while that tree is visible, with weak ownership so
+// evicted documents and their metadata can be collected together.
+const renderedPayloadBytes = new WeakMap<object, number>()
+const assetDocCache = createBoundedPromiseCache<(DocEntry & { isFallback: boolean; isStale: boolean }) | null>({
+  maxEntries: 64, maxBytes: 8 * 1024 * 1024,
+  sizeOf: (doc) => doc ? renderedPayloadBytes.get(doc) ?? estimateRetainedPayloadBytes(doc) : 0,
+})
 
 /** Resolve a documentation route to its authored content and stable page identity. */
 export async function getDocFromParams(slugSegments?: Array<string>, locale?: string) {
@@ -74,6 +83,7 @@ export async function getDocFromParams(slugSegments?: Array<string>, locale?: st
   const slugKey = normalized.join('/')
 
   const cacheKey = locale ? `${locale}:${slugKey}` : slugKey
+  if (getContentSource().kind === 'assets') return assetDocCache.getOrLoad(cacheKey, () => loadDocFromSource(normalized, locale))
   let pending = dynamicDocCache.get(cacheKey)
   if (!pending) {
     pending = loadDocFromSource(normalized, locale)
@@ -116,15 +126,18 @@ async function loadDocFromSource(
   const compiled = await compileDocEntry(source, candidate.filePath, slugSegments, candidate.isFallback, candidate.isStale, locale, candidate.sourcePath)
   const files = candidate.sourcePath && candidate.sourcePath !== candidate.filePath ? [candidate.filePath, candidate.sourcePath] : [candidate.filePath]
   const document = compiled ? { ...compiled, access: await resolvedFileAccess(source, files) } : null
+  if (document && compiled) renderedPayloadBytes.set(document, renderedPayloadBytes.get(compiled) ?? estimateRetainedPayloadBytes(compiled))
   if (!document || !candidate.sourcePath || candidate.isFallback) return document
   const sourceFile = await source.read(candidate.sourcePath)
   if (!sourceFile) return null
   const sourcePolicy = parseFrontmatter(sourceFile.content).data
-  return {
+  const translated = {
     ...document,
     noindex: document.noindex || sourcePolicy.noindex === true,
     hidden: document.hidden || sourcePolicy.hidden === true,
   }
+  renderedPayloadBytes.set(translated, renderedPayloadBytes.get(document) ?? estimateRetainedPayloadBytes(document))
+  return translated
 }
 
 /**
@@ -232,7 +245,7 @@ async function compileDocEntry(
       }) ?? undefined
     : undefined
 
-  return {
+  const document: DocEntry & { isFallback: boolean; isStale: boolean } = {
     // The empty route resolves introduction.mdx; titles are display metadata,
     // not source identifiers used by navigation, feedback, and GitHub edit links.
     id: slugPath || 'introduction',
@@ -258,6 +271,8 @@ async function compileDocEntry(
     isFallback,
     isStale,
   }
+  renderedPayloadBytes.set(document, sourceFile.content.length * 2 + estimateRetainedPayloadBytes({ content, frontmatter, components, document }, 8 * 1024 * 1024))
+  return document
 }
 
 const snippetImportPattern = /^\s*import\s+\{([^}]+)\}\s+from\s+['"]([^'"]+)['"];?\s*$/gm

@@ -15,6 +15,7 @@ import { projectMintlifyIntegrations } from './analytics.js'
 import { parseMarkdownPage } from './mdx.js'
 import { addMintlifyDirectoryRedirects, buildNavigationFromPages, projectMintlifyNavigation } from './navigation.js'
 import { pageIdFromReference } from './path.js'
+import { migrationImageAttribute, migrationImageCandidates, migrationImageUrl, renderMigrationSrcset } from './url-images.js'
 import type {
   MigrationBundle,
   MigrationFetcher,
@@ -27,7 +28,7 @@ import type {
 
 const DEFAULT_MAX_PAGES = 1_000
 const DEFAULT_MAX_TOTAL_BYTES = 100_000_000
-const MAX_DISCOVERED_URLS = 5_000
+const MAX_DISCOVERED_URLS = 100_000
 const MAX_LOCAL_RESPONSE_BYTES = 2_000_000
 const MAX_SITEMAP_DOCUMENTS = 25
 const PORTABLE_MDX_COMPONENTS = new Set([
@@ -40,6 +41,7 @@ const PORTABLE_MDX_COMPONENTS = new Set([
   'RequestExample', 'ResponseExample', 'ResponseField', 'Step', 'Steps',
   'Tab', 'Tabs', 'Terminal', 'TerminalInput', 'TerminalOutput', 'Tile', 'TileGroup',
   'Tip', 'Tooltip', 'Tree', 'Update', 'Video', 'View', 'Visibility', 'Warning', 'YouTube',
+  'picture', 'source',
 ])
 const LOCALE_CODES = new Set([
   'ar', 'cs', 'da', 'de', 'el', 'es', 'fi', 'fr', 'he', 'hi', 'hu', 'id',
@@ -63,6 +65,7 @@ interface RemoteMarkdownAttribute {
 
 interface RemoteMarkdownNode {
   type: string
+  name?: string
   alt?: string | null
   attributes?: Array<RemoteMarkdownAttribute>
   identifier?: string
@@ -562,6 +565,17 @@ function sanitizeMarkdownUrls(value: string): string | null {
           hasUnsafeMdxSyntax = true
           return
         }
+        if (node.name === 'source' || node.name === 'picture') {
+          const allowed = node.name === 'picture' ? [] : ['src', 'srcSet', 'srcset', 'sizes', 'media', 'type', 'width', 'height', 'id']
+          if (!allowed.includes(attribute.name) || typeof attribute.value !== 'string') {
+            hasUnsafeMdxSyntax = true
+            return
+          }
+          try {
+            if (/^srcset$/i.test(attribute.name)) migrationImageCandidates(decodeHtmlAttribute(attribute.value), new URL('https://migration.invalid'))
+            if (attribute.name === 'src') migrationImageUrl(decodeHtmlAttribute(attribute.value), new URL('https://migration.invalid'))
+          } catch { hasUnsafeMdxSyntax = true; return }
+        }
       }
     }
     for (const child of node.children ?? []) validateMdxSyntax(child)
@@ -671,7 +685,8 @@ function transformMarkdownProse(body: string, transform: (value: string) => stri
   return output.join('\n')
 }
 
-function sanitizeRemoteMarkdown(body: string): string | null {
+/** Normalize inert public Markdown; return null when execution cannot be excluded. */
+export function sanitizeRemoteMarkdown(body: string): string | null {
   let fenceCharacter = ''
   let fenceLength = 0
   const portableBody = transformMarkdownProse(body, portableHtmlToMarkdown)
@@ -882,7 +897,8 @@ function extractEmbeddedOpenApi(content: string): {
   }
 }
 
-function markdownPage(document: MigrationFetchResponse, id: string, platform: MigrationPlatform, warn?: (message: string) => void): {
+/** Convert an already sanitized Markdown response through the shared representation. */
+export function markdownPage(document: MigrationFetchResponse, id: string, platform: MigrationPlatform, warn?: (message: string) => void): {
   page: MigrationPage | null
   openApiFragment?: EmbeddedOpenApiFragment
 } {
@@ -985,24 +1001,43 @@ function mergeEmbeddedOpenApi(fragments: Array<EmbeddedOpenApiFragment>): Uint8A
   return new TextEncoder().encode(stringifyYaml(combined))
 }
 
-function htmlPage(
+/** Project rendered article HTML into inert content using shared conversion rules. */
+export function htmlPage(
   document: MigrationFetchResponse,
   id: string,
+  options: { preserveAnchors?: boolean; preserveResponsiveImages?: boolean; omitDocumentHeading?: boolean } = {},
 ): { page: MigrationPage | null; links: Array<string> } {
   const $ = load(document.body)
   const links = $('nav a[href], main a[href], article a[href], [role="main"] a[href]')
     .map((_index, element) => $(element).attr('href') ?? '')
     .get()
     .filter(Boolean)
-  const title = $('main h1, article h1, h1').first().text().trim()
+  const scopedTitle = options.omitDocumentHeading
+    ? $('main article, article, main, [role="main"]').first().find('h1').first().text().trim()
+    : ''
+  const title = scopedTitle || $('main h1, article h1, h1').first().text().trim()
     || $('meta[property="og:title"]').attr('content')?.trim()
     || $('title').text().split('|')[0].trim()
   const description = $('meta[name="description"]').attr('content')?.trim()
     || $('meta[property="og:description"]').attr('content')?.trim()
   const content = $('main article, article, main, [role="main"]').first()
   const root = content.length ? content : $('body')
-  root.find('script,style,noscript,nav,header,footer,aside,form,button,svg,iframe,object,embed,link,meta').remove()
+  let documentHeadingAnchor = ''
+  const excludedElements = options.omitDocumentHeading
+    ? 'script,style,noscript,nav,footer,aside,form,button,svg,iframe,object,embed,link,meta'
+    : 'script,style,noscript,nav,header,footer,aside,form,button,svg,iframe,object,embed,link,meta'
+  root.find(excludedElements).remove()
   root.find('.theme-doc-version-badge,.theme-doc-breadcrumbs,.theme-doc-toc-mobile,.table-of-contents,.hash-link').remove()
+  if (options.omitDocumentHeading) {
+    const heading = root.find('h1').first()
+    if (heading.length && heading.text().trim() === title) {
+      // Thally renders this title from frontmatter. Retain its source anchor at
+      // the same boundary without generating a second article-level heading.
+      const anchorId = heading.attr('id')
+      if (anchorId) documentHeadingAnchor = `<a id="${migrationImageAttribute(anchorId)}" />\n\n`
+      heading.remove()
+    }
+  }
   root.find('a[href]').each((_index, element) => {
     const href = $(element).attr('href')
     if (!href) return
@@ -1033,6 +1068,43 @@ function htmlPage(
   })
   const turndown = new TurndownService({ codeBlockStyle: 'fenced', emDelimiter: '_', headingStyle: 'atx' })
   turndown.remove(['script', 'style', 'noscript'])
+  const anchor = (element: HTMLElement): string => {
+    const value = element.getAttribute('id')
+    return options.preserveAnchors && value
+      ? `<a id="${value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/\{/g, '&#123;')}" />\n\n`
+      : ''
+  }
+  if (options.preserveAnchors) turndown.addRule('migration-source-anchor', {
+    filter: (node) => (node as HTMLElement).hasAttribute('id') && node.nodeName !== 'PRE',
+    replacement: (content, node) => {
+      const element = node as HTMLElement
+      const heading = element.nodeName.match(/^H([1-6])$/)
+      return `\n\n${anchor(element)}${heading ? `${'#'.repeat(Number(heading[1]))} ` : ''}${content}\n\n`
+    },
+  })
+  if (options.preserveResponsiveImages) {
+    const image = (element: HTMLElement): string => {
+      const tag = element.nodeName.toLowerCase()
+      const attributes: Array<string> = []
+      for (const name of ['src', 'srcset', 'sizes', 'alt', 'title', 'media', 'type', 'width', 'height', 'id']) {
+        let value = element.getAttribute(name)
+        if (value === null) continue
+        if (name === 'src') value = migrationImageUrl(value, document.finalUrl)
+        if (name === 'srcset') value = renderMigrationSrcset(migrationImageCandidates(value, document.finalUrl))
+        const prop = name === 'srcset' ? 'srcSet' : name
+        attributes.push(`${prop}="${migrationImageAttribute(value)}"`)
+      }
+      return `<${tag}${attributes.length ? ` ${attributes.join(' ')}` : ''} />`
+    }
+    turndown.addRule('migration-responsive-image', {
+      filter: (node) => ['IMG', 'SOURCE'].includes(node.nodeName),
+      replacement: (_content, node) => image(node as HTMLElement),
+    })
+    turndown.addRule('migration-responsive-picture', {
+      filter: 'picture',
+      replacement: (content) => `\n\n<picture>\n${content.trim()}\n</picture>\n\n`,
+    })
+  }
   turndown.addRule('docusaurus-admonition', {
     filter: (node) => node.nodeName === 'DIV'
       && (node as HTMLElement).classList.contains('theme-admonition'),
@@ -1052,7 +1124,7 @@ function htmlPage(
       const titleText = title.text().trim()
       title.remove()
       const markdown = turndown.turndown(clone.html() ?? '').trim()
-      return `\n\n<${tag}>\n${titleText ? `**${titleText}**\n\n` : ''}${markdown}\n</${tag}>\n\n`
+      return `\n\n${anchor(element)}<${tag}>\n${titleText ? `**${escapeMarkdownText(titleText)}**\n\n` : ''}${markdown}\n</${tag}>\n\n`
     },
   })
   turndown.addRule('docusaurus-tabs', {
@@ -1064,13 +1136,17 @@ function htmlPage(
       const container = fragment('.tabs-container').first()
       const labels = container.children('ul.tabs').children('li').toArray()
         .map((item) => fragment(item).text().trim() || 'Tab')
-      const panels = container.children('div[role="tabpanel"]').toArray()
+      const panels = container.find('[role="tabpanel"]').toArray()
+        .filter((panel) => fragment(panel).closest('.tabs-container')[0] === container[0])
       if (panels.length === 0) return _content
       const tabs = panels.map((panel, index) => {
-        const title = (labels[index] ?? `Tab ${index + 1}`).replace(/"/g, '&quot;')
-        return `<Tab title="${title}">\n${turndown.turndown(fragment(panel).html() ?? '').trim()}\n</Tab>`
+        const panelId = fragment(panel).attr('id')
+        const tab = panelId ? container.find('[role="tab"]').toArray().find((item) => fragment(item).attr('aria-controls') === panelId) : undefined
+        const title = migrationImageAttribute((tab ? fragment(tab).text().trim() : labels[index]) || `Tab ${index + 1}`)
+        const panelAnchor = options.preserveAnchors && panelId ? `<a id="${migrationImageAttribute(panelId)}" />\n\n` : ''
+        return `<Tab title="${title}">\n${panelAnchor}${turndown.turndown(fragment(panel).html() ?? '').trim()}\n</Tab>`
       })
-      return `\n\n<Tabs>\n${tabs.join('\n\n')}\n</Tabs>\n\n`
+      return `\n\n${anchor(element)}<Tabs>\n${tabs.join('\n\n')}\n</Tabs>\n\n`
     },
   })
   turndown.addRule('gfm-table', {
@@ -1101,12 +1177,12 @@ function htmlPage(
       const language = fragment('code').attr('class')?.match(/(?:language-|lang-)([A-Za-z0-9_+-]+)/)?.[1] ?? ''
       const longestFence = Math.max(0, ...[...code.matchAll(/`+/g)].map((match) => match[0].length))
       const fence = '`'.repeat(Math.max(3, longestFence + 1))
-      return `\n\n${fence}${language}\n${code}\n${fence}\n\n`
+      return `\n\n${anchor(element)}${fence}${language}\n${code}\n${fence}\n\n`
     },
   })
   const escape = turndown.escape.bind(turndown)
-  turndown.escape = (text: string) => escape(text).replace(/[<{]/g, (match) => `\\${match}`)
-  const body = turndown.turndown(root.html() ?? '').trim()
+  turndown.escape = (text: string) => escape(text).replace(/[<{}]/g, (match) => `\\${match}`)
+  const body = `${documentHeadingAnchor}${turndown.turndown(root.html() ?? '').trim()}`
   // Docusaurus can intentionally publish title-only reference/partial pages.
   // Keep those real article routes while still rejecting empty search/app
   // shells that happen to expose a document title.
@@ -1499,7 +1575,7 @@ async function safeFetch(
 export async function migrateUrl(options: UrlMigrationOptions): Promise<MigrationBundle> {
   const source = validateMigrationUrl(options.sourceUrl)
   const fetcher = options.fetcher ?? defaultMigrationFetcher
-  const maxPages = Math.max(1, Math.min(options.maxPages ?? DEFAULT_MAX_PAGES, 1_000))
+  const maxPages = Math.max(1, Math.min(options.maxPages ?? DEFAULT_MAX_PAGES, 10_000))
   const concurrency = Math.max(1, Math.min(options.concurrency ?? 5, 10))
   const maxTotalBytes = Math.max(1_000_000, Math.min(options.maxTotalBytes ?? DEFAULT_MAX_TOTAL_BYTES, 500_000_000))
   const submittedScopePath = docsScopePath(source)
@@ -1702,6 +1778,12 @@ export async function migrateUrl(options: UrlMigrationOptions): Promise<Migratio
       if (!isInScope(document.finalUrl, source, scopePath)) {
         return { candidate, page: null, links: [] as Array<string>, failure: false }
       }
+      // A .md mirror can redirect to an index. Classify the final response,
+      // rather than trusting the requested extension or content negotiation.
+      if (/\/(?:llms(?:-full)?|robots)\.txt$|\/sitemap[^/]*\.xml$/i.test(document.finalUrl.pathname)
+        || /(?:xml|json)/i.test(document.contentType)) {
+        return { candidate, page: null, links: markdownLinks(document.body), base: document.finalUrl, failure: false }
+      }
       const isMarkdown = /(?:markdown|text\/plain)/i.test(document.contentType)
         || /\.mdx?$/i.test(document.finalUrl.pathname)
       if (!isMarkdown && !/\.mdx?$/i.test(candidate.pathname)) {
@@ -1709,6 +1791,7 @@ export async function migrateUrl(options: UrlMigrationOptions): Promise<Migratio
         markdownUrl.pathname = `${markdownUrl.pathname.replace(/\/$/, '')}.md`
         const markdownDocument = await safeFetch(fetcher, markdownUrl, 'text/markdown,text/plain')
         if (markdownDocument && isInScope(markdownDocument.finalUrl, source, scopePath)
+          && !/\/(?:llms(?:-full)?|robots)\.txt$|\/sitemap[^/]*\.xml$/i.test(markdownDocument.finalUrl.pathname)
           && /(?:markdown|text\/plain)/i.test(markdownDocument.contentType)) {
           document = markdownDocument
         }

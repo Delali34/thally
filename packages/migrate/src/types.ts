@@ -243,6 +243,8 @@ export interface MigrationBundle {
     }
   }
   warnings: Array<MigrationWarning>
+  /** Evidence checks are independent of whether generated site code builds. */
+  urlMigrationValidation?: import('./url-run-types.js').UrlMigrationValidation
   stats: {
     discovered: number
     imported: number
@@ -258,6 +260,8 @@ export interface MigrationFetchResponse {
   finalUrl: URL
   body: string
   contentType: string
+  /** Capture adapters should retain target errors even when provider calls succeed. */
+  status?: number
   headers?: Record<string, string | undefined>
 }
 

@@ -236,7 +236,9 @@ const brandCss = Object.entries(brandStyle)
 // OpenNext's production transform can add esbuild's `__name` calls to the
 // serialized next-themes bootstrap. The bootstrap runs before client bundles,
 // so provide the tiny helper first or one missing global prevents the entire
-// React tree from hydrating and disables every interactive control.
+// React tree from hydrating and disables every interactive control. This must
+// be a native inline script: Next Script beforeInteractive queues execution
+// until the client bootstrap, after next-themes has already run its script.
 const runtimeNameShim =
   "globalThis.__name ??= (target, value) => Object.defineProperty(target, 'name', { value, configurable: true });"
 
@@ -295,7 +297,7 @@ export default async function RootLayout({ children }: Readonly<{ children: Reac
       className={cn(fontSans.variable, fontMono.variable)}
     >
       <head>
-        <Script id="thally-runtime-name-shim" strategy="beforeInteractive" dangerouslySetInnerHTML={{ __html: runtimeNameShim }} />
+        <script id="thally-runtime-name-shim" dangerouslySetInnerHTML={{ __html: runtimeNameShim }} />
         <Script id="thally-document-locale" strategy="beforeInteractive" dangerouslySetInnerHTML={{ __html: documentLocaleScript(i18n.locales, defaultLang) }} />
         {!appearance.showToggle && (
           <Script id="thally-locked-appearance" strategy="beforeInteractive" dangerouslySetInnerHTML={{ __html: lockedAppearanceScript(appearance.default) }} />

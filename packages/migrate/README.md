@@ -4,6 +4,56 @@ The shared migration engine used by the Thally CLI, MCP server, and Thally
 Cloud. It imports documentation repositories and public documentation URLs
 into one canonical bundle before any caller writes files.
 
+`runUrlMigration` adds an evidence-bearing, resumable URL path. It accepts a
+provider-neutral `captureProvider` (rendered HTML, read-only alternative states,
+ordered navigation and binary assets), or uses ordinary local fetching. Hosted
+callers must inject their own network-safe text/capture and binary boundaries.
+No browser, model, credentials, sandbox or publishing provider is bundled here.
+
+Server applications should import `@thallylabs/migrate/svg-policy` for the passive
+SVG validator, or `@thallylabs/migrate/url-migration` for the URL runner, renderer
+and their types. These independent entries avoid tracing repository cloning and
+filesystem discovery into application routes. The root entry remains compatible.
+
+The returned `checkpoint` is JSON-safe. `onRecord` lets a host persist a completed
+page before acknowledging it; `onCheckpoint` emits bounded deltas, including
+pending discoveries and checkpoint identity fields. Merge delta records by URL,
+then pass the reconstructed checkpoint back to resume. Converted page and asset
+hashes are checked before reuse, and `reconcile` verifies externally stored
+artifacts. Capture adapters should persist raw source/state evidence before
+returning an `artifactRef`. `maxCaptures` bounds a continuation; `signal` cancels
+capture and returns committed progress. Failed pages retry on resume by default.
+
+Page limits support 1–10,000 pages (default 1,000). This interface limit does not
+establish that an arbitrary site can be imported completely. Every inventory
+entry has an explicit outcome; pending/failed pages, missing anchors, technical
+payload differences, unavailable assets and unsupported interactive components
+make validation partial. Raster/PDF assets require matching MIME and signatures;
+SVG must pass the exported `isPassiveSvg` policy: static drawing elements with
+only in-document references, no scripts, external resources, styles or animations.
+Rejected SVG and executable downloads are reported for review.
+Responsive `picture`/`source`/`img` choices retain their descriptors, media
+conditions, sizing and literal alt text. Every candidate is localized; shared
+asset URLs are fetched once and identical payloads count once toward the byte
+budget, including resumed journals. Complete static tab panels are preserved as
+alternatives; empty/lazy panels still require a capture provider.
+Observed locale metadata and URL prefixes are projected onto the runtime layout:
+primary-language files are unprefixed and secondary-language files retain their
+locale prefix. A single-language localized site uses that language as primary.
+Missing primary counterparts and projected path collisions require review; the
+engine does not invent translations. Fresh HTML captures also observe `html lang`; conflicting or unsupported
+language evidence requires review. Capture adapters can supply `locale` when
+no language is declared in HTML or identified by the scoped URL path.
+The `url-evidence-v2` converter rejects earlier journals: replay retained raw
+captures into a new journal rather than relabelling previously hashed pages.
+
+`stopReason` distinguishes a resumable `capture-limit` from hard `page-limit`
+or `byte-limit` outcomes. Hosts must not automatically retry a hard limit as an
+unfinished capture slice. Discovery indexes drain independently of article caps.
+Source validation remains independent of generated-site build/browser checks.
+The CLI's programmatic `migrateDocs({ urlMigration: { ... } })` path retains
+those source validation results in its migration report.
+
 Repository migration includes dedicated Mintlify and Docusaurus adapters.
 Mintlify repositories are located inside monorepos automatically. Their
 `docs.json`/`mint.json` page and group trees are projected without flattening

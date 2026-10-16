@@ -16,7 +16,7 @@ const migrationSourceShape = {
   branch: z.string().optional().describe('Git branch (default: auto-detect)'),
   docsDir: z.string().optional().describe('Docs subdirectory in repo (default: auto-detect)'),
   apiKey: z.string().optional().describe('Anthropic API key for non-Markdown file conversion'),
-  maxPages: z.number().int().min(1).max(1000).optional().describe('Maximum public URL pages to import'),
+  maxPages: z.number().int().min(1).max(10000).optional().describe('Maximum public URL pages to import (up to 10000)'),
   platform: z.enum(['mintlify', 'docusaurus']).optional().describe('Source platform (default: auto-detect)'),
 }
 
