@@ -43,7 +43,11 @@ function hash(value: string | Uint8Array): string {
 }
 
 function pageHash(page: MigrationPage): string {
-  return hash(JSON.stringify(page))
+  // JSONB and other durable stores reorder object keys. Identity binds field
+  // values recursively, while ordered arrays (code/navigation) keep their order.
+  const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(canonical)
+    : value !== null && typeof value === 'object' ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, field]) => [key, canonical(field)])) : value
+  return hash(JSON.stringify(canonical(page)))
 }
 
 function inScope(url: URL, source: URL, scope: string): boolean {
@@ -100,7 +104,7 @@ function linksOf(document: MigrationFetchResponse): Array<string> {
   if (/html/i.test(document.contentType)) {
     const $ = load(document.body)
     const root = $('main article,article,main,[role="main"]').first()
-    root.find('nav,header,footer,aside').remove()
+    root.find('nav,footer,aside').remove()
     return [...root.find('a[href]').toArray(), ...$('link[rel="sitemap"][href],link[rel="alternate"][href]').toArray()]
       .map((node) => $(node).attr('href')!).filter(Boolean)
   }
@@ -118,7 +122,7 @@ function htmlEvidence(document: MigrationFetchResponse): Pick<MigrationEvidence,
   const $ = load(document.body)
   const root = $('main article,article,main,[role="main"]').first()
   const article = root.length ? root : $('body')
-  article.find('nav,header,footer,aside,form,script,style').remove()
+  article.find('nav,footer,aside,form,script,style').remove()
   return {
     anchors: article.find('[id]').toArray().map((node) => $(node).attr('id')!).filter(Boolean),
     code: article.find('pre').toArray().map((node) => {
@@ -485,7 +489,7 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
       if (/html/i.test(document.contentType)) {
         const $ = load(document.body)
         const root = $('main article,article,main,[role="main"]').first()
-        root.find('nav,header,footer,aside,.theme-doc-breadcrumbs,.theme-doc-toc-mobile,.table-of-contents,.hash-link').remove()
+        root.find('nav,footer,aside,.theme-doc-breadcrumbs,.theme-doc-toc-mobile,.table-of-contents,.hash-link').remove()
         root.find('button svg,a.hash-link svg,[aria-hidden="true"] svg,svg[aria-hidden="true"],svg[data-lucide],svg[data-icon]').remove()
         if (root.find('h1').length > 1) record.issues.push({ code: 'unsupported-component', source: record.url, message: 'The article contains multiple level-one headings; review their hierarchy.' })
         const unsupported = [...new Set(root.find('iframe,object,embed,canvas,svg,form,input,textarea,select,math,video,audio').toArray().map((node) => node.tagName))]

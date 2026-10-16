@@ -1023,7 +1023,10 @@ export function htmlPage(
   const content = $('main article, article, main, [role="main"]').first()
   const root = content.length ? content : $('body')
   let documentHeadingAnchor = ''
-  root.find('script,style,noscript,nav,header,footer,aside,form,button,svg,iframe,object,embed,link,meta').remove()
+  const excludedElements = options.omitDocumentHeading
+    ? 'script,style,noscript,nav,footer,aside,form,button,svg,iframe,object,embed,link,meta'
+    : 'script,style,noscript,nav,header,footer,aside,form,button,svg,iframe,object,embed,link,meta'
+  root.find(excludedElements).remove()
   root.find('.theme-doc-version-badge,.theme-doc-breadcrumbs,.theme-doc-toc-mobile,.table-of-contents,.hash-link').remove()
   if (options.omitDocumentHeading) {
     const heading = root.find('h1').first()

@@ -210,7 +210,7 @@ describe('evidence URL runner', () => {
   })
 
   it('renders the document title once and keeps its source heading anchor', async () => {
-    const source = response('/guide', '<header><h1>Site brand</h1></header><article><h1 id="start-here">Start here</h1><p>The title is rendered by the destination document header.</p><h2 id="next">Next</h2><a href="#start-here">Top</a></article>')
+    const source = response('/guide', '<header><h1>Site brand</h1></header><article><header><h1 id="start-here">Start here</h1><p>The title is rendered by the destination document header.</p></header><h2 id="next">Next</h2><a href="#start-here">Top</a></article>')
     const run = await runUrlMigration({ sourceUrl: 'https://docs.test/guide', captureProvider: provider({ '/guide': source }) })
     expect(run.validation.issues).toEqual([])
     expect(run.bundle.pages[0].title).toBe('Start here')
@@ -218,10 +218,21 @@ describe('evidence URL runner', () => {
     expect(run.bundle.pages[0].body).not.toMatch(/^# /m)
     expect(run.bundle.pages[0].body).toContain('<a id="start-here" />')
     expect(run.bundle.pages[0].body).toContain('## Next')
+    expect(run.bundle.pages[0].body).toContain('The title is rendered by the destination document header.')
     const multiple = { ...source, body: source.body.replace('</article>', '<h1>Another top-level heading</h1></article>') }
     const partial = await runUrlMigration({ sourceUrl: 'https://docs.test/guide', captureProvider: provider({ '/guide': multiple }) })
     expect(partial.validation.status).toBe('partial')
     expect(partial.bundle.pages[0].body).toContain('# Another top-level heading')
+  })
+
+  it('reconciles JSONB-reordered checkpoint keys without recapturing committed pages', async () => {
+    const run = await runUrlMigration({ sourceUrl: 'https://docs.test/one', captureProvider: provider({ '/one': response('/one', article('One')) }) })
+    const reorder = (value: unknown): unknown => Array.isArray(value) ? value.map(reorder)
+      : value !== null && typeof value === 'object' ? Object.fromEntries(Object.entries(value).reverse().map(([key, field]) => [key, reorder(field)])) : value
+    const checkpoint = reorder(JSON.parse(JSON.stringify(run.checkpoint))) as typeof run.checkpoint
+    const resumed = await runUrlMigration({ sourceUrl: 'https://docs.test/one', checkpoint, captureProvider: { capture: async () => { throw new Error('Committed page must not be recaptured') } } })
+    expect(resumed.validation.status).toBe('passed')
+    expect(resumed.bundle.pages).toEqual(run.bundle.pages)
   })
 
   it('converts and validates a full 10000-page inventory beyond the former cap', async () => {
