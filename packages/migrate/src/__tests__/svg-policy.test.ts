@@ -32,6 +32,8 @@ describe("isPassiveSvg", () => {
     ["style element", "<style>@import url(https://evil.example/a.css)</style>"],
     ["inline style attribute", '<path style="fill:url(https://evil.example/a)"/>'],
     ["remote paint", '<path fill="url(https://evil.example/#a)"/>'],
+    ["CSS EOF-closes remote paint URL", '<path fill="url(https://evil.example/#a"/>'],
+    ["CSS EOF-closes transitive filter URL", '<use href="#a"/><defs><path id="a" filter="url(https://evil.example/filter.svg#f"/></defs>'],
     ["CSS escaped URL function", '<path fill="u\\72l(https://evil.example/#a)"/>'],
     ["entity alias to remote use", '<use href="#local"/><defs><use id="local" href="&#104;ttps://evil.example/s.svg#a"/></defs>'],
     ["transitive image", '<use href="#a"/><defs><g id="a"><use href="#b"/></g><g id="b"><image href="https://evil.example/x.png"/></g></defs>'],

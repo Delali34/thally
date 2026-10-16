@@ -81,7 +81,9 @@ function hasExternalReference(value: string): boolean {
   for (const match of compact.matchAll(/url\(([^)]*)\)/gu)) {
     if (!/^["']?#[a-z0-9_.:-]+["']?$/u.test(match[1])) return true;
   }
-  return false;
+  // CSS consumes an unterminated url() through EOF and browsers can still load
+  // it. A balanced-match loop alone therefore misses an external paint server.
+  return compact.replace(/url\(([^)]*)\)/gu, "").includes("url(");
 }
 
 /**
