@@ -317,12 +317,38 @@ function navigationConfig(navigation: Array<MigrationNavigationOccurrence>, reco
   return pages.length ? { tabs: [{ tab: 'Documentation', pages }] } : null
 }
 
+/** Match the runtime: primary files are unprefixed; translations require a primary slug. */
+function localeProjection(checkpoint: UrlMigrationCheckpoint) {
+  const pages = checkpoint.records.flatMap((record) => record.page ? [record.page] : [])
+  const canonicalLocale = (page: MigrationPage): string | undefined => {
+    try { return page.locale ? Intl.getCanonicalLocales(page.locale)[0] : undefined } catch { return undefined }
+  }
+  const locales = [...new Set(pages.map(canonicalLocale).filter((locale): locale is string => Boolean(locale)))]
+  // A single-language French site must not become an orphan translation of
+  // invented English content. Mixed/unprefixed sources retain English primary.
+  const defaultLocale = pages.some((page) => !page.locale) || locales.includes('en') ? 'en' : locales[0] ?? 'en'
+  const pageId = (page: MigrationPage): string => {
+    const locale = canonicalLocale(page)
+    return locale ? `${locale === defaultLocale ? '' : `${locale}/`}${page.navigationId}` : page.id
+  }
+  const route = (page: MigrationPage): string => {
+    const locale = canonicalLocale(page)
+    const prefix = locale && locale !== defaultLocale ? `/${locale}` : ''
+    return `${prefix}${page.navigationId === 'introduction' ? '/' : `/${page.navigationId}`}`
+  }
+  return { canonicalLocale, locales, defaultLocale, pageId, route }
+}
+
 /** Validate every selected outcome, source payload, internal destination and anchor. */
 export function validateUrlMigration(checkpoint: UrlMigrationCheckpoint, cancelled = false): UrlMigrationValidation {
   const issues: Array<UrlMigrationIssue> = []
   const counts: UrlMigrationValidation['counts'] = { pending: 0, imported: 0, excluded: 0, failed: 0, alias: 0 }
   const records = new Map(checkpoint.records.map((record) => [record.url, record]))
   const source = new URL(checkpoint.sourceUrl)
+  const projection = localeProjection(checkpoint)
+  const primaryIds = new Set(checkpoint.records.flatMap((record) => record.page
+    && (!record.page.locale || projection.canonicalLocale(record.page) === projection.defaultLocale) ? [record.page.navigationId] : []))
+  const outputIds = new Set<string>()
   const resolve = (url: string): UrlMigrationRecord | undefined => {
     const record = records.get(canonical(url, checkpoint.sourceUrl) ?? '')
     return record?.outcome === 'alias' ? records.get(record.aliasOf ?? '') : record
@@ -332,6 +358,12 @@ export function validateUrlMigration(checkpoint: UrlMigrationCheckpoint, cancell
     issues.push(...record.issues ?? [])
     if (record.outcome === 'pending' || record.outcome === 'failed') issues.push({ code: 'missing-page', source: record.url, message: record.reason ?? `Inventory entry is ${record.outcome}.` })
     if (!record.page || !record.evidence) continue
+    const outputId = projection.pageId(record.page)
+    if (outputIds.has(outputId)) issues.push({ code: 'collision', source: record.url, message: `Multiple source pages map to runtime path ${outputId}.` })
+    outputIds.add(outputId)
+    if (record.page.locale && projection.canonicalLocale(record.page) !== projection.defaultLocale && !primaryIds.has(record.page.navigationId)) {
+      issues.push({ code: 'missing-page', source: record.url, message: `Secondary locale ${record.page.locale} requires a primary ${projection.defaultLocale} page at ${record.page.navigationId}; the runtime cannot serve an orphan translation.` })
+    }
     const actual = markdownCode(record.page.body)
     if (JSON.stringify(actual) !== JSON.stringify(record.evidence.code)) issues.push({ code: 'code-mismatch', source: record.url, message: 'Source code payloads differ from converted code payloads.' })
     for (const value of record.evidence.links) {
@@ -535,12 +567,13 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
       const firstSegment = page.id.split('/', 1)[0]
       const locale = document.locale ?? (LOCALES.has(firstSegment.toLowerCase()) ? firstSegment.toLowerCase() : undefined)
       if (locale) {
-        if (!/^[a-z]{2}(?:-[a-z0-9]{2,8}){0,2}$/i.test(locale)) throw new Error('Capture locale is not a portable language code.')
-        page.locale = locale
+        if (!/^[a-z]{2,3}(?:-[a-z0-9]{2,8}){0,2}$/i.test(locale)) throw new Error('Capture locale is not a portable language code.')
+        const canonicalLocale = Intl.getCanonicalLocales(locale)[0]
+        page.locale = canonicalLocale
         const segments = page.id.split('/')
-        const localeIndex = segments.findIndex((segment) => segment.toLowerCase() === locale.toLowerCase())
+        const localeIndex = segments.findIndex((segment) => segment.toLowerCase() === canonicalLocale.toLowerCase())
         page.navigationId = segments.filter((_segment, index) => index !== localeIndex).join('/') || 'introduction'
-        page.id = `${locale}/${page.navigationId}`
+        page.id = `${canonicalLocale}/${page.navigationId}`
         if (usedIds.has(page.id) && usedIds.get(page.id) !== record.url) throw new Error(`Destination collision for locale page ${page.id}.`)
         usedIds.delete(id); usedIds.set(page.id, record.url)
       }
@@ -590,12 +623,12 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
   }
   await flush()
   // Link maps are derived from every committed route, including redirect aliases.
+  const projection = localeProjection(checkpoint)
   const routeMap = new Map<string, string>()
   for (const record of checkpoint.records) {
     const target = record.outcome === 'alias' ? records.get(record.aliasOf ?? '') : record
     if (target?.page) {
-      const localePrefix = target.page.locale && target.page.locale !== 'en' ? `/${target.page.locale}` : ''
-      const route = `${localePrefix}${target.page.navigationId === 'introduction' ? '/' : `/${target.page.navigationId}`}`
+      const route = projection.route(target.page)
       routeMap.set(record.url, route)
       if (target.evidence) routeMap.set(canonical(target.evidence.finalUrl, sourceUrl)!, route)
     }
@@ -615,7 +648,7 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
     }
   }
   labelPages(checkpoint.navigation)
-  const pages = checkpoint.records.flatMap((record) => record.page ? [{ ...record.page, ...(navigationLabels.has(record.url) ? { navTitle: navigationLabels.get(record.url) } : {}), body: rewriteMarkdownDestinations(record.page.body, (value) => {
+  const pages = checkpoint.records.flatMap((record) => record.page ? [{ ...record.page, id: projection.pageId(record.page), ...(record.page.locale ? { locale: projection.canonicalLocale(record.page) } : {}), ...(navigationLabels.has(record.url) ? { navTitle: navigationLabels.get(record.url) } : {}), body: rewriteMarkdownDestinations(record.page.body, (value) => {
     let url: URL
     try { url = new URL(value, record.evidence!.finalUrl) } catch { return value }
     const route = routeMap.get(canonical(url.toString(), sourceUrl)!)
@@ -632,8 +665,10 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
     urlMigrationValidation: validation,
     stats: { discovered: records.size, imported: pages.length, skipped: records.size - pages.length },
   }
-  const locales = [...new Set(pages.map((page) => page.locale).filter((locale): locale is string => Boolean(locale)))]
-  if (locales.length) bundle.docsConfig.i18n = { defaultLocale: 'en', locales: [{ code: 'en', label: 'English' }, ...locales.filter((locale) => locale !== 'en').map((code) => ({ code, label: code }))] }
+  if (projection.locales.length) {
+    const locales = [...new Set([projection.defaultLocale, ...projection.locales])]
+    bundle.docsConfig.i18n = { defaultLocale: projection.defaultLocale, locales: locales.map((code) => ({ code, label: code === 'en' ? 'English' : code })) }
+  }
   const stopReason = options.signal?.aborted ? 'cancelled'
     : budgetExhausted ? 'byte-limit'
       : cursor < pending.length && cursor >= (options.maxCaptures ?? Infinity) ? 'capture-limit'

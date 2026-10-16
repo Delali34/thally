@@ -117,9 +117,9 @@ describe('evidence URL runner', () => {
       '/legacy': response('/fr/v2/next', article('Next', '<h2 id="example">Example</h2>')),
     }) })
     expect(run.validation.status).toBe('passed')
-    expect(run.bundle.pages.map((page) => page.id)).toEqual(['fr/v2/guide', 'fr/v2/next'])
+    expect(run.bundle.pages.map((page) => page.id)).toEqual(['v2/guide', 'v2/next'])
     expect(run.bundle.docsConfig.tabs[0].pages).toEqual([{ group: 'Guides', pages: ['v2/next', 'v2/guide'] }])
-    expect(run.bundle.pages[0].body).toContain('[Alias](/fr/v2/next#example)')
+    expect(run.bundle.pages[0].body).toContain('[Alias](/v2/next#example)')
     expect(run.bundle.pages[0].navTitle).toBe('Guide short')
     expect(run.checkpoint.records.find((record) => record.page)?.version).toBe('v2')
     expect(run.bundle.docsConfig.i18n?.locales.map((locale) => locale.code)).toContain('fr')
