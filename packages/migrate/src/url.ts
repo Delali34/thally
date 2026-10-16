@@ -27,7 +27,7 @@ import type {
 
 const DEFAULT_MAX_PAGES = 1_000
 const DEFAULT_MAX_TOTAL_BYTES = 100_000_000
-const MAX_DISCOVERED_URLS = 5_000
+const MAX_DISCOVERED_URLS = 100_000
 const MAX_LOCAL_RESPONSE_BYTES = 2_000_000
 const MAX_SITEMAP_DOCUMENTS = 25
 const PORTABLE_MDX_COMPONENTS = new Set([
@@ -671,7 +671,8 @@ function transformMarkdownProse(body: string, transform: (value: string) => stri
   return output.join('\n')
 }
 
-function sanitizeRemoteMarkdown(body: string): string | null {
+/** Normalize inert public Markdown; return null when execution cannot be excluded. */
+export function sanitizeRemoteMarkdown(body: string): string | null {
   let fenceCharacter = ''
   let fenceLength = 0
   const portableBody = transformMarkdownProse(body, portableHtmlToMarkdown)
@@ -882,7 +883,8 @@ function extractEmbeddedOpenApi(content: string): {
   }
 }
 
-function markdownPage(document: MigrationFetchResponse, id: string, platform: MigrationPlatform, warn?: (message: string) => void): {
+/** Convert an already sanitized Markdown response through the shared representation. */
+export function markdownPage(document: MigrationFetchResponse, id: string, platform: MigrationPlatform, warn?: (message: string) => void): {
   page: MigrationPage | null
   openApiFragment?: EmbeddedOpenApiFragment
 } {
@@ -985,9 +987,11 @@ function mergeEmbeddedOpenApi(fragments: Array<EmbeddedOpenApiFragment>): Uint8A
   return new TextEncoder().encode(stringifyYaml(combined))
 }
 
-function htmlPage(
+/** Project rendered article HTML into inert content using shared conversion rules. */
+export function htmlPage(
   document: MigrationFetchResponse,
   id: string,
+  options: { preserveAnchors?: boolean } = {},
 ): { page: MigrationPage | null; links: Array<string> } {
   const $ = load(document.body)
   const links = $('nav a[href], main a[href], article a[href], [role="main"] a[href]')
@@ -1033,6 +1037,20 @@ function htmlPage(
   })
   const turndown = new TurndownService({ codeBlockStyle: 'fenced', emDelimiter: '_', headingStyle: 'atx' })
   turndown.remove(['script', 'style', 'noscript'])
+  const anchor = (element: HTMLElement): string => {
+    const value = element.getAttribute('id')
+    return options.preserveAnchors && value
+      ? `<a id="${value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/\{/g, '&#123;')}" />\n\n`
+      : ''
+  }
+  if (options.preserveAnchors) turndown.addRule('migration-source-anchor', {
+    filter: (node) => (node as HTMLElement).hasAttribute('id') && node.nodeName !== 'PRE',
+    replacement: (content, node) => {
+      const element = node as HTMLElement
+      const heading = element.nodeName.match(/^H([1-6])$/)
+      return `\n\n${anchor(element)}${heading ? `${'#'.repeat(Number(heading[1]))} ` : ''}${content}\n\n`
+    },
+  })
   turndown.addRule('docusaurus-admonition', {
     filter: (node) => node.nodeName === 'DIV'
       && (node as HTMLElement).classList.contains('theme-admonition'),
@@ -1101,7 +1119,7 @@ function htmlPage(
       const language = fragment('code').attr('class')?.match(/(?:language-|lang-)([A-Za-z0-9_+-]+)/)?.[1] ?? ''
       const longestFence = Math.max(0, ...[...code.matchAll(/`+/g)].map((match) => match[0].length))
       const fence = '`'.repeat(Math.max(3, longestFence + 1))
-      return `\n\n${fence}${language}\n${code}\n${fence}\n\n`
+      return `\n\n${anchor(element)}${fence}${language}\n${code}\n${fence}\n\n`
     },
   })
   const escape = turndown.escape.bind(turndown)
@@ -1499,7 +1517,7 @@ async function safeFetch(
 export async function migrateUrl(options: UrlMigrationOptions): Promise<MigrationBundle> {
   const source = validateMigrationUrl(options.sourceUrl)
   const fetcher = options.fetcher ?? defaultMigrationFetcher
-  const maxPages = Math.max(1, Math.min(options.maxPages ?? DEFAULT_MAX_PAGES, 1_000))
+  const maxPages = Math.max(1, Math.min(options.maxPages ?? DEFAULT_MAX_PAGES, 10_000))
   const concurrency = Math.max(1, Math.min(options.concurrency ?? 5, 10))
   const maxTotalBytes = Math.max(1_000_000, Math.min(options.maxTotalBytes ?? DEFAULT_MAX_TOTAL_BYTES, 500_000_000))
   const submittedScopePath = docsScopePath(source)
@@ -1702,6 +1720,12 @@ export async function migrateUrl(options: UrlMigrationOptions): Promise<Migratio
       if (!isInScope(document.finalUrl, source, scopePath)) {
         return { candidate, page: null, links: [] as Array<string>, failure: false }
       }
+      // A .md mirror can redirect to an index. Classify the final response,
+      // rather than trusting the requested extension or content negotiation.
+      if (/\/(?:llms(?:-full)?|robots)\.txt$|\/sitemap[^/]*\.xml$/i.test(document.finalUrl.pathname)
+        || /(?:xml|json)/i.test(document.contentType)) {
+        return { candidate, page: null, links: markdownLinks(document.body), base: document.finalUrl, failure: false }
+      }
       const isMarkdown = /(?:markdown|text\/plain)/i.test(document.contentType)
         || /\.mdx?$/i.test(document.finalUrl.pathname)
       if (!isMarkdown && !/\.mdx?$/i.test(candidate.pathname)) {
@@ -1709,6 +1733,7 @@ export async function migrateUrl(options: UrlMigrationOptions): Promise<Migratio
         markdownUrl.pathname = `${markdownUrl.pathname.replace(/\/$/, '')}.md`
         const markdownDocument = await safeFetch(fetcher, markdownUrl, 'text/markdown,text/plain')
         if (markdownDocument && isInScope(markdownDocument.finalUrl, source, scopePath)
+          && !/\/(?:llms(?:-full)?|robots)\.txt$|\/sitemap[^/]*\.xml$/i.test(markdownDocument.finalUrl.pathname)
           && /(?:markdown|text\/plain)/i.test(markdownDocument.contentType)) {
           document = markdownDocument
         }

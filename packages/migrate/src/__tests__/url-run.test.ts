@@ -1,0 +1,107 @@
+/** Evidence-bearing imports prove actual conversion, JSON recovery and inventory coverage. */
+import { describe, expect, it } from 'vitest'
+import { classifyMigrationResponse, runUrlMigration } from '../url-run.js'
+import type { MigrationCapture, MigrationCaptureProvider, UrlMigrationCheckpointDelta } from '../url-run-types.js'
+
+function response(path: string, body: string, contentType = 'text/html'): MigrationCapture {
+  return { finalUrl: new URL(path, 'https://docs.test'), body, contentType }
+}
+function provider(pages: Record<string, MigrationCapture>): MigrationCaptureProvider {
+  return { capture: async ({ url }) => {
+    const value = pages[url.pathname]
+    if (!value) throw new Error('404')
+    return value
+  } }
+}
+const article = (title: string, body = '') => `<html><body><main><article><h1>${title}</h1><p>Technical documentation for this controlled source page.</p>${body}</article></main></body></html>`
+
+describe('evidence URL runner', () => {
+  it('classifies redirected machine indexes before conversion', async () => {
+    expect(classifyMigrationResponse(response('/llms.txt', '# Index', 'text/plain'))).toBe('index')
+    const run = await runUrlMigration({ sourceUrl: 'https://docs.test/', captureProvider: provider({
+      '/': response('/llms.txt', '[Guide](/guide)', 'text/plain'),
+      '/guide': response('/guide', article('Guide')),
+    }) })
+    expect(run.bundle.pages.map((page) => page.title)).toEqual(['Guide'])
+    expect(run.checkpoint.records.find((record) => record.url === 'https://docs.test/')?.outcome).toBe('excluded')
+  })
+
+  it('preserves exact code, nested nav order, anchors, bytes and dynamic alternatives', async () => {
+    const png = Buffer.from('iVBORw0KGgo=', 'base64')
+    const code = '  const a = "<Tag>{data}</Tag>";\n\n'
+    const source = response('/guide', article('Guide', `<h2 id="custom-anchor">Example</h2><pre><code>${code.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</code></pre><img src="/logo.png"><a href="/second#target">Next</a>`))
+    source.navigation = [{ label: 'Start', children: [{ label: 'Second', url: 'https://docs.test/second' }, { label: 'Guide', url: 'https://docs.test/guide' }] }]
+    source.assets = [{ url: 'https://docs.test/logo.png', contentType: 'image/png', content: png }]
+    source.states = [{ id: 'python', label: 'Python', response: response('/guide', article('Guide', '<pre><code>print(1)\n</code></pre>')) }]
+    const run = await runUrlMigration({ sourceUrl: 'https://docs.test/guide', captureProvider: provider({
+      '/guide': source,
+      '/second': response('/second', article('Second', '<h2 id="target">Target</h2>')),
+    }) })
+    expect(run.validation.issues).toEqual([])
+    expect(run.validation.status).toBe('passed')
+    expect(run.bundle.assets[0].content).toEqual(png)
+    expect(run.bundle.pages[0].body).toContain(code)
+    expect(run.bundle.pages[0].body).toContain('[Next](/second#target)')
+    expect(run.bundle.pages[0].body).toContain('<a id="custom-anchor" />')
+    expect(run.bundle.docsConfig.tabs[0].pages).toEqual([{ group: 'Start', pages: ['second', 'guide'] }])
+    expect(run.checkpoint.records.find((record) => record.page)?.evidence?.code).toEqual([code, 'print(1)\n'])
+  })
+
+  it('resumes JSON checkpoints, requeues corrupt pages and emits bounded deltas', async () => {
+    const deltas: Array<UrlMigrationCheckpointDelta> = []
+    const pages = {
+      '/one': response('/one', article('One', '<a href="/two">Two</a>')),
+      '/two': response('/two', article('Two')),
+    }
+    const first = await runUrlMigration({ sourceUrl: 'https://docs.test/one', captureProvider: provider(pages), maxCaptures: 1, batchSize: 1, onCheckpoint: async (delta) => { deltas.push(JSON.parse(JSON.stringify(delta))) } })
+    expect(first.validation.status).toBe('partial')
+    expect(deltas[0].converterVersion).toBe('url-evidence-v1')
+    expect(deltas.flatMap((delta) => delta.records).some((record) => record.url.endsWith('/two'))).toBe(true)
+    const checkpoint = JSON.parse(JSON.stringify(first.checkpoint))
+    checkpoint.records.find((record: { page?: unknown }) => record.page).page.body = 'corrupted'
+    const captured: Array<string> = []
+    const second = await runUrlMigration({ sourceUrl: 'https://docs.test/one', checkpoint, captureProvider: {
+      capture: async (request) => { captured.push(request.url.pathname); return provider(pages).capture(request) },
+    } })
+    expect(captured).toContain('/one')
+    expect(second.bundle.pages).toHaveLength(2)
+    expect(second.validation.status).toBe('passed')
+  })
+
+  it('rejects executable MDX and exposes missing anchors and unsafe assets', async () => {
+    const run = await runUrlMigration({ sourceUrl: 'https://docs.test/safe', captureProvider: provider({
+      '/safe': response('/safe', article('Safe', '<a href="/unsafe">Unsafe</a><a href="/other#absent">Broken</a><img src="/x.svg">')),
+      '/unsafe': response('/unsafe', '# Unsafe\n\n{process.exit(1)}', 'text/markdown'),
+      '/other': response('/other', article('Other')),
+    }) })
+    expect(run.validation.status).toBe('partial')
+    expect(run.validation.issues.map((issue) => issue.code)).toContain('missing-anchor')
+    expect(run.validation.issues.map((issue) => issue.code)).toContain('asset-failed')
+    expect(run.bundle.pages.some((page) => page.id === 'unsafe')).toBe(false)
+  })
+
+  it('cancels without committing an unfinished capture', async () => {
+    const controller = new AbortController()
+    const run = await runUrlMigration({ sourceUrl: 'https://docs.test/a', signal: controller.signal, captureProvider: {
+      capture: async () => { controller.abort(); return response('/a', article('A')) },
+    } })
+    expect(run.validation.status).toBe('cancelled')
+    expect(run.bundle.pages).toHaveLength(0)
+    expect(run.checkpoint.records[0].outcome).toBe('pending')
+  })
+
+  it('converts and validates a full 10000-page inventory beyond the former cap', async () => {
+    const size = 10_000
+    const run = await runUrlMigration({ sourceUrl: 'https://docs.test/p0', maxPages: size, concurrency: 24, captureProvider: {
+      capture: async ({ url }) => {
+        if (url.pathname === '/sitemap.xml') return response('/sitemap.xml', `<urlset>${Array.from({ length: size }, (_, i) => `<url><loc>https://docs.test/p${i}</loc></url>`).join('')}</urlset>`, 'application/xml')
+        const match = url.pathname.match(/^\/p(\d+)$/)
+        if (!match) throw new Error('404')
+        return response(url.pathname, `# Page ${match[1]}\n\nTechnical payload ${match[1]}.\n\n\`\`\`ts\nconst number = ${match[1]}\n\`\`\``, 'text/markdown')
+      },
+    } })
+    expect(run.bundle.pages).toHaveLength(size)
+    expect(run.validation.status).toBe('passed')
+    expect(run.validation.counts.pending).toBe(0)
+  }, 120_000)
+})

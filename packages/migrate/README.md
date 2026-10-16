@@ -4,6 +4,31 @@ The shared migration engine used by the Thally CLI, MCP server, and Thally
 Cloud. It imports documentation repositories and public documentation URLs
 into one canonical bundle before any caller writes files.
 
+`runUrlMigration` adds an evidence-bearing, resumable URL path. It accepts a
+provider-neutral `captureProvider` (rendered HTML, read-only alternative states,
+ordered navigation and binary assets), or uses ordinary local fetching. Hosted
+callers must inject their own network-safe text/capture and binary boundaries.
+No browser, model, credentials, sandbox or publishing provider is bundled here.
+
+The returned `checkpoint` is JSON-safe. `onRecord` lets a host persist a completed
+page before acknowledging it; `onCheckpoint` emits bounded deltas, including
+pending discoveries and checkpoint identity fields. Merge delta records by URL,
+then pass the reconstructed checkpoint back to resume. Converted page and asset
+hashes are checked before reuse, and `reconcile` verifies externally stored
+artifacts. Capture adapters should persist raw source/state evidence before
+returning an `artifactRef`. `maxCaptures` bounds a continuation; `signal` cancels
+capture and returns committed progress. Failed pages retry on resume by default.
+
+Page limits support 1–10,000 pages (default 1,000). This interface limit does not
+establish that an arbitrary site can be imported completely. Every inventory
+entry has an explicit outcome; pending/failed pages, missing anchors, technical
+payload differences, unavailable assets and unsupported interactive components
+make validation partial. Raster/PDF assets require matching MIME and signatures;
+SVG and executable downloads require a separate serving policy and are reported.
+Source validation remains independent of generated-site build/browser checks.
+The CLI's programmatic `migrateDocs({ urlMigration: { ... } })` path retains
+those source validation results in its migration report.
+
 Repository migration includes dedicated Mintlify and Docusaurus adapters.
 Mintlify repositories are located inside monorepos automatically. Their
 `docs.json`/`mint.json` page and group trees are projected without flattening
