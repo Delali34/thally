@@ -27,6 +27,15 @@ make validation partial. Raster/PDF assets require matching MIME and signatures;
 SVG must pass the exported `isPassiveSvg` policy: static drawing elements with
 only in-document references, no scripts, external resources, styles or animations.
 Rejected SVG and executable downloads are reported for review.
+Responsive `picture`/`source`/`img` choices retain their descriptors, media
+conditions, sizing and literal alt text. Every candidate is localized; shared
+asset URLs are fetched once and identical payloads count once toward the byte
+budget, including resumed journals. Complete static tab panels are preserved as
+alternatives; empty/lazy panels still require a capture provider.
+
+`stopReason` distinguishes a resumable `capture-limit` from hard `page-limit`
+or `byte-limit` outcomes. Hosts must not automatically retry a hard limit as an
+unfinished capture slice. Discovery indexes drain independently of article caps.
 Source validation remains independent of generated-site build/browser checks.
 The CLI's programmatic `migrateDocs({ urlMigration: { ... } })` path retains
 those source validation results in its migration report.

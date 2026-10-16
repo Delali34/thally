@@ -7,10 +7,12 @@
 import { createHash } from 'node:crypto'
 import { load } from 'cheerio'
 import remarkParse from 'remark-parse'
+import remarkMdx from 'remark-mdx'
 import { unified } from 'unified'
 import { buildNavigationFromPages } from './navigation.js'
 import { pageIdFromReference } from './path.js'
 import { isPassiveSvg } from './svg-policy.js'
+import { migrationImageAttribute, migrationImageCandidates, renderMigrationSrcset } from './url-images.js'
 import { defaultMigrationFetcher, htmlPage, markdownPage, sanitizeRemoteMarkdown, validateMigrationUrl } from './url.js'
 import type { MigrationBundle, MigrationFetchResponse, MigrationNavigationGroup, MigrationPage } from './types.js'
 import type {
@@ -20,7 +22,7 @@ import type {
 } from './url-run-types.js'
 
 const CONVERTER_VERSION = 'url-evidence-v1'
-const parser = unified().use(remarkParse)
+const parser = unified().use(remarkParse).use(remarkMdx)
 const ACCEPT = 'text/markdown,text/html,application/xhtml+xml;q=0.9'
 const MAX_RESPONSE_BYTES = 8_000_000
 const MAX_ASSET_BYTES = 10_000_000
@@ -32,6 +34,7 @@ interface MarkdownNode {
   url?: string
   value?: string
   children?: Array<MarkdownNode>
+  attributes?: Array<{ type: string; name?: string; value?: string | { type: string; value: string }; position?: { start: { offset?: number }; end: { offset?: number } } }>
   position?: { start: { offset?: number }; end: { offset?: number } }
 }
 
@@ -161,16 +164,17 @@ function sourceNavigation(capture: MigrationCapture): Array<MigrationNavigationO
   const candidates = ['.theme-doc-sidebar-menu,[aria-label*="sidebar" i]', 'aside', '[role="navigation"],nav']
   const root = candidates.map((selector) => $(selector).filter((_index, node) => $(node).find('a[href]').length > 0 && $(node).closest('header').length === 0).first()).find((candidate) => candidate.length) ?? $('aside').first()
   if (!root.length) return []
-  const walk = (element: Parameters<typeof $>[0]): Array<MigrationNavigationOccurrence> => {
+  const walk = (element: Parameters<typeof $>[0], excluded?: unknown): Array<MigrationNavigationOccurrence> => {
     const result: Array<MigrationNavigationOccurrence> = []
     $(element).children().each((_index, node) => {
+      if (node === excluded) return
       const item = $(node)
       if (item.is('a[href]')) {
         result.push({ label: item.text().replace(/\s+/g, ' ').trim(), url: new URL(item.attr('href')!, capture.finalUrl).toString() })
       } else if (item.is('li,details') || item.attr('data-migration-group') !== undefined || item.children('h2,h3,h4,h5,h6').length > 0) {
         const direct = item.children('a[href]').first()
         const label = direct.text().trim() || item.children('summary,button,span,h2,h3,h4,h5,h6').first().text().trim()
-        const children = walk(node).filter((entry) => !direct.length || entry.url !== new URL(direct.attr('href')!, capture.finalUrl).toString())
+        const children = walk(node, direct[0])
         if (label) result.push({ label, ...(direct.length ? { url: new URL(direct.attr('href')!, capture.finalUrl).toString() } : {}), ...(children.length ? { children } : {}) })
         else result.push(...children)
       } else result.push(...walk(node))
@@ -190,7 +194,7 @@ function idForUrl(url: URL, scope: string): string | null {
 function convert(document: MigrationFetchResponse, id: string): MigrationPage | null {
   if (/html/i.test(document.contentType)) {
     const technical = htmlEvidence(document)
-    const page = htmlPage(document, id, { preserveAnchors: true }).page
+    const page = htmlPage(document, id, { preserveAnchors: true, preserveResponsiveImages: true }).page
     if (!page) return null
     // Restore exact payloads after the shared HTML converter. Replacements use
     // AST offsets, so code containing Markdown or JSX is never treated as prose.
@@ -224,8 +228,24 @@ function assetReferences(capture: MigrationCapture): Array<string> {
   const root = $('main article,article,main,[role="main"]').first()
   return [
     ...root.find('img[src],video[poster],a[download][href]').toArray().map((node) => $(node).attr('src') ?? $(node).attr('poster') ?? $(node).attr('href')!),
-    ...root.find('[srcset]').toArray().flatMap((node) => ($(node).attr('srcset') ?? '').split(',').map((part) => part.trim().split(/\s+/)[0])),
+    ...root.find('[srcset]').toArray().flatMap((node) => migrationImageCandidates($(node).attr('srcset') ?? '', capture.finalUrl).map((candidate) => candidate.url)),
   ].filter(Boolean)
+}
+
+function unresolvedStaticControls(body: string): boolean {
+  const $ = load(body)
+  const root = $('main article,article,main,[role="main"]').first()
+  const tabs = root.find('[role="tab"]').toArray()
+  for (const tab of tabs) {
+    const controls = $(tab).attr('aria-controls')
+    const panels = controls ? root.find('[id]').filter((_index, node) => $(node).attr('id') === controls) : root.find('[role="tabpanel"]').eq(tabs.indexOf(tab))
+    if (panels.length !== 1 || (!panels.text().trim() && !panels.find('pre,img,table,svg').length)
+      || panels.find('[aria-busy="true"],[role="progressbar"]').length) return true
+  }
+  return root.find('details:not([open])').toArray().some((node) => {
+    const clone = $(node).clone(); clone.children('summary').remove()
+    return !clone.text().trim() && !clone.find('pre,img,table,svg').length
+  })
 }
 
 async function defaultAssetFetcher(url: URL, signal?: AbortSignal): Promise<MigrationCapturedAsset> {
@@ -279,7 +299,10 @@ function navigationConfig(navigation: Array<MigrationNavigationOccurrence>, reco
     const target = record?.outcome === 'alias' ? records.get(record.aliasOf ?? '') : record
     const page = target?.page
     const children = project(node.children ?? [])
-    if (children.length) return [{ group: node.label || 'Documentation', pages: [...(page ? [page.navigationId] : []), ...children] }]
+    if (children.length) {
+      const contains = (entries: Array<string | MigrationNavigationGroup>): boolean => entries.some((entry) => typeof entry === 'string' ? entry === page?.navigationId : contains(entry.pages))
+      return [{ group: node.label || 'Documentation', pages: [...(page && !contains(children) ? [page.navigationId] : []), ...children] }]
+    }
     return page ? [page.navigationId] : []
   })
   const pages = project(navigation)
@@ -387,7 +410,13 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
   const usedIds = new Map([...records.values()].filter((record) => record.page).map((record) => [record.page!.id, record.url]))
   const finalUrls = new Map([...records.values()].filter((record) => record.evidence && record.page).map((record) => [canonical(record.evidence!.finalUrl, sourceUrl)!, record.url]))
   let imported = usedIds.size
-  let totalBytes = checkpoint.records.reduce((sum, record) => sum + (record.evidence?.byteLength ?? 0) + (record.assets ?? []).reduce((bytes, asset) => bytes + Buffer.byteLength(asset.base64, 'base64'), 0), 0)
+  const assetPayloads = new Map(checkpoint.records.flatMap((record) => (record.assets ?? []).map((asset) => [asset.sha256, asset] as const)))
+  const assetRequests = new Map<string, Promise<MigrationCapturedAsset>>()
+  for (const record of checkpoint.records) for (const asset of record.assets ?? []) {
+    if (!assetRequests.has(asset.url)) assetRequests.set(asset.url, Promise.resolve({ url: asset.url, contentType: asset.contentType, content: Buffer.from(asset.base64, 'base64') }))
+  }
+  let totalBytes = checkpoint.records.reduce((sum, record) => sum + (record.evidence?.byteLength ?? 0), 0)
+    + [...assetPayloads.values()].reduce((sum, asset) => sum + Buffer.byteLength(asset.base64, 'base64'), 0)
   let budgetExhausted = false
   let cursor = 0
   const flush = async (): Promise<void> => {
@@ -409,10 +438,15 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
       if (!inScope(document.finalUrl, source, scopePath) && !(role === 'index' && isDiscoveryIndex(document.finalUrl, source))) { record.outcome = 'excluded'; record.reason = 'Redirected outside the selected origin/path.'; return }
       if (document.status && document.status >= 400) throw new Error(`Source page returned HTTP ${document.status}.`)
       if (role !== 'page') {
+        totalBytes += Buffer.byteLength(document.body)
+        if (totalBytes > (options.maxTotalBytes ?? 500_000_000)) { budgetExhausted = true; throw new Error('Migration exceeded its content byte budget.') }
         record.outcome = 'excluded'; record.reason = `Final response role: ${role}.`
-        if (role === 'index') for (const link of linksOf(document)) enqueue(link, final, record.url)
+        const links = role === 'index' ? linksOf(document) : []
+        record.evidence = { sha256: hash(document.body), byteLength: Buffer.byteLength(document.body), finalUrl: final, contentType: document.contentType, ...(document.artifactRef ? { artifactRef: document.artifactRef } : {}), states: [], code: [], anchors: [], links }
+        for (const link of links) enqueue(link, final, record.url)
         return
       }
+      if (imported >= maxPages) { record.outcome = 'excluded'; record.reason = 'A discovery endpoint resolved to an article after the selected page limit.'; return }
       const already = finalUrls.get(final)
       if (already && already !== record.url) { record.outcome = 'alias'; record.aliasOf = already; return }
       // Claim final identity before conversion can yield to asset acquisition.
@@ -447,27 +481,40 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
       if (/html/i.test(document.contentType)) {
         const $ = load(document.body)
         const root = $('main article,article,main,[role="main"]').first()
+        root.find('button svg,a.hash-link svg,[aria-hidden="true"] svg,svg[aria-hidden="true"],svg[data-lucide],svg[data-icon]').remove()
         const unsupported = [...new Set(root.find('iframe,object,embed,canvas,svg,form,input,textarea,select,math,video,audio').toArray().map((node) => node.tagName))]
         if (unsupported.length) record.issues.push({ code: 'unsupported-component', source: record.url, message: `Rendered content requires explicit review for: ${unsupported.join(', ')}.` })
-        if (!states.length && root.find('[role="tab"],[role="tabpanel"][hidden],details:not([open])').length) record.issues.push({ code: 'unsupported-component', source: record.url, message: 'Interactive alternatives were visible but no captured alternatives were supplied.' })
+        if (!states.length && unresolvedStaticControls(document.body)) record.issues.push({ code: 'unsupported-component', source: record.url, message: 'An interactive alternative has no complete captured panel or disclosure content.' })
       }
       const suppliedAssets = new Map((document.assets ?? []).map((asset) => [canonical(asset.url, final), asset]))
       const assetUrls = [...new Set([...assetReferences(document), ...states.flatMap((state) => assetReferences(state.response))].map((url) => canonical(url, final)).filter((url): url is string => Boolean(url)))]
       if (assetUrls.length > 256 || (document.assets?.length ?? 0) > 256) throw new Error('Capture exceeds the 256 assets per page safety bound.')
       for (const url of assetUrls) {
         try {
-          const asset = suppliedAssets.get(url) ?? (assetFetcher ? await assetFetcher(new URL(url), options.signal) : null)
+          let assetRequest = assetRequests.get(url)
+          if (!suppliedAssets.has(url) && !assetRequest && assetFetcher) {
+            assetRequest = assetFetcher(new URL(url), options.signal)
+            assetRequests.set(url, assetRequest)
+          }
+          const asset = suppliedAssets.get(url) ?? (assetRequest ? await assetRequest : null)
           if (!asset) throw new Error('Capture host did not supply asset bytes or a binary fetch boundary.')
           const extension = acceptedAsset(asset)
           if (!extension) throw new Error('Asset MIME/signature is unsupported or unsafe to serve.')
-          totalBytes += asset.content.byteLength
-          if (totalBytes > (options.maxTotalBytes ?? 500_000_000)) { budgetExhausted = true; throw new Error('Migration exceeded its content and asset byte budget.') }
           const sha256 = hash(asset.content)
+          const existing = assetPayloads.get(sha256)
+          if (!existing) {
+            totalBytes += asset.content.byteLength
+            if (totalBytes > (options.maxTotalBytes ?? 500_000_000)) { budgetExhausted = true; throw new Error('Migration exceeded its content and asset byte budget.') }
+          }
           const path = `migration-assets/${sha256}.${extension}`
-          record.assets.push({ url, path, sha256, contentType: asset.contentType, base64: Buffer.from(asset.content).toString('base64') })
+          const receipt = { url, path, sha256, contentType: asset.contentType, base64: existing?.base64 ?? Buffer.from(asset.content).toString('base64') }
+          record.assets.push(receipt)
+          if (!existing) assetPayloads.set(sha256, receipt)
+          if (!assetRequests.has(url)) assetRequests.set(url, Promise.resolve(asset))
           // Only prose destinations are rewritten; example code is immutable.
-          page.body = rewriteMarkdownDestinations(page.body, (destination) => canonical(destination, final) === url ? `/${path}` : destination)
+          page.body = rewriteMarkdownDestinations(page.body, (destination) => canonical(destination, final) === url ? `/${path}${new URL(destination, final).hash}` : destination)
         } catch (error) {
+          assetRequests.delete(url)
           record.issues.push({ code: 'asset-failed', source: record.url, message: `${url}: ${error instanceof Error ? error.message : String(error)}` })
         }
       }
@@ -521,8 +568,12 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
     }
   }
   while (cursor < pending.length && !options.signal?.aborted && !budgetExhausted && cursor < (options.maxCaptures ?? Infinity)) {
-    if (imported >= maxPages) break
-    const batch = pending.slice(cursor, cursor + Math.min(concurrency, maxPages - imported, (options.maxCaptures ?? Infinity) - cursor))
+    if (imported >= maxPages) {
+      const index = pending.findIndex((record, position) => position >= cursor && isDiscoveryIndex(new URL(record.url), source))
+      if (index < 0) break
+      pending.splice(cursor, 0, pending.splice(index, 1)[0])
+    }
+    const batch = pending.slice(cursor, cursor + Math.min(concurrency, imported >= maxPages ? 1 : maxPages - imported, (options.maxCaptures ?? Infinity) - cursor))
     cursor += batch.length
     await Promise.all(batch.map(process))
     if (changed.length >= batchSize) await flush()
@@ -545,7 +596,7 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
     for (const node of nodes) {
       const entry = node.url ? records.get(canonical(node.url, sourceUrl) ?? '') : undefined
       const target = entry?.outcome === 'alias' ? records.get(entry.aliasOf ?? '') : entry
-      if (target?.page && node.label) {
+      if (target?.page && node.label && !node.children?.length) {
         const previous = navigationLabels.get(target.url)
         if (previous && previous !== node.label) navigationIssues.push({ code: 'unsupported-component', source: target.url, message: `This page has multiple source navigation labels (${previous}, ${node.label}); review the shared sidebar title.` })
         else navigationLabels.set(target.url, node.label)
@@ -573,7 +624,12 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
   }
   const locales = [...new Set(pages.map((page) => page.locale).filter((locale): locale is string => Boolean(locale)))]
   if (locales.length) bundle.docsConfig.i18n = { defaultLocale: 'en', locales: [{ code: 'en', label: 'English' }, ...locales.filter((locale) => locale !== 'en').map((code) => ({ code, label: code }))] }
-  return { bundle, checkpoint, validation }
+  const stopReason = options.signal?.aborted ? 'cancelled'
+    : budgetExhausted ? 'byte-limit'
+      : cursor < pending.length && cursor >= (options.maxCaptures ?? Infinity) ? 'capture-limit'
+        : imported >= maxPages && cursor < pending.length ? 'page-limit'
+        : cursor < pending.length ? 'capture-limit' : 'complete'
+  return { bundle, checkpoint, validation, stopReason }
 }
 
 function rewriteMarkdownDestinations(body: string, rewrite: (value: string) => string): string {
@@ -587,6 +643,24 @@ function rewriteMarkdownDestinations(body: string, rewrite: (value: string) => s
     if (index < 0) return null
     return { start: start + index, end: start + index + node.url!.length, replacement }
   }).filter((edit): edit is { start: number; end: number; replacement: string } => edit !== null).sort((a, b) => b.start - a.start)
+  for (const node of markdownNodes(body)) for (const attribute of node.attributes ?? []) {
+    if (!attribute.name || !['src', 'href', 'srcSet', 'srcset', 'img', 'primaryHref', 'secondaryHref'].includes(attribute.name) || !attribute.position) continue
+    let value = attribute.value
+    if (typeof value !== 'string') {
+      try { value = JSON.parse(value?.value ?? '') as string } catch { continue }
+    }
+    if (typeof value !== 'string') continue
+    let replacement: string
+    if (/^srcset$/i.test(attribute.name)) {
+      const candidates = migrationImageCandidates(value, new URL('https://migration.invalid'), false)
+      replacement = renderMigrationSrcset(candidates.map((candidate) => ({ ...candidate, url: rewrite(candidate.url) })))
+      if (replacement === renderMigrationSrcset(candidates)) continue
+    } else { replacement = rewrite(value); if (replacement === value) continue }
+    const start = attribute.position.start.offset, end = attribute.position.end.offset
+    if (start === undefined || end === undefined) continue
+    edits.push({ start, end, replacement: `${attribute.name}="${migrationImageAttribute(replacement)}"` })
+  }
+  edits.sort((a, b) => b.start - a.start)
   for (const edit of edits) body = body.slice(0, edit.start) + edit.replacement + body.slice(edit.end)
   return body
 }

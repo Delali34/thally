@@ -1,6 +1,7 @@
 /** Evidence-bearing imports prove actual conversion, JSON recovery and inventory coverage. */
 import { describe, expect, it } from 'vitest'
 import { classifyMigrationResponse, runUrlMigration } from '../url-run.js'
+import { compile } from '@mdx-js/mdx'
 import type { MigrationCapture, MigrationCaptureProvider, UrlMigrationCheckpointDelta } from '../url-run-types.js'
 
 function response(path: string, body: string, contentType = 'text/html'): MigrationCapture {
@@ -142,6 +143,70 @@ describe('evidence URL runner', () => {
     expect(rejected.validation.status).toBe('partial')
     expect(rejected.validation.issues.map((issue) => issue.code)).toContain('asset-failed')
     expect(rejected.bundle.assets).toHaveLength(2)
+  })
+
+  it('preserves literal responsive picture choices and localizes every candidate', async () => {
+    const png = Buffer.from('iVBORw0KGgo=', 'base64')
+    const paths = ['/small.png', '/large.png', '/wide.png']
+    const source = response('/guide', article('Pictures', '<picture><source media="(min-width: 800px)" type="image/png" srcset="/wide.png 1600w, /large.png 800w" sizes="100vw"><img src="/small.png" srcset="/small.png 400w, /large.png 800w" sizes="(max-width: 600px) 100vw, 600px" alt="Literal {alt} &amp; size" width="600" height="300"></picture>'))
+    source.assets = paths.map((path, index) => ({ url: `https://docs.test${path}`, contentType: 'image/png', content: Buffer.concat([png, Buffer.from([index])]) }))
+    const run = await runUrlMigration({ sourceUrl: 'https://docs.test/guide', captureProvider: provider({ '/guide': source }) })
+    expect(run.validation.issues).toEqual([])
+    expect(run.validation.status).toBe('passed')
+    expect(run.bundle.assets).toHaveLength(3)
+    const body = run.bundle.pages[0].body
+    expect(body).toContain('<picture>')
+    expect(body).toContain('<source srcSet=')
+    expect(body).toContain('media="(min-width: 800px)"')
+    expect(body).toContain('sizes="(max-width: 600px) 100vw, 600px"')
+    expect(body).toContain('alt="Literal &#123;alt&#125; &amp; size"')
+    expect(body).not.toContain('migration.invalid')
+    expect(body).not.toContain('https://docs.test/')
+    expect(body).toMatch(/srcSet="\/migration-assets\/[a-f0-9]+\.png 400w, \/migration-assets\/[a-f0-9]+\.png 800w"/)
+    await expect(compile(body)).resolves.toBeDefined()
+  })
+
+  it('counts shared asset bytes once, reuses acquisition, and keeps distinct budgets honest', async () => {
+    const png = Buffer.concat([Buffer.from('iVBORw0KGgo=', 'base64'), Buffer.alloc(100_000)])
+    let requests = 0
+    const captureProvider: MigrationCaptureProvider = { capture: async ({ url }) => {
+      if (!/^\/p\d+$/.test(url.pathname)) throw new Error('404')
+      return response(url.pathname, article('Shared', `<img src="/shared.png">${url.pathname === '/p0' ? Array.from({ length: 15 }, (_, i) => `<a href="/p${i + 1}">Page</a>`).join('') : ''}`))
+    } }
+    const run = await runUrlMigration({ sourceUrl: 'https://docs.test/p0', maxTotalBytes: 150_000, captureProvider, assetFetcher: async (url) => {
+      requests++
+      return { url: url.href, contentType: 'image/png', content: png }
+    } })
+    expect(run.validation.status).toBe('passed')
+    expect(run.bundle.pages).toHaveLength(16)
+    expect(run.bundle.assets).toHaveLength(1)
+    expect(requests).toBe(1)
+    expect(run.stopReason).toBe('complete')
+    const resumed = await runUrlMigration({ sourceUrl: 'https://docs.test/p0', maxTotalBytes: 150_000, captureProvider, checkpoint: JSON.parse(JSON.stringify(run.checkpoint)), assetFetcher: async () => { throw new Error('Must reuse reconciled assets') } })
+    expect(resumed.validation.status).toBe('passed')
+    const distinct = response('/distinct', article('Distinct', '<img src="/one.png"><img src="/two.png">'))
+    distinct.assets = [0, 1].map((number) => ({ url: `https://docs.test/${number ? 'two' : 'one'}.png`, contentType: 'image/png', content: Buffer.concat([png, Buffer.from([number])]) }))
+    const limited = await runUrlMigration({ sourceUrl: 'https://docs.test/distinct', maxTotalBytes: 150_000, captureProvider: provider({ '/distinct': distinct }) })
+    expect(limited.validation.status).toBe('partial')
+    expect(limited.stopReason).toBe('byte-limit')
+    expect(limited.bundle.assets).toHaveLength(1)
+  })
+
+  it('drains discovery at the article cap and preserves complete static tab alternatives', async () => {
+    const source = response('/docs/intro', `<aside><ul><li><a href="/docs/intro">Getting started</a><ul><li><a href="/docs/intro">Installation</a></li></ul></li></ul></aside>${article('Installation', '<button aria-label="Copy code"><svg><path d="M0 0"/></svg></button><a class="hash-link"><svg><path d="M0 0"/></svg></a><div class="tabs-container"><ul class="tabs"><li role="tab" aria-controls="npm">npm</li><li role="tab" aria-controls="yarn">yarn</li></ul><div><div role="tabpanel" id="npm"><pre><code>npm install example</code></pre></div><div role="tabpanel" id="yarn" hidden><pre><code>yarn add example</code></pre></div></div></div>')}`)
+    const run = await runUrlMigration({ sourceUrl: 'https://docs.test/docs/intro', scopePath: '/docs/intro', maxPages: 1, captureProvider: provider({ '/docs/intro': source }) })
+    expect(run.validation.issues).toEqual([])
+    expect(run.validation.status).toBe('passed')
+    expect(run.validation.counts.pending).toBe(0)
+    expect(run.stopReason).toBe('complete')
+    expect(run.bundle.pages[0].navTitle).toBe('Installation')
+    expect(run.bundle.pages[0].body).toContain('<Tab title="npm">')
+    expect(run.bundle.pages[0].body).toContain('<Tab title="yarn">')
+    expect(run.bundle.docsConfig.tabs[0].pages).toEqual([{ group: 'Getting started', pages: ['introduction'] }])
+    const lazy = { ...source, body: source.body.replace('<pre><code>yarn add example</code></pre>', '') }
+    const partial = await runUrlMigration({ sourceUrl: 'https://docs.test/docs/intro', scopePath: '/docs/intro', maxPages: 1, captureProvider: provider({ '/docs/intro': lazy }) })
+    expect(partial.validation.status).toBe('partial')
+    expect(partial.validation.issues.map((issue) => issue.code)).toContain('unsupported-component')
   })
 
   it('converts and validates a full 10000-page inventory beyond the former cap', async () => {

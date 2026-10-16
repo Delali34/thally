@@ -111,6 +111,8 @@ export interface UrlMigrationRun {
   bundle: MigrationBundle
   checkpoint: UrlMigrationCheckpoint
   validation: UrlMigrationValidation
+  /** Hosts resume bounded slices but must review hard scope/budget limits. */
+  stopReason?: 'capture-limit' | 'page-limit' | 'byte-limit' | 'cancelled' | 'complete'
 }
 
 export interface UrlMigrationRunOptions {

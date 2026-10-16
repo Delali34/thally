@@ -15,6 +15,7 @@ import { projectMintlifyIntegrations } from './analytics.js'
 import { parseMarkdownPage } from './mdx.js'
 import { addMintlifyDirectoryRedirects, buildNavigationFromPages, projectMintlifyNavigation } from './navigation.js'
 import { pageIdFromReference } from './path.js'
+import { migrationImageAttribute, migrationImageCandidates, migrationImageUrl, renderMigrationSrcset } from './url-images.js'
 import type {
   MigrationBundle,
   MigrationFetcher,
@@ -40,6 +41,7 @@ const PORTABLE_MDX_COMPONENTS = new Set([
   'RequestExample', 'ResponseExample', 'ResponseField', 'Step', 'Steps',
   'Tab', 'Tabs', 'Terminal', 'TerminalInput', 'TerminalOutput', 'Tile', 'TileGroup',
   'Tip', 'Tooltip', 'Tree', 'Update', 'Video', 'View', 'Visibility', 'Warning', 'YouTube',
+  'picture', 'source',
 ])
 const LOCALE_CODES = new Set([
   'ar', 'cs', 'da', 'de', 'el', 'es', 'fi', 'fr', 'he', 'hi', 'hu', 'id',
@@ -63,6 +65,7 @@ interface RemoteMarkdownAttribute {
 
 interface RemoteMarkdownNode {
   type: string
+  name?: string
   alt?: string | null
   attributes?: Array<RemoteMarkdownAttribute>
   identifier?: string
@@ -562,6 +565,17 @@ function sanitizeMarkdownUrls(value: string): string | null {
           hasUnsafeMdxSyntax = true
           return
         }
+        if (node.name === 'source' || node.name === 'picture') {
+          const allowed = node.name === 'picture' ? [] : ['src', 'srcSet', 'srcset', 'sizes', 'media', 'type', 'width', 'height', 'id']
+          if (!allowed.includes(attribute.name) || typeof attribute.value !== 'string') {
+            hasUnsafeMdxSyntax = true
+            return
+          }
+          try {
+            if (/^srcset$/i.test(attribute.name)) migrationImageCandidates(decodeHtmlAttribute(attribute.value), new URL('https://migration.invalid'))
+            if (attribute.name === 'src') migrationImageUrl(decodeHtmlAttribute(attribute.value), new URL('https://migration.invalid'))
+          } catch { hasUnsafeMdxSyntax = true; return }
+        }
       }
     }
     for (const child of node.children ?? []) validateMdxSyntax(child)
@@ -991,7 +1005,7 @@ function mergeEmbeddedOpenApi(fragments: Array<EmbeddedOpenApiFragment>): Uint8A
 export function htmlPage(
   document: MigrationFetchResponse,
   id: string,
-  options: { preserveAnchors?: boolean } = {},
+  options: { preserveAnchors?: boolean; preserveResponsiveImages?: boolean } = {},
 ): { page: MigrationPage | null; links: Array<string> } {
   const $ = load(document.body)
   const links = $('nav a[href], main a[href], article a[href], [role="main"] a[href]')
@@ -1051,6 +1065,29 @@ export function htmlPage(
       return `\n\n${anchor(element)}${heading ? `${'#'.repeat(Number(heading[1]))} ` : ''}${content}\n\n`
     },
   })
+  if (options.preserveResponsiveImages) {
+    const image = (element: HTMLElement): string => {
+      const tag = element.nodeName.toLowerCase()
+      const attributes: Array<string> = []
+      for (const name of ['src', 'srcset', 'sizes', 'alt', 'title', 'media', 'type', 'width', 'height', 'id']) {
+        let value = element.getAttribute(name)
+        if (value === null) continue
+        if (name === 'src') value = migrationImageUrl(value, document.finalUrl)
+        if (name === 'srcset') value = renderMigrationSrcset(migrationImageCandidates(value, document.finalUrl))
+        const prop = name === 'srcset' ? 'srcSet' : name
+        attributes.push(`${prop}="${migrationImageAttribute(value)}"`)
+      }
+      return `<${tag}${attributes.length ? ` ${attributes.join(' ')}` : ''} />`
+    }
+    turndown.addRule('migration-responsive-image', {
+      filter: (node) => ['IMG', 'SOURCE'].includes(node.nodeName),
+      replacement: (_content, node) => image(node as HTMLElement),
+    })
+    turndown.addRule('migration-responsive-picture', {
+      filter: 'picture',
+      replacement: (content) => `\n\n<picture>\n${content.trim()}\n</picture>\n\n`,
+    })
+  }
   turndown.addRule('docusaurus-admonition', {
     filter: (node) => node.nodeName === 'DIV'
       && (node as HTMLElement).classList.contains('theme-admonition'),
@@ -1070,7 +1107,7 @@ export function htmlPage(
       const titleText = title.text().trim()
       title.remove()
       const markdown = turndown.turndown(clone.html() ?? '').trim()
-      return `\n\n<${tag}>\n${titleText ? `**${escapeMarkdownText(titleText)}**\n\n` : ''}${markdown}\n</${tag}>\n\n`
+      return `\n\n${anchor(element)}<${tag}>\n${titleText ? `**${escapeMarkdownText(titleText)}**\n\n` : ''}${markdown}\n</${tag}>\n\n`
     },
   })
   turndown.addRule('docusaurus-tabs', {
@@ -1082,13 +1119,17 @@ export function htmlPage(
       const container = fragment('.tabs-container').first()
       const labels = container.children('ul.tabs').children('li').toArray()
         .map((item) => fragment(item).text().trim() || 'Tab')
-      const panels = container.children('div[role="tabpanel"]').toArray()
+      const panels = container.find('[role="tabpanel"]').toArray()
+        .filter((panel) => fragment(panel).closest('.tabs-container')[0] === container[0])
       if (panels.length === 0) return _content
       const tabs = panels.map((panel, index) => {
-        const title = (labels[index] ?? `Tab ${index + 1}`).replace(/"/g, '&quot;')
-        return `<Tab title="${title}">\n${turndown.turndown(fragment(panel).html() ?? '').trim()}\n</Tab>`
+        const panelId = fragment(panel).attr('id')
+        const tab = panelId ? container.find('[role="tab"]').toArray().find((item) => fragment(item).attr('aria-controls') === panelId) : undefined
+        const title = migrationImageAttribute((tab ? fragment(tab).text().trim() : labels[index]) || `Tab ${index + 1}`)
+        const panelAnchor = options.preserveAnchors && panelId ? `<a id="${migrationImageAttribute(panelId)}" />\n\n` : ''
+        return `<Tab title="${title}">\n${panelAnchor}${turndown.turndown(fragment(panel).html() ?? '').trim()}\n</Tab>`
       })
-      return `\n\n<Tabs>\n${tabs.join('\n\n')}\n</Tabs>\n\n`
+      return `\n\n${anchor(element)}<Tabs>\n${tabs.join('\n\n')}\n</Tabs>\n\n`
     },
   })
   turndown.addRule('gfm-table', {
