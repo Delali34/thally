@@ -66,7 +66,7 @@ GET /llms-full.txt
 GET /llms-full.txt?locale=es
 ```
 
-`?locale=` returns only the pages translated into that language. The `X-Thally-Approx-Tokens` response header estimates the file's size in tokens, so an agent can decide whether to load it whole or use search instead.
+`?locale=` returns only the pages translated into that language. The response streams one page at a time and omits a whole-file token estimate. Use `/llms.txt` or search to select a smaller set of pages before loading the full corpus.
 
 ---
 

@@ -64,8 +64,8 @@ describe('GET /llms-full.txt', () => {
     expect((await corpus('?locale=xx')).response.status).toBe(400)
   })
 
-  it('reports an approximate token count', async () => {
-    const { response, body } = await corpus()
-    expect(Number(response.headers.get('x-thally-approx-tokens'))).toBe(Math.ceil(body.length / 4))
+  it('omits an unknown whole-body estimate from the streamed response', async () => {
+    const { response } = await corpus()
+    expect(response.headers.has('x-thally-approx-tokens')).toBe(false)
   })
 })
