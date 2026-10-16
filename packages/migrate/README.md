@@ -10,6 +10,11 @@ ordered navigation and binary assets), or uses ordinary local fetching. Hosted
 callers must inject their own network-safe text/capture and binary boundaries.
 No browser, model, credentials, sandbox or publishing provider is bundled here.
 
+Server applications should import `@thallylabs/migrate/svg-policy` for the passive
+SVG validator, or `@thallylabs/migrate/url-migration` for the URL runner, renderer
+and their types. These independent entries avoid tracing repository cloning and
+filesystem discovery into application routes. The root entry remains compatible.
+
 The returned `checkpoint` is JSON-safe. `onRecord` lets a host persist a completed
 page before acknowledging it; `onCheckpoint` emits bounded deltas, including
 pending discoveries and checkpoint identity fields. Merge delta records by URL,

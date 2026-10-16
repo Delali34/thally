@@ -15,7 +15,17 @@
       "import": "./dist/index.js",
       "default": "./dist/index.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./svg-policy": {
+      "types": "./dist/svg-policy.d.ts",
+      "import": "./dist/svg-policy.js",
+      "default": "./dist/svg-policy.js"
+    },
+    "./url-migration": {
+      "types": "./dist/url-migration.d.ts",
+      "import": "./dist/url-migration.js",
+      "default": "./dist/url-migration.js"
+    }
   },
   "files": [
     "dist",
