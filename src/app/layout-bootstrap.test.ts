@@ -5,13 +5,19 @@ import { runInNewContext } from 'node:vm'
 import { transformSync } from 'esbuild'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { describe, expect, it } from 'vitest'
+import { afterAll, describe, expect, it } from 'vitest'
+import { Window } from 'happy-dom'
 
 const require = createRequire(import.meta.url)
+const inertWindow = new Window({ settings: {
+  enableJavaScriptEvaluation: false, disableJavaScriptFileLoading: true,
+  disableCSSFileLoading: true, enableImageFileLoading: false,
+} })
+afterAll(() => inertWindow.happyDOM.close())
 
-/** Extract script text from the rendered fixture; HTML tag names are case-insensitive. */
+/** Parse rendered fixture HTML inertly; input scripts and resources never execute. */
 function extractBootstrap(html: string): string | undefined {
-  return /<script\b[^>]*>([\s\S]*?)<\/script>/iu.exec(html)?.[1]
+  return new inertWindow.DOMParser().parseFromString(html, 'text/html').querySelector('script')?.textContent
 }
 
 /** Render the actual dependency after the same name-preserving server transform. */
@@ -27,8 +33,18 @@ function transformedThemeBootstrap(): string {
 }
 
 describe('document bootstrap ordering', () => {
-  it.each(['script', 'SCRIPT', 'sCrIpT'])('extracts %s fixture tags with mixed-case closing tags', (tag) => {
-    expect(extractBootstrap(`<${tag} type="text/javascript">globalThis.marker = 1\n</ScRiPt>`)).toBe('globalThis.marker = 1\n')
+  it.each([['script', 'ScRiPt'], ['SCRIPT', 'script '], ['sCrIpT', 'SCRIPT \t\n']])('extracts %s fixture tags with closing whitespace', (tag, closing) => {
+    expect(extractBootstrap(`<${tag} type="text/javascript">globalThis.marker = 1\n</${closing}>`)).toBe('globalThis.marker = 1\n')
+  })
+
+  it('parses quoted attribute delimiters without changing the script bytes', () => {
+    expect(extractBootstrap('<script data-label="a > b">const bytes = "<tag>";</script >')).toBe('const bytes = "<tag>";')
+  })
+
+  it('extracts input without evaluating it', () => {
+    const source = 'globalThis.__thallyBootstrapExecuted = true'
+    expect(extractBootstrap(`<script>${source}</script >`)).toBe(source)
+    expect((inertWindow as unknown as Record<string, unknown>).__thallyBootstrapExecuted).toBeUndefined()
   })
 
   it('runs the fixed native head shim before next-themes accesses esbuild helpers', () => {
