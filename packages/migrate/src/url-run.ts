@@ -195,8 +195,11 @@ function idForUrl(url: URL, scope: string): string | null {
 function convert(document: MigrationFetchResponse, id: string): MigrationPage | null {
   if (/html/i.test(document.contentType)) {
     const technical = htmlEvidence(document)
-    const page = htmlPage(document, id, { preserveAnchors: true, preserveResponsiveImages: true }).page
+    const page = htmlPage(document, id, { preserveAnchors: true, preserveResponsiveImages: true, omitDocumentHeading: true }).page
     if (!page) return null
+    // HTML already contains the source's visible article copy. Keep its SEO
+    // description without inserting a second generated excerpt above the body.
+    page.descriptionPlacement = 'body'
     // Restore exact payloads after the shared HTML converter. Replacements use
     // AST offsets, so code containing Markdown or JSX is never treated as prose.
     const nodes = markdownNodes(page.body).filter((node) => node.type === 'code')
@@ -484,6 +487,7 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
         const root = $('main article,article,main,[role="main"]').first()
         root.find('nav,header,footer,aside,.theme-doc-breadcrumbs,.theme-doc-toc-mobile,.table-of-contents,.hash-link').remove()
         root.find('button svg,a.hash-link svg,[aria-hidden="true"] svg,svg[aria-hidden="true"],svg[data-lucide],svg[data-icon]').remove()
+        if (root.find('h1').length > 1) record.issues.push({ code: 'unsupported-component', source: record.url, message: 'The article contains multiple level-one headings; review their hierarchy.' })
         const unsupported = [...new Set(root.find('iframe,object,embed,canvas,svg,form,input,textarea,select,math,video,audio').toArray().map((node) => node.tagName))]
         if (unsupported.length) record.issues.push({ code: 'unsupported-component', source: record.url, message: `Rendered content requires explicit review for: ${unsupported.join(', ')}.` })
         if (!states.length && unresolvedStaticControls(document.body)) record.issues.push({ code: 'unsupported-component', source: record.url, message: 'An interactive alternative has no complete captured panel or disclosure content.' })

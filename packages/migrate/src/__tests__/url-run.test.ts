@@ -209,6 +209,21 @@ describe('evidence URL runner', () => {
     expect(partial.validation.issues.map((issue) => issue.code)).toContain('unsupported-component')
   })
 
+  it('renders the document title once and keeps its source heading anchor', async () => {
+    const source = response('/guide', '<header><h1>Site brand</h1></header><article><h1 id="start-here">Start here</h1><p>The title is rendered by the destination document header.</p><h2 id="next">Next</h2><a href="#start-here">Top</a></article>')
+    const run = await runUrlMigration({ sourceUrl: 'https://docs.test/guide', captureProvider: provider({ '/guide': source }) })
+    expect(run.validation.issues).toEqual([])
+    expect(run.bundle.pages[0].title).toBe('Start here')
+    expect(run.bundle.pages[0].descriptionPlacement).toBe('body')
+    expect(run.bundle.pages[0].body).not.toMatch(/^# /m)
+    expect(run.bundle.pages[0].body).toContain('<a id="start-here" />')
+    expect(run.bundle.pages[0].body).toContain('## Next')
+    const multiple = { ...source, body: source.body.replace('</article>', '<h1>Another top-level heading</h1></article>') }
+    const partial = await runUrlMigration({ sourceUrl: 'https://docs.test/guide', captureProvider: provider({ '/guide': multiple }) })
+    expect(partial.validation.status).toBe('partial')
+    expect(partial.bundle.pages[0].body).toContain('# Another top-level heading')
+  })
+
   it('converts and validates a full 10000-page inventory beyond the former cap', async () => {
     const size = 10_000
     const run = await runUrlMigration({ sourceUrl: 'https://docs.test/p0', maxPages: size, concurrency: 24, captureProvider: {

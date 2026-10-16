@@ -1005,22 +1005,36 @@ function mergeEmbeddedOpenApi(fragments: Array<EmbeddedOpenApiFragment>): Uint8A
 export function htmlPage(
   document: MigrationFetchResponse,
   id: string,
-  options: { preserveAnchors?: boolean; preserveResponsiveImages?: boolean } = {},
+  options: { preserveAnchors?: boolean; preserveResponsiveImages?: boolean; omitDocumentHeading?: boolean } = {},
 ): { page: MigrationPage | null; links: Array<string> } {
   const $ = load(document.body)
   const links = $('nav a[href], main a[href], article a[href], [role="main"] a[href]')
     .map((_index, element) => $(element).attr('href') ?? '')
     .get()
     .filter(Boolean)
-  const title = $('main h1, article h1, h1').first().text().trim()
+  const scopedTitle = options.omitDocumentHeading
+    ? $('main article, article, main, [role="main"]').first().find('h1').first().text().trim()
+    : ''
+  const title = scopedTitle || $('main h1, article h1, h1').first().text().trim()
     || $('meta[property="og:title"]').attr('content')?.trim()
     || $('title').text().split('|')[0].trim()
   const description = $('meta[name="description"]').attr('content')?.trim()
     || $('meta[property="og:description"]').attr('content')?.trim()
   const content = $('main article, article, main, [role="main"]').first()
   const root = content.length ? content : $('body')
+  let documentHeadingAnchor = ''
   root.find('script,style,noscript,nav,header,footer,aside,form,button,svg,iframe,object,embed,link,meta').remove()
   root.find('.theme-doc-version-badge,.theme-doc-breadcrumbs,.theme-doc-toc-mobile,.table-of-contents,.hash-link').remove()
+  if (options.omitDocumentHeading) {
+    const heading = root.find('h1').first()
+    if (heading.length && heading.text().trim() === title) {
+      // Thally renders this title from frontmatter. Retain its source anchor at
+      // the same boundary without generating a second article-level heading.
+      const anchorId = heading.attr('id')
+      if (anchorId) documentHeadingAnchor = `<a id="${migrationImageAttribute(anchorId)}" />\n\n`
+      heading.remove()
+    }
+  }
   root.find('a[href]').each((_index, element) => {
     const href = $(element).attr('href')
     if (!href) return
@@ -1165,7 +1179,7 @@ export function htmlPage(
   })
   const escape = turndown.escape.bind(turndown)
   turndown.escape = (text: string) => escape(text).replace(/[<{}]/g, (match) => `\\${match}`)
-  const body = turndown.turndown(root.html() ?? '').trim()
+  const body = `${documentHeadingAnchor}${turndown.turndown(root.html() ?? '').trim()}`
   // Docusaurus can intentionally publish title-only reference/partial pages.
   // Keep those real article routes while still rejecting empty search/app
   // shells that happen to expose a document title.
