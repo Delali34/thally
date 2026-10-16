@@ -537,13 +537,30 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
       if (target.evidence) routeMap.set(canonical(target.evidence.finalUrl, sourceUrl)!, route)
     }
   }
-  const pages = checkpoint.records.flatMap((record) => record.page ? [{ ...record.page, body: rewriteMarkdownDestinations(record.page.body, (value) => {
+  const navigationLabels = new Map<string, string>()
+  const navigationIssues: Array<UrlMigrationIssue> = []
+  const labelPages = (nodes: Array<MigrationNavigationOccurrence>): void => {
+    for (const node of nodes) {
+      const entry = node.url ? records.get(canonical(node.url, sourceUrl) ?? '') : undefined
+      const target = entry?.outcome === 'alias' ? records.get(entry.aliasOf ?? '') : entry
+      if (target?.page && node.label) {
+        const previous = navigationLabels.get(target.url)
+        if (previous && previous !== node.label) navigationIssues.push({ code: 'unsupported-component', source: target.url, message: `This page has multiple source navigation labels (${previous}, ${node.label}); review the shared sidebar title.` })
+        else navigationLabels.set(target.url, node.label)
+      }
+      labelPages(node.children ?? [])
+    }
+  }
+  labelPages(checkpoint.navigation)
+  const pages = checkpoint.records.flatMap((record) => record.page ? [{ ...record.page, ...(navigationLabels.has(record.url) ? { navTitle: navigationLabels.get(record.url) } : {}), body: rewriteMarkdownDestinations(record.page.body, (value) => {
     let url: URL
     try { url = new URL(value, record.evidence!.finalUrl) } catch { return value }
     const route = routeMap.get(canonical(url.toString(), sourceUrl)!)
     return route ? `${route}${url.hash}` : value
   }) }] : [])
   const validation = validateUrlMigration(checkpoint, Boolean(options.signal?.aborted))
+  validation.issues.push(...navigationIssues)
+  if (navigationIssues.length && validation.status === 'passed') validation.status = 'partial'
   const assets = new Map(checkpoint.records.flatMap((record) => (record.assets ?? []).map((asset) => [asset.path, { path: asset.path, content: Buffer.from(asset.base64, 'base64') }] as const)))
   const bundle: MigrationBundle = {
     sourceUrl, sourceKind: 'url', platform: options.platform ?? 'generic', pages, assets: [...assets.values()],
