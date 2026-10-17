@@ -2,7 +2,7 @@
 
 import { getContentDocument, loadContentDocument } from '../content/index.js'
 import { resolveDocEntries, resolveDocEntriesAsync } from '../doc-source.js'
-import type { ContentSection } from '../content/types.js'
+import { projectSearchContent, resolvePreparedSearchContent } from './projection.js'
 import { resolveSupplementalSearchRecords, type SearchRecordType } from './supplemental.js'
 
 /**
@@ -32,17 +32,6 @@ export interface SearchRecord {
   path?: string
 }
 
-/** Section bodies are kept whole up to this size; enough to locate a match. */
-const SECTION_TEXT_LIMIT = 2000
-
-function recordSections(sections: Array<ContentSection> | undefined): Array<SearchRecordSection> {
-  return (sections ?? []).map((section) => ({
-    id: section.id,
-    title: section.title,
-    text: section.text.slice(0, SECTION_TEXT_LIMIT),
-  }))
-}
-
 const BODY_LIMIT = 4000
 const CLIENT_BODY_LIMIT = 700
 
@@ -70,19 +59,21 @@ function buildRecords(bodyLimit: number): Array<SearchRecord> {
 async function buildRecordsAsync(bodyLimit: number, locale?: string): Promise<Array<SearchRecord>> {
   const records = await Promise.all(
     (await resolveDocEntriesAsync(locale)).map(async (entry): Promise<SearchRecord | null> => {
-      const document = await loadContentDocument(entry.id, locale)
-      if (!document) return null
+      const prepared = await resolvePreparedSearchContent(entry.id, locale)
+      const document = prepared ? null : await loadContentDocument(entry.id, locale)
+      const content = prepared ?? (document ? projectSearchContent(document.content) : null)
+      if (!content) return null
       return {
         id: entry.id,
         pageId: entry.id,
         title: entry.title,
         description: entry.description,
-        headings: document.content.headings.map((heading) => heading.text).join(' · '),
-        body: document.content.text.slice(0, bodyLimit),
+        headings: content.headings,
+        body: content.body.slice(0, bodyLimit),
         keywords: entry.keywords.join(' '),
         href: entry.href,
         type: 'page',
-        sections: recordSections(document.content.sections),
+        sections: content.sections,
       }
     }),
   )

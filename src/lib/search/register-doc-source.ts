@@ -15,6 +15,7 @@
 import {
   registerSupplementalSearchRecordsSource,
   registerAsyncContentDocumentSource,
+  registerAsyncSearchContentSource,
   registerAsyncDocEntriesSource,
   registerContentDocumentSource,
   registerDocEntriesSource,
@@ -26,6 +27,7 @@ import { getContentDocument, loadContentDocument } from '@/lib/content/document'
 import { getIndexableDocTranslation } from '@/lib/i18n/translation-source'
 import { localizedPath } from '@/lib/i18n/config'
 import { getEffectiveI18nConfig } from '@/lib/i18n/request'
+import { loadPreparedSearchContent } from './prepared-content'
 
 /**
  * The one listing rule for agent and search surfaces: search, MCP
@@ -84,6 +86,7 @@ export async function loadListedDocEntries(
 
 registerAsyncDocEntriesSource((locale) => loadListedDocEntries(locale))
 registerAsyncContentDocumentSource((pageId, locale) => loadContentDocument(pageId, locale))
+registerAsyncSearchContentSource(loadPreparedSearchContent)
 
 // Generated API-reference operations have no MDX document, so they join the
 // index as supplemental records. Loaded lazily so importing the search engine

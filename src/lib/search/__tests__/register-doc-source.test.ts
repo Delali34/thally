@@ -17,6 +17,7 @@ vi.mock('@thallylabs/core/registry', () => ({
     mocks.supplementalResolver = resolver
   },
   registerAsyncContentDocumentSource: vi.fn(),
+  registerAsyncSearchContentSource: vi.fn(),
   registerContentDocumentSource: vi.fn(),
 }))
 vi.mock('@/data/docs', () => ({

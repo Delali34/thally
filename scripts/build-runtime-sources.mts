@@ -154,7 +154,7 @@ async function writeCompiledDocs(): Promise<number> {
 async function main(): Promise<void> {
   writeRuntimeSourceMap(embeddedSources)
   const contentAssetCount = isManagedAssetsMode
-    ? Object.keys(writeManagedContentAssets(projectRoot, authoredSources).files).length
+    ? Object.keys((await writeManagedContentAssets(projectRoot, authoredSources)).files).length
     : 0
   const compiledDocCount = await writeCompiledDocs()
   console.log(

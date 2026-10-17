@@ -21,8 +21,12 @@
  */
 
 import type { ContentSource, ContentSourceFile } from './types'
-import { createBoundedPromiseCache } from '@/lib/bounded-cache'
+import { createBoundedCache, createBoundedPromiseCache, estimateRetainedPayloadBytes } from '@/lib/bounded-cache'
 import { getContentAssetFetcher, type ContentAssetFetcher } from './runtime'
+import {
+  decodePreparedSearchShard, isPreparedSearchDescriptor, isRawSha256,
+  MAX_SEARCH_SHARD_BYTES, type PreparedSearchDescriptor, type PreparedSearchShard,
+} from '@/lib/search/prepared-content-contract'
 
 /** Reserved asset prefix for published content. Shared with the publish pipeline. */
 export const CONTENT_ASSET_PREFIX = '/_thally/content/'
@@ -38,12 +42,17 @@ const ASSET_READ_ATTEMPTS = 3
 export interface ContentManifestEntry {
   /** Publish-observed modification time (e.g. commit timestamp). */
   modifiedAtMs?: number
+  /** Raw UTF-8 source identity, updated on every content-only upsert. */
+  sha256?: string
+  /** Affinity is valid only while the raw source SHA still matches its record. */
+  searchShard?: number
 }
 
 export interface ContentManifest {
   version: 1
   /** Project-relative POSIX path → metadata, for every published content file. */
   files: Record<string, ContentManifestEntry>
+  search?: PreparedSearchDescriptor
 }
 
 function isContentManifest(value: unknown): value is ContentManifest {
@@ -83,6 +92,33 @@ export function createAssetsContentSource(
   let warnedUnavailable = false
   let activeReads = 0
   const waitingReads = new Set<() => void>()
+  const prepared = createBoundedCache<PreparedSearchShard | null>({ maxEntries: 128, maxBytes: 16 * 1024 * 1024 })
+  // At most 256 descriptors exist. Pending ownership is separate from settled
+  // LRU eviction, so concurrent pages never refetch the same in-flight shard.
+  const pendingPrepared = new Map<number, Promise<PreparedSearchShard | null>>()
+
+  async function boundedBody(response: Response, maxBytes: number): Promise<string | null> {
+    const reader = response.body?.getReader()
+    if (!reader) return ''
+    const chunks: Array<Uint8Array> = []
+    let size = 0
+    try {
+      while (true) {
+        const chunk = await reader.read()
+        if (chunk.done) break
+        size += chunk.value.byteLength
+        if (size > maxBytes) { await reader.cancel(); return null }
+        chunks.push(chunk.value)
+      }
+      const bytes = new Uint8Array(size)
+      let offset = 0
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength }
+      try { return new TextDecoder('utf-8', { fatal: true }).decode(bytes) } catch { return null }
+    } catch (error) {
+      await reader.cancel().catch(() => {})
+      throw error
+    } finally { reader.releaseLock() }
+  }
 
   /** Hold capacity through body consumption, not merely response headers. */
   async function withReadSlot<T>(read: () => Promise<T>): Promise<T> {
@@ -101,12 +137,20 @@ export function createAssetsContentSource(
     }
   }
 
-  async function readResponse(fetchAsset: ContentAssetFetcher, assetPath: string): Promise<{ status: number; body: string | null }> {
+  async function readResponse(
+    fetchAsset: ContentAssetFetcher,
+    assetPath: string,
+    maxBytes?: number,
+    validateBody?: (body: string) => Promise<boolean>,
+  ): Promise<{ status: number; body: string | null }> {
     for (let attempt = 0; ; attempt += 1) {
       try {
         return await withReadSlot(async () => {
           const response = await fetchAsset(assetPath)
-          if (response.ok) return { status: response.status, body: await response.text() }
+          if (response.ok) {
+            const body = maxBytes === undefined ? await response.text() : await boundedBody(response, maxBytes)
+            return { status: response.status, body: body !== null && validateBody && !(await validateBody(body)) ? null : body }
+          }
           // Failed response bodies still occupy a connection until cancelled.
           await response.body?.cancel()
           if ([408, 425, 429].includes(response.status) || response.status >= 500) {
@@ -164,6 +208,9 @@ export function createAssetsContentSource(
             warnFallbackOnce('manifest is malformed')
             return null
           }
+          // Derived metadata is optional. Validate it once, rather than once
+          // per page in a large corpus; an incompatible format uses raw docs.
+          if (!isPreparedSearchDescriptor(parsed.search)) delete parsed.search
           return parsed
         } catch {
           warnFallbackOnce('manifest is malformed')
@@ -201,8 +248,52 @@ export function createAssetsContentSource(
     })
   }
 
+  function loadSearchShard(index: number, manifest: ContentManifest): Promise<PreparedSearchShard | null> {
+    const cached = prepared.get(String(index))
+    if (cached !== undefined) return Promise.resolve(cached)
+    const pending = pendingPrepared.get(index)
+    if (pending) return pending
+    const descriptor = manifest.search!.shards[index]
+    const fetchAsset = resolveFetcher()
+    if (!fetchAsset) return Promise.resolve(null)
+    const load = (async () => {
+      const response = await readResponse(fetchAsset, assetUrlPath(descriptor.path), MAX_SEARCH_SHARD_BYTES, async (body) => {
+        const bytes = new TextEncoder().encode(body)
+        if (bytes.byteLength !== descriptor.bytes) return false
+        // Keep hashing within the same transfer slot: fast asset responses
+        // must not queue hundreds of retained digest buffers concurrently.
+        const digest = await crypto.subtle.digest('SHA-256', bytes)
+        return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('') === descriptor.sha256
+      })
+      const shard = response.body === null ? null : decodePreparedSearchShard(response.body)
+      // Invalid/missing derived data uses canonical parsing. A rejected transfer
+      // never reaches this cache, so temporary outages cannot pin partial search.
+      prepared.set(String(index), shard, estimateRetainedPayloadBytes(shard, 16 * 1024 * 1024))
+      return shard
+    })()
+    pendingPrepared.set(index, load)
+    void load.finally(() => {
+      if (pendingPrepared.get(index) === load) pendingPrepared.delete(index)
+    }).catch(() => {})
+    return load
+  }
+
   return {
     kind: 'assets',
+
+    async searchContent(projectPath) {
+      if (!isSafeProjectPath(projectPath)) return undefined
+      const manifest = await loadManifest()
+      if (!manifest?.search || !Object.prototype.hasOwnProperty.call(manifest.files, projectPath)) return undefined
+      const entry = manifest.files[projectPath]
+      if (!entry || typeof entry !== 'object') return undefined
+      const index = entry.searchShard
+      if (!isRawSha256(entry.sha256) || !Number.isSafeInteger(index) || index === undefined
+        || index < 0 || index >= manifest.search.shards.length) return undefined
+      const shard = await loadSearchShard(index, manifest)
+      const record = shard?.records[projectPath]
+      return record?.sha256 === entry.sha256 ? record.content : undefined
+    },
 
     async exists(projectPath: string): Promise<boolean> {
       if (!isSafeProjectPath(projectPath)) return false

@@ -17,6 +17,8 @@
  * `snippets/note.mdx`, `docs.json`).
  */
 
+import type { SearchContentProjection } from '@thallylabs/core/search'
+
 export type ContentSourceKind = 'filesystem' | 'assets'
 
 export interface ContentSourceFile {
@@ -38,4 +40,6 @@ export interface ContentSource {
   modifiedAt(projectPath: string): Promise<number>
   /** List file paths below a project-relative directory prefix. */
   list(prefix: string): Promise<Array<string>>
+  /** Optional verified canonical search text; undefined uses the ordinary document parser. */
+  searchContent?(projectPath: string): Promise<SearchContentProjection | undefined>
 }

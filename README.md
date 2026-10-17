@@ -223,6 +223,12 @@ cp .env.example .env.local
 
 Legacy `DOX_*` names are still read as a fallback for every `THALLY_*` variable, so existing deployments keep working without renaming anything.
 
+Managed builds prepare canonical search text in protected content assets.
+Search still applies current reader access, locale, version, and listing metadata;
+each prepared record must match its current source SHA. Changed or legacy pages
+use the ordinary canonical parser until the next full build. Transfers and
+decoded shard caches are bounded; this does not change the Worker's CPU or memory limits.
+
 ## Production
 
 ```bash

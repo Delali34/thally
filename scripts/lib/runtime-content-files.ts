@@ -18,6 +18,9 @@ import {
   writeFileSync,
 } from 'node:fs'
 import path from 'node:path'
+import { createHash } from 'node:crypto'
+import { parseFrontmatter } from '../../src/lib/frontmatter'
+import { MAX_SEARCH_SHARD_BYTES, MAX_SEARCH_SHARDS, PREPARED_SEARCH_FORMAT, type PreparedSearchDescriptor, type PreparedSearchRecord } from '../../src/lib/search/prepared-content-contract'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 import { parseOpenApiFrontmatter } from '../../src/lib/openapi/page-frontmatter'
 import { UNPUBLISHED_PAGES_FILE, pageReferenceState, type RoutedSpec } from '../../src/lib/openapi/publication'
@@ -33,7 +36,8 @@ export type RuntimeSourceMap = Record<string, RuntimeSourceEntry>
 
 export interface ContentAssetManifest {
   version: 1
-  files: Record<string, { modifiedAtMs: number }>
+  files: Record<string, { modifiedAtMs: number; sha256: string; searchShard?: number }>
+  search?: PreparedSearchDescriptor
 }
 
 /** Reserved public directory copied verbatim into OpenNext static assets. */
@@ -354,10 +358,10 @@ function assertSafeProjectPath(filePath: string): void {
  * OpenNext copies this directory to `.open-next/assets`, where `env.ASSETS`
  * serves it without adding a byte to the executable Worker module graph.
  */
-export function writeManagedContentAssets(
+export async function writeManagedContentAssets(
   projectRoot: string,
   sources: Readonly<RuntimeSourceMap>,
-): ContentAssetManifest {
+): Promise<ContentAssetManifest> {
   const outputRoot = path.join(projectRoot, MANAGED_CONTENT_ASSET_DIRECTORY)
   rmSync(outputRoot, { recursive: true, force: true })
   mkdirSync(outputRoot, { recursive: true })
@@ -370,8 +374,10 @@ export function writeManagedContentAssets(
     const outputPath = path.join(outputRoot, ...filePath.split('/'))
     mkdirSync(path.dirname(outputPath), { recursive: true })
     writeFileSync(outputPath, entry.content, 'utf8')
-    manifest.files[filePath] = { modifiedAtMs: entry.modifiedAtMs }
+    manifest.files[filePath] = { modifiedAtMs: entry.modifiedAtMs, sha256: rawSha256(entry.content) }
   }
+
+  await writePreparedSearchAssets(outputRoot, sources, manifest)
 
   writeFileSync(
     path.join(outputRoot, 'manifest.json'),
@@ -379,6 +385,57 @@ export function writeManagedContentAssets(
     'utf8',
   )
   return manifest
+}
+
+function rawSha256(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex')
+}
+
+/**
+ * Prepare only canonical search text. Entry metadata, visibility, locales and
+ * current versions are resolved by the runtime, never frozen in these shards.
+ * Limits bound a transfer/decode; oversized records keep the normal parser.
+ */
+async function writePreparedSearchAssets(outputRoot: string, sources: Readonly<RuntimeSourceMap>, manifest: ContentAssetManifest): Promise<void> {
+  // Ordinary monorepo postinstall generates embedded sources before workspace
+  // dist exists. Only a managed build needs the published canonical parser.
+  const [{ parseMdxContent }, { projectSearchContent }] = await Promise.all([
+    import('@thallylabs/core/markdown'), import('@thallylabs/core/search'),
+  ])
+  const descriptor: PreparedSearchDescriptor = { version: 1, shards: [] }
+  const prefix = `{"version":1,"format":${JSON.stringify(PREPARED_SEARCH_FORMAT)},"records":{`
+  const suffix = '}}'
+  let pairs: Array<{ path: string; json: string }> = []
+  let size = Buffer.byteLength(prefix + suffix)
+  const flush = (): void => {
+    if (!pairs.length) return
+    const index = descriptor.shards.length
+    const relativePath = `search/${String(index).padStart(4, '0')}.json`
+    const body = prefix + pairs.map((pair) => pair.json).join(',') + suffix
+    mkdirSync(path.join(outputRoot, 'search'), { recursive: true })
+    writeFileSync(path.join(outputRoot, relativePath), body, 'utf8')
+    descriptor.shards.push({ path: relativePath, sha256: rawSha256(body), bytes: Buffer.byteLength(body) })
+    for (const pair of pairs) manifest.files[pair.path].searchShard = index
+    pairs = []
+    size = Buffer.byteLength(prefix + suffix)
+  }
+  for (const filePath of Object.keys(manifest.files)) {
+    if (!filePath.startsWith('src/content/') || !filePath.endsWith('.mdx')) continue
+    const { content } = parseFrontmatter(sources[filePath].content)
+    const record: PreparedSearchRecord = {
+      sha256: manifest.files[filePath].sha256,
+      content: projectSearchContent(parseMdxContent(content, 'agents')),
+    }
+    const json = `${JSON.stringify(filePath)}:${JSON.stringify(record)}`
+    const bytes = Buffer.byteLength(json)
+    if (bytes + Buffer.byteLength(prefix + suffix) > MAX_SEARCH_SHARD_BYTES) continue
+    if (size + bytes + (pairs.length ? 1 : 0) > MAX_SEARCH_SHARD_BYTES) flush()
+    if (descriptor.shards.length >= MAX_SEARCH_SHARDS) break
+    size += bytes + (pairs.length ? 1 : 0)
+    pairs.push({ path: filePath, json })
+  }
+  flush()
+  if (descriptor.shards.length) manifest.search = descriptor
 }
 
 /** Remove a previous managed tree when switching back to embedded mode. */

@@ -21,7 +21,8 @@ import { createBoundedCache, estimateRetainedPayloadBytes } from '@/lib/bounded-
 
 const CONTENT_ROOT = 'src/content'
 
-function contentFileCandidates(pageId: string, locale?: string): Array<string> {
+/** Physical lookup order shared by full document reads and prepared search reads. */
+export function contentFileCandidates(pageId: string, locale?: string): Array<string> {
   if (!isSafeContentIdentifier(pageId, locale)) return []
   const candidates: Array<string> = []
   if (locale) {

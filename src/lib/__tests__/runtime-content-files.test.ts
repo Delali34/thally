@@ -42,7 +42,7 @@ describe('collectRuntimeContentFiles', () => {
     )
   })
 
-  it('writes sanitized specs (YAML and JSON) without x-excluded operations', () => {
+  it('writes sanitized specs (YAML and JSON) without x-excluded operations', async () => {
     const projectRoot = createProject('openapi/api.yaml')
     mkdirSync(path.join(projectRoot, 'openapi'))
     const doc = {
@@ -69,7 +69,7 @@ describe('collectRuntimeContentFiles', () => {
     expect(sources['openapi.json']!.content).not.toContain('secret')
 
     // Emitted managed asset is what the runtime will fetch; it must stay loadable.
-    writeManagedContentAssets(projectRoot, sources)
+    await writeManagedContentAssets(projectRoot, sources)
     const served = readFileSync(path.join(projectRoot, MANAGED_CONTENT_ASSET_DIRECTORY, 'openapi/api.yaml'), 'utf8')
     expect(served).not.toContain('secret')
     expect(sanitizeSpecForPublication(parseYaml(served))).toEqual(parseYaml(served))
@@ -126,7 +126,7 @@ describe('collectRuntimeContentFiles', () => {
     }
   })
 
-  it('never ships an unfilterable spec, even one bound to a hidden API tab', () => {
+  it('never ships an unfilterable spec, even one bound to a hidden API tab', async () => {
     const projectRoot = mkdtempSync(path.join(tmpdir(), 'thally-runtime-content-'))
     projectRoots.push(projectRoot)
     writeFileSync(path.join(projectRoot, 'docs.json'), JSON.stringify({
@@ -146,7 +146,7 @@ describe('collectRuntimeContentFiles', () => {
       const sources = collectRuntimeContentFiles(projectRoot)
       expect(Object.keys(sources).filter((file) => file.startsWith('openapi/'))).toEqual(['openapi/public.json'])
       expect(Object.values(sources).some((entry) => entry.content.includes('/secret'))).toBe(false)
-      const manifest = writeManagedContentAssets(projectRoot, sources)
+      const manifest = await writeManagedContentAssets(projectRoot, sources)
       expect(Object.keys(manifest.files)).not.toContain('openapi/internal.json')
       expect(existsSync(path.join(projectRoot, MANAGED_CONTENT_ASSET_DIRECTORY, 'openapi/internal.json'))).toBe(false)
     } finally {
