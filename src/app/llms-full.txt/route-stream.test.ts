@@ -1,6 +1,7 @@
 /** The corpus preserves its bytes/privacy while demand and cancellation bound document reads. */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { NextRequest } from 'next/server'
+import { AsyncLocalStorage } from 'node:async_hooks'
 
 const state = vi.hoisted(() => ({ count: 2, canSeePrivate: false, reads: vi.fn(), reader: { userId: 'reader' } }))
 const entry = (id: string) => ({ id, title: id.toUpperCase(), description: `${id} description`, href: `/${id}` })
@@ -29,6 +30,24 @@ const request = (signal?: AbortSignal) => new NextRequest('https://docs.test/llm
 beforeEach(() => { state.count = 2; state.canSeePrivate = false; state.reads.mockReset().mockImplementation(async (id: string) => document(id)) })
 
 describe('pull-driven corpus', () => {
+  it('retains each response request scope when a host pulls outside GET or under another request', async () => {
+    const requests = new AsyncLocalStorage<string>()
+    const seen: Array<string | undefined> = []
+    state.reads.mockImplementation(async (id: string) => {
+      seen.push(requests.getStore())
+      await Promise.resolve()
+      seen.push(requests.getStore())
+      return document(id)
+    })
+    const first = await requests.run('first', () => GET(request()))
+    const second = await requests.run('second', () => GET(request()))
+    await requests.run('unrelated consumer', () => Promise.all([first.text(), second.text()]))
+    expect(seen).toHaveLength(8)
+    expect(seen.filter((scope) => scope === 'first')).toHaveLength(4)
+    expect(seen.filter((scope) => scope === 'second')).toHaveLength(4)
+    expect(requests.getStore()).toBeUndefined()
+  })
+
   it('preserves the exact buffered line sequence, Unicode, technical bytes, ordering and reader visibility', async () => {
     const response = await GET(request())
     const body = await response.text()

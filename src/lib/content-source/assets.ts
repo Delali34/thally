@@ -22,7 +22,7 @@
 
 import type { ContentSource, ContentSourceFile } from './types'
 import { createBoundedCache, createBoundedPromiseCache, estimateRetainedPayloadBytes } from '@/lib/bounded-cache'
-import { getContentAssetFetcher, type ContentAssetFetcher } from './runtime'
+import { getContentAssetFetcher, getContentAssetRequestContext, type ContentAssetFetcher } from './runtime'
 import {
   decodePreparedSearchShard, isPreparedSearchDescriptor, isRawSha256,
   MAX_SEARCH_SHARD_BYTES, type PreparedSearchDescriptor, type PreparedSearchShard,
@@ -77,10 +77,15 @@ function assetUrlPath(projectPath: string): string {
   return CONTENT_ASSET_PREFIX + projectPath.split('/').map(encodeURIComponent).join('/')
 }
 
-/** Create a release-scoped reader with bounded, retryable asset transfers. */
+/**
+ * Create a release-scoped reader with four retryable transfers per Cloudflare
+ * invocation (one shared queue on non-Cloudflare hosts), including body reads.
+ * A custom host may supply its own request identity without an adapter import.
+ */
 export function createAssetsContentSource(
   fallback: ContentSource,
   resolveFetcher: () => ContentAssetFetcher | null = getContentAssetFetcher,
+  resolveReadContext: () => object | null = getContentAssetRequestContext,
 ): ContentSource {
   // Release identity makes reuse correct; budgets keep a long-lived isolate
   // from retaining every page that a crawler or reader has ever requested.
@@ -90,8 +95,9 @@ export function createAssetsContentSource(
     sizeOf: (file) => file ? file.content.length * 2 + 128 : 0,
   })
   let warnedUnavailable = false
-  let activeReads = 0
-  const waitingReads = new Set<() => void>()
+  interface ReadQueue { active: number; waiting: Set<() => void> }
+  const localReads: ReadQueue = { active: 0, waiting: new Set() }
+  const requestReads = new WeakMap<object, ReadQueue>()
   const prepared = createBoundedCache<PreparedSearchShard | null>({ maxEntries: 128, maxBytes: 16 * 1024 * 1024 })
   // At most 256 descriptors exist. Pending ownership is separate from settled
   // LRU eviction, so concurrent pages never refetch the same in-flight shard.
@@ -121,19 +127,25 @@ export function createAssetsContentSource(
   }
 
   /** Hold capacity through body consumption, not merely response headers. */
-  async function withReadSlot<T>(read: () => Promise<T>): Promise<T> {
-    if (activeReads < MAX_ASSET_READS) activeReads += 1
-    else await new Promise<void>((resolve) => waitingReads.add(resolve))
+  async function withReadSlot<T>(owner: object | null, read: () => Promise<T>): Promise<T> {
+    // workerd associates promise continuations with their creating request.
+    // Resolving another invocation's queued promise can cancel its stream
+    // after the slot holder finishes. Immutable value caches remain release-
+    // scoped; transfer slots stay within the adapter's actual ctx.
+    let queue = owner ? requestReads.get(owner) : localReads
+    if (!queue) { queue = { active: 0, waiting: new Set() }; requestReads.set(owner!, queue) }
+    if (queue.active < MAX_ASSET_READS) queue.active += 1
+    else await new Promise<void>((resolve) => queue.waiting.add(resolve))
     try {
       return await read()
     } finally {
       // Transfer ownership directly so a new caller cannot steal a slot
       // between waking the oldest reader and its promise continuation.
-      const next = waitingReads.values().next().value
+      const next = queue.waiting.values().next().value
       if (next) {
-        waitingReads.delete(next)
+        queue.waiting.delete(next)
         next()
-      } else activeReads -= 1
+      } else queue.active -= 1
     }
   }
 
@@ -142,10 +154,11 @@ export function createAssetsContentSource(
     assetPath: string,
     maxBytes?: number,
     validateBody?: (body: string) => Promise<boolean>,
+    owner: object | null = resolveReadContext(),
   ): Promise<{ status: number; body: string | null }> {
     for (let attempt = 0; ; attempt += 1) {
       try {
-        return await withReadSlot(async () => {
+        return await withReadSlot(owner, async () => {
           const response = await fetchAsset(assetPath)
           if (response.ok) {
             const body = maxBytes === undefined ? await response.text() : await boundedBody(response, maxBytes)
@@ -227,12 +240,14 @@ export function createAssetsContentSource(
 
   function readAsset(projectPath: string, manifest: ContentManifest): Promise<ContentSourceFile | null> {
     const fetchAsset = resolveFetcher()
+    // Capture ownership before the cache schedules its loader continuation.
+    const owner = resolveReadContext()
     // A temporarily unavailable binding must not turn embedded fallback bytes
     // into a successful asset-cache entry for the rest of the deployment.
     if (!fetchAsset) return readFallback(projectPath)
     return files.getOrLoad(projectPath, async () => {
       try {
-        const response = await readResponse(fetchAsset, assetUrlPath(projectPath))
+        const response = await readResponse(fetchAsset, assetUrlPath(projectPath), undefined, undefined, owner)
         if (response.body === null) {
           console.warn(`[thally] published content asset missing: ${projectPath} (${response.status})`)
           return null
