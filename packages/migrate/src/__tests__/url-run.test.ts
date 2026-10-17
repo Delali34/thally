@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { classifyMigrationResponse, runUrlMigration } from '../url-run.js'
 import { compile } from '@mdx-js/mdx'
-import type { MigrationCapture, MigrationCaptureProvider, UrlMigrationCheckpointDelta } from '../url-run-types.js'
+import type { MigrationCapture, MigrationCaptureProvider, UrlMigrationCheckpoint, UrlMigrationCheckpointDelta } from '../url-run-types.js'
 
 function response(path: string, body: string, contentType = 'text/html'): MigrationCapture {
   return { finalUrl: new URL(path, 'https://docs.test'), body, contentType }
@@ -79,6 +79,53 @@ describe('evidence URL runner', () => {
     expect(captured).toContain('/one')
     expect(second.bundle.pages).toHaveLength(2)
     expect(second.validation.status).toBe('passed')
+  })
+
+  it.each(['sitemap', 'navigation'] as const)('replays durable %s discovery after only the first inventory chunk commits', async (kind) => {
+    // Deliberately nonlexical source order; leaves have no article crosslinks.
+    const paths = Array.from({ length: 40 }, (_, index) => `/leaf-${(index * 17) % 40}`)
+    const sourceUrl = `https://docs.test/${kind === 'sitemap' ? 'sitemap.xml' : 'guide'}`
+    const source = kind === 'sitemap'
+      ? response('/sitemap.xml', `<urlset>${paths.map((path) => `<url><loc>https://docs.test${path}</loc></url>`).join('')}</urlset>`, 'application/xml')
+      : { ...response('/guide', article('Root', '<a href="/file.pdf">Download</a>')), navigation: [{ label: 'Guides', children: paths.map((path) => ({ label: path.slice(1), url: `https://docs.test${path}` })) }] }
+    const pages = Object.fromEntries([[new URL(sourceUrl).pathname, source], ...paths.map((path) => [path, response(path, article(path.slice(1)))])])
+    let durable: UrlMigrationCheckpoint | undefined
+    await expect(runUrlMigration({ sourceUrl, concurrency: 1, batchSize: 16, captureProvider: provider(pages), onCheckpoint: async (delta) => {
+      durable = JSON.parse(JSON.stringify({ ...delta, navigation: delta.navigation ?? [] }))
+      throw new Error('Host crashed after committing first chunk')
+    } })).rejects.toThrow('Host crashed')
+    expect(durable!.records).toHaveLength(16)
+    expect(durable!.records.some((record) => record.url === sourceUrl && record.evidence)).toBe(true)
+    const captured: string[] = []
+    const resumed = await runUrlMigration({ sourceUrl, checkpoint: durable, concurrency: 1, captureProvider: { capture: async (request) => {
+      expect(request.url.href).not.toBe(sourceUrl)
+      captured.push(request.url.pathname)
+      return provider(pages).capture(request)
+    } } })
+    expect(resumed.validation.status).toBe('passed')
+    expect(resumed.bundle.pages.filter((page) => page.title !== 'Root').map((page) => `/${page.id}`)).toEqual(paths)
+    expect(captured.filter((path) => paths.includes(path))).toEqual(paths)
+    expect(captured).not.toContain('/file.pdf')
+    if (kind === 'navigation') expect(resumed.bundle.docsConfig.tabs[0].pages).toEqual([{ group: 'Guides', pages: paths.map((path) => path.slice(1)) }])
+    const complete = await runUrlMigration({ sourceUrl, concurrency: 1, captureProvider: provider(pages) })
+    expect(resumed).toEqual(complete)
+    const replayed = await runUrlMigration({ sourceUrl, checkpoint: complete.checkpoint, captureProvider: { capture: async () => { throw new Error('Complete checkpoint must not be recaptured') } } })
+    expect(JSON.stringify(replayed)).toBe(JSON.stringify(complete))
+  })
+
+  it('replays relative article links using the same canonical final base as live capture', async () => {
+    const sourceUrl = 'https://docs.test/guide/'
+    const complete = await runUrlMigration({ sourceUrl, scopePath: '/', concurrency: 1, captureProvider: provider({
+      '/guide': response('/guide/', article('Guide', '<a href="child">Child</a>')),
+      '/child': response('/child', article('Canonical child')),
+      '/guide/child': response('/guide/child', article('Nested child')),
+      '/sitemap.xml': response('/sitemap.xml', '<urlset><url><loc>https://docs.test/guide/child</loc></url></urlset>', 'application/xml'),
+    }) })
+    expect(complete.validation.status).toBe('passed')
+    const nested = complete.checkpoint.records.find((record) => record.url.endsWith('/guide/child'))!
+    expect(nested.discoveredBy).toEqual(['https://docs.test/sitemap.xml'])
+    const replayed = await runUrlMigration({ sourceUrl, scopePath: '/', checkpoint: complete.checkpoint, captureProvider: { capture: async () => { throw new Error('Must not recapture') } } })
+    expect(JSON.stringify(replayed)).toBe(JSON.stringify(complete))
   })
 
   it('rejects executable MDX and exposes missing anchors and unsafe assets', async () => {

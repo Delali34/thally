@@ -481,6 +481,36 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
   enqueue(sourceUrl, sourceUrl, 'submitted')
   for (const path of ['llms.txt', 'sitemap.xml', 'robots.txt']) enqueue(`${scopePath === '/' ? '' : scopePath}/${path}`, sourceUrl, 'discovery-index')
   if (scopePath !== '/') for (const path of ['llms.txt', 'sitemap.xml', 'robots.txt']) enqueue(`/${path}`, sourceUrl, 'discovery-index')
+  const enqueueArticleLinks = (links: Array<string>, base: string, discoveredBy: string): void => {
+    for (const link of links) {
+      try {
+        const url = new URL(link, base)
+        if (!/\.(?:png|jpe?g|gif|svg|webp|avif|pdf|zip|mp4|webm|css|js)$/i.test(url.pathname)) enqueue(link, base, discoveredBy)
+      } catch { /* Malformed links remain visible in source evidence. */ }
+    }
+  }
+  const enqueueNavigation = (nodes: Array<MigrationNavigationOccurrence>, base: string): void => {
+    for (const node of nodes) {
+      if (node.url) enqueue(node.url, base, 'source-navigation')
+      enqueueNavigation(node.children ?? [], base)
+    }
+  }
+  // A source record/header can commit before later pending-inventory chunks.
+  // Rebuild those missing edges from durable evidence before skipping already
+  // captured sources. Use the same scope, media and provenance rules as capture;
+  // complete journals remain byte-identical and replay never fetches a source.
+  for (const record of [...records.values()]) {
+    if (!record.evidence) continue
+    const final = canonical(record.evidence.finalUrl, sourceUrl)
+    if (!final) continue
+    if (record.outcome === 'imported') enqueueArticleLinks(record.evidence.links, final, record.url)
+    else if (record.outcome === 'excluded') {
+      if (classifyMigrationResponse({ finalUrl: new URL(final), contentType: record.evidence.contentType, body: '' }) === 'index') {
+        for (const link of record.evidence.links) enqueue(link, final, record.url)
+      }
+    }
+  }
+  enqueueNavigation(checkpoint.navigation, sourceUrl)
   const fetcher = options.fetcher ?? defaultMigrationFetcher
   const capture = options.captureProvider?.capture.bind(options.captureProvider)
     ?? (async ({ url }: { url: URL }): Promise<MigrationCapture> => fetcher(url, { accept: ACCEPT }))
@@ -637,16 +667,8 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
       imported++
       const navigation = checkpoint.navigation.length ? [] : sourceNavigation(document)
       if (!checkpoint.navigation.length && navigation.length) { checkpoint.navigation = navigation; navigationChanged = true }
-      for (const link of evidence.links) {
-        try {
-          const url = new URL(link, final)
-          if (!/\.(?:png|jpe?g|gif|svg|webp|avif|pdf|zip|mp4|webm|css|js)$/i.test(url.pathname)) enqueue(link, final, record.url)
-        } catch { /* Malformed links remain visible in source evidence. */ }
-      }
-      const visit = (nodes: Array<MigrationNavigationOccurrence>): void => {
-        for (const node of nodes) { if (node.url) enqueue(node.url, final, 'source-navigation'); visit(node.children ?? []) }
-      }
-      visit(navigation)
+      enqueueArticleLinks(evidence.links, final, record.url)
+      enqueueNavigation(navigation, final)
     } catch (error) {
       if (options.signal?.aborted) return
       const wasImported = record.outcome === 'imported'
