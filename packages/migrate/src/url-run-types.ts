@@ -6,6 +6,10 @@ import type { MigrationBundle, MigrationFetchResponse, MigrationFetcher, Migrati
 
 export interface MigrationNavigationOccurrence {
   label: string
+  /** Structured source roles retain top-level tabs separately from sidebar groups. */
+  kind?: 'tab' | 'group' | 'page'
+  /** A localized collection never merges with a same-named collection in another language. */
+  locale?: string
   url?: string
   children?: Array<MigrationNavigationOccurrence>
 }
@@ -66,6 +70,10 @@ export interface UrlMigrationRecord {
   outcome: 'pending' | 'imported' | 'excluded' | 'failed' | 'alias'
   reason?: string
   aliasOf?: string
+  /** Publisher-declared Markdown representation of this exact same-origin article. */
+  representationOf?: string
+  /** Complete inert API schema observed at a declared same-route Markdown representation. */
+  apiSpecification?: { path: string; sha256: string; document: Record<string, unknown> }
   evidence?: MigrationEvidence
   page?: MigrationPage
   pageSha256?: string
@@ -96,7 +104,7 @@ export interface UrlMigrationCheckpointDelta {
 }
 
 export interface UrlMigrationIssue {
-  code: 'missing-page' | 'missing-anchor' | 'code-mismatch' | 'asset-failed' | 'unsafe-content' | 'unsupported-component' | 'navigation-missing' | 'collision'
+  code: 'missing-page' | 'missing-anchor' | 'source-link-warning' | 'code-mismatch' | 'asset-failed' | 'unsafe-content' | 'unsupported-component' | 'navigation-missing' | 'collision'
   source: string
   message: string
 }
@@ -104,6 +112,8 @@ export interface UrlMigrationIssue {
 export interface UrlMigrationValidation {
   status: 'passed' | 'partial' | 'cancelled'
   issues: Array<UrlMigrationIssue>
+  /** Proven source defects are reported separately from import-caused fidelity failures. */
+  warnings?: Array<UrlMigrationIssue>
   counts: Record<UrlMigrationRecord['outcome'], number>
 }
 
