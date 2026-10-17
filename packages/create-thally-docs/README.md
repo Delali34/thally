@@ -78,6 +78,16 @@ runs retain subprocess output for scripts and CI. These options also work with
 | `create-thally-docs check [dir] [--fix] [--ci] [--drift] [--external]` | Lint content for broken links, orphan pages, and missing frontmatter; `--external` also checks links to public hosts (bounded, warnings only) |
 | `create-thally-docs translate --locale <code>` | Translate content into another locale |
 
+Public URL imports default to 1,000 pages. The web migration flow supports up to
+1,000 pages; for larger sites, use the CLI with an explicit `--max-pages` value
+(up to 10,000). This is a crawl limit, not a guarantee that every site of that
+size will import or build successfully. Source access, content size, and the
+destination runtime still apply. For example:
+
+```bash
+npx create-thally-docs migrate https://docs.example.com my-docs --max-pages 1500 --yes
+```
+
 Interactive migrations ask whether the source is Mintlify, Docusaurus, Fern, or
 another auto-detected platform. When automatic detection receives a live
 website URL, the CLI recommends its source GitHub repository and requires

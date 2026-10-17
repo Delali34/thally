@@ -99,7 +99,7 @@ Options:
   --into <dir>         Migrate into an existing Thally project
   --branch <name>      Override the detected Git branch
   --docs-dir <path>    Override the detected documentation directory
-  --max-pages <count>  Limit a public URL crawl to 1-1000 pages
+  --max-pages <count>  Limit a public URL crawl to 1-10000 pages (default: 1000)
   --platform <name>    Use mintlify, docusaurus, fern, or auto
   --source-ref <owner/repo>=<path>
                        Import a Mintlify sourceRef repository under <path> (repeatable)
@@ -232,8 +232,8 @@ async function runMigrateCommand(): Promise<void> {
 
   const maxPagesValue = getFlagValue('--max-pages')
   const maxPages = maxPagesValue ? Number(maxPagesValue) : undefined
-  if (maxPages !== undefined && (!Number.isInteger(maxPages) || maxPages < 1 || maxPages > 1000)) {
-    console.error('\n  ❌ --max-pages must be an integer between 1 and 1000.')
+  if (maxPages !== undefined && (!Number.isInteger(maxPages) || maxPages < 1 || maxPages > 10_000)) {
+    console.error('\n  ❌ --max-pages must be an integer between 1 and 10000.')
     process.exit(1)
   }
   terminal.detail('Source', `${source.origin}${source.pathname}`)
