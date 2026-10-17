@@ -1,6 +1,6 @@
 {
   "name": "@thallylabs/migrate",
-  "version": "0.2.31",
+  "version": "0.2.32",
   "description": "Shared repository and live-site migration engine for Thally",
   "type": "module",
   "publishConfig": {

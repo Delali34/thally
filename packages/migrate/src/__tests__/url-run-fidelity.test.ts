@@ -1,12 +1,78 @@
 /** Regression contracts for format identities, container code and complete tab observations. */
 import { describe, expect, it } from 'vitest'
 import { runUrlMigration, validateUrlMigration } from '../url-run.js'
-import type { MigrationCapture } from '../url-run-types.js'
+import type { MigrationCapture, MigrationNavigationOccurrence } from '../url-run-types.js'
 
 const response = (path: string, body: string, contentType = 'text/html'): MigrationCapture => ({ finalUrl: new URL(path, 'https://docs.test'), body, contentType })
 const html = (title: string, body = '', head = '') => `<html lang="en"><head>${head}</head><body><main><article><h1>${title}</h1><p>Original documentation prose.</p>${body}</article></main></body></html>`
 
+function legacyLocaleNavigation(englishPages = ['/api/status'], chinesePages = ['/zh-hans-api/status']): Array<MigrationNavigationOccurrence> {
+  return [
+    { kind: 'tab', label: 'API', locale: 'en', children: englishPages.map(url => ({ kind: 'page', label: 'Status', url })) },
+    { kind: 'tab', label: 'API', locale: 'zh-Hans', children: chinesePages.map(url => ({ kind: 'page', label: 'Status', url })) },
+  ]
+}
+
+async function migrateLegacyLocale(navigation: Array<MigrationNavigationOccurrence>, additionalCaptures: Array<MigrationCapture> = []) {
+  const captures = new Map([
+    response('/api/status', html('English status', '<h2 id="details">Details</h2><p>Original English status payload.</p><a href="/zh-hans-api/status#details">Chinese status</a>')),
+    response('/zh-hans-api/status', html('中文状态', '<h2 id="details">详细信息</h2><p>原始中文文档内容。</p><a href="/api/status#details">English status</a><a href="/zh-hans-api/status#details">当前状态</a>')),
+    ...additionalCaptures,
+  ].map(capture => [capture.finalUrl.pathname, capture]))
+  return runUrlMigration({ sourceUrl: 'https://docs.test/api/status', scopePath: '/', captureProvider: { capture: async ({ url }) => {
+    const capture = captures.get(url.pathname)
+    if (!capture) throw new Error('Missing source')
+    return { ...capture, navigation }
+  } } })
+}
+
 describe('URL import fidelity regressions', () => {
+  it('normalizes a legacy locale namespace only with explicit language navigation and a primary counterpart', async () => {
+    const result = await migrateLegacyLocale(legacyLocaleNavigation())
+    expect(result.validation.status).toBe('passed')
+    expect(result.bundle.pages).toHaveLength(2)
+    expect(result.bundle.pages.map(page => page.id).sort()).toEqual(['api/status', 'zh-Hans/api/status'])
+    const primary = result.bundle.pages.find(page => page.id === 'api/status')!
+    const translated = result.bundle.pages.find(page => page.id === 'zh-Hans/api/status')!
+    expect(translated).toMatchObject({ navigationId: 'api/status', locale: 'zh-Hans', title: '中文状态', source: 'https://docs.test/zh-hans-api/status' })
+    expect(translated.body).toContain('原始中文文档内容。')
+    expect(translated.body).not.toContain('Original English status payload.')
+    expect(primary.body).toContain('[Chinese status](/zh-Hans/api/status#details)')
+    expect(translated.body).toContain('[English status](/api/status#details)')
+    expect(translated.body).toContain('[当前状态](/zh-Hans/api/status#details)')
+    expect(result.bundle.docsConfig.redirects).toEqual([{ source: '/zh-hans-api/status', destination: '/zh-Hans/api/status', permanent: true }])
+    expect(result.bundle.docsConfig.tabs).toEqual([{ tab: 'API', pages: ['api/status'] }])
+    expect(result.bundle.docsConfig.i18n).toMatchObject({ defaultLocale: 'en', locales: [{ code: 'en', label: 'English' }, { code: 'zh-Hans', label: 'zh-Hans' }], navigation: { 'zh-Hans': [{ tab: 'API', pages: ['api/status'] }] } })
+    const replay = await runUrlMigration({ sourceUrl: result.checkpoint.sourceUrl, scopePath: result.checkpoint.scopePath, checkpoint: structuredClone(result.checkpoint), captureProvider: { capture: async () => { throw new Error('No recapture') } } })
+    expect(replay).toEqual(result)
+  })
+
+  it('does not infer a translated counterpart from a primary page absent from primary navigation', async () => {
+    const result = await migrateLegacyLocale(legacyLocaleNavigation([], ['/zh-hans-api/status']))
+    expect(result.bundle.pages.find(page => page.source.endsWith('/zh-hans-api/status'))).toMatchObject({ id: 'zh-hans-api/status', navigationId: 'zh-hans-api/status', locale: 'en' })
+    expect(result.bundle.pages.some(page => page.id === 'zh-Hans/api/status')).toBe(false)
+    expect(result.bundle.docsConfig.redirects ?? []).toEqual([])
+    expect(result.validation.status).toBe('partial')
+    expect(result.validation.issues).toContainEqual(expect.objectContaining({ code: 'navigation-missing' }))
+  })
+
+  it('does not normalize a source assigned to conflicting language collections', async () => {
+    const result = await migrateLegacyLocale(legacyLocaleNavigation(['/api/status', '/zh-hans-api/status']))
+    expect(result.bundle.pages.find(page => page.source.endsWith('/zh-hans-api/status'))).toMatchObject({ id: 'zh-hans-api/status', navigationId: 'zh-hans-api/status', locale: 'en' })
+    expect(result.bundle.pages.some(page => page.id === 'zh-Hans/api/status')).toBe(false)
+    expect(result.bundle.docsConfig.redirects ?? []).toEqual([])
+    expect(result.validation.status).toBe('partial')
+    expect(result.validation.issues).toContainEqual(expect.objectContaining({ code: 'navigation-missing' }))
+  })
+
+  it('blocks a legacy locale projection that collides with an existing authored translation', async () => {
+    const canonical = response('/zh-Hans/api/status', html('Authored Chinese status', '<h2 id="details">Details</h2><p>Distinct authored translation.</p>').replace('<html lang="en">', '<html lang="zh-Hans">'))
+    const result = await migrateLegacyLocale(legacyLocaleNavigation(['/api/status'], ['/zh-hans-api/status', '/zh-Hans/api/status']), [canonical])
+    expect(result.validation.status).toBe('partial')
+    expect(result.validation.issues).toContainEqual(expect.objectContaining({ code: 'collision', message: expect.stringContaining('zh-Hans/api/status') }))
+    expect(result.bundle.pages.filter(page => page.id === 'zh-Hans/api/status').map(page => page.source).sort()).toEqual(['https://docs.test/zh-Hans/api/status', 'https://docs.test/zh-hans-api/status'])
+  })
+
   it('keeps declared directory-index and Markdown aliases on one canonical article', async () => {
     const fetched: string[] = []
     const result = await runUrlMigration({ sourceUrl: 'https://docs.test/catalog', captureProvider: { capture: async ({ url }) => {

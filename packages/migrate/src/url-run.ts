@@ -26,7 +26,7 @@ import type {
 
 // Conversion and navigation evidence changed together. Older journals must be
 // recaptured rather than reusing page hashes produced by the previous rules.
-const CONVERTER_VERSION = 'url-evidence-v3'
+const CONVERTER_VERSION = 'url-evidence-v4'
 const parser = unified().use(remarkParse).use(remarkMdx)
 const ACCEPT = 'text/markdown,text/html,application/xhtml+xml;q=0.9'
 const MAX_RESPONSE_BYTES = 8_000_000
@@ -351,21 +351,22 @@ function resolveMigrationRecord(records: Map<string, UrlMigrationRecord>, record
   return record
 }
 
-function navigationConfig(navigation: Array<MigrationNavigationOccurrence>, records: Map<string, UrlMigrationRecord>): MigrationBundle['docsConfig'] | null {
+function navigationConfig(checkpoint: UrlMigrationCheckpoint, records: Map<string, UrlMigrationRecord>): MigrationBundle['docsConfig'] | null {
+  const navigation = checkpoint.navigation
+  const projection = localeProjection(checkpoint)
   const project = (nodes: Array<MigrationNavigationOccurrence>): Array<string | MigrationNavigationGroup> => nodes.flatMap<string | MigrationNavigationGroup>((node) => {
     const record = node.url ? records.get(canonical(node.url, node.url) ?? '') : undefined
     const target = resolveMigrationRecord(records, record)
     const page = target?.page
     const children = project(node.children ?? [])
     if (children.length) {
-      const contains = (entries: Array<string | MigrationNavigationGroup>): boolean => entries.some((entry) => typeof entry === 'string' ? entry === page?.navigationId : contains(entry.pages))
-      return [{ group: node.label || 'Documentation', pages: [...(page && !contains(children) ? [page.navigationId] : []), ...children] }]
+      const contains = (entries: Array<string | MigrationNavigationGroup>): boolean => entries.some((entry) => typeof entry === 'string' ? entry === (page && projection.navigationId(page)) : contains(entry.pages))
+      return [{ group: node.label || 'Documentation', pages: [...(page && !contains(children) ? [projection.navigationId(page)] : []), ...children] }]
     }
-    return page ? [page.navigationId] : []
+    return page ? [projection.navigationId(page)] : []
   })
   const tabs = navigation.filter(node => node.kind === 'tab')
   if (tabs.length) {
-    const projection = localeProjection({ records: [...records.values()] } as UrlMigrationCheckpoint)
     const locales = [...new Set(tabs.map(tab => tab.locale ?? projection.defaultLocale))]
     const localizedTabs = (locale: string): MigrationBundle['docsConfig']['tabs'] => tabs
       .filter(tab => (tab.locale ?? projection.defaultLocale) === locale)
@@ -383,13 +384,14 @@ function navigationConfig(navigation: Array<MigrationNavigationOccurrence>, reco
   return pages.length ? { tabs: [{ tab: 'Documentation', pages }] } : null
 }
 
+function canonicalLanguage(value: string): string | undefined {
+  if (!/^[a-z]{2,3}(?:-[a-z0-9]{2,8}){0,4}$/i.test(value)) return undefined
+  try { return Intl.getCanonicalLocales(value)[0] } catch { return undefined }
+}
+
 /** Bind language to observed capture metadata, scoped URL identity and native HTML evidence. */
 function observedLocale(document: MigrationCapture, id: string, scopePath: string): { locale?: string; issues: Array<UrlMigrationIssue> } {
   const issues: Array<UrlMigrationIssue> = []
-  const canonicalLanguage = (value: string): string | undefined => {
-    if (!/^[a-z]{2,3}(?:-[a-z0-9]{2,8}){0,4}$/i.test(value)) return undefined
-    try { return Intl.getCanonicalLocales(value)[0] } catch { return undefined }
-  }
   const candidates: Array<{ source: string; value: string }> = []
   if (document.locale) {
     const locale = canonicalLanguage(document.locale)
@@ -414,23 +416,66 @@ function observedLocale(document: MigrationCapture, id: string, scopePath: strin
 /** Match the runtime: primary files are unprefixed; translations require a primary slug. */
 function localeProjection(checkpoint: UrlMigrationCheckpoint) {
   const pages = checkpoint.records.flatMap((record) => record.page ? [record.page] : [])
-  const canonicalLocale = (page: MigrationPage): string | undefined => {
+  const declaredLocale = (page: MigrationPage): string | undefined => {
     try { return page.locale ? Intl.getCanonicalLocales(page.locale)[0] : undefined } catch { return undefined }
   }
-  const locales = [...new Set(pages.map(canonicalLocale).filter((locale): locale is string => Boolean(locale)))]
+  const declaredLocales = [...new Set(pages.map(declaredLocale).filter((locale): locale is string => Boolean(locale)))]
   // A single-language French site must not become an orphan translation of
   // invented English content. Mixed/unprefixed sources retain English primary.
-  const defaultLocale = pages.some((page) => !page.locale) || locales.includes('en') ? 'en' : locales[0] ?? 'en'
+  const defaultLocale = pages.some((page) => !page.locale) || declaredLocales.includes('en') ? 'en' : declaredLocales[0] ?? 'en'
+  const records = new Map(checkpoint.records.map(record => [record.url, record]))
+  const memberships = new Map<MigrationPage, Set<string>>()
+  const observe = (nodes: Array<MigrationNavigationOccurrence>, parentLocale?: string): void => {
+    for (const node of nodes) {
+      const locale = node.locale ? canonicalLanguage(node.locale) : parentLocale
+      const entry = node.url ? records.get(canonical(node.url, checkpoint.sourceUrl) ?? '') : undefined
+      const page = resolveMigrationRecord(records, entry)?.page
+      if (page && locale) {
+        const languages = memberships.get(page) ?? new Set<string>()
+        languages.add(locale)
+        memberships.set(page, languages)
+      }
+      observe(node.children ?? [], locale)
+    }
+  }
+  observe(checkpoint.navigation)
+  const primaryIds = new Set(pages.filter(page => !declaredLocale(page) || declaredLocale(page) === defaultLocale)
+    .filter(page => memberships.get(page)?.has(defaultLocale)).map(page => page.navigationId))
+  const remapped = new Map<MigrationPage, { locale: string; navigationId: string }>()
+  for (const page of pages) {
+    const languages = memberships.get(page)
+    if (languages?.size !== 1) continue
+    const locale = [...languages][0]
+    const prefix = `${locale.toLowerCase()}-`
+    // Some publishers put translated pages in legacy namespaces such as
+    // fr-api/ while declaring HTML lang=en. Normalize only with three agreeing
+    // facts: explicit language navigation, its exact namespace prefix, and an
+    // existing primary-language counterpart. Content is never guessed/copied.
+    if (locale === defaultLocale || !page.navigationId.toLowerCase().startsWith(prefix)) continue
+    const navigationId = page.navigationId.slice(prefix.length)
+    if (primaryIds.has(navigationId)) remapped.set(page, { locale, navigationId })
+  }
+  const canonicalLocale = (page: MigrationPage): string | undefined => remapped.get(page)?.locale ?? declaredLocale(page)
+  const navigationId = (page: MigrationPage): string => remapped.get(page)?.navigationId ?? page.navigationId
+  const locales = [...new Set(pages.map(canonicalLocale).filter((locale): locale is string => Boolean(locale)))]
   const pageId = (page: MigrationPage): string => {
     const locale = canonicalLocale(page)
-    return locale ? `${locale === defaultLocale ? '' : `${locale}/`}${page.navigationId}` : page.id
+    return locale ? `${locale === defaultLocale ? '' : `${locale}/`}${navigationId(page)}` : page.id
   }
   const route = (page: MigrationPage): string => {
     const locale = canonicalLocale(page)
     const prefix = locale && locale !== defaultLocale ? `/${locale}` : ''
-    return `${prefix}${page.navigationId === 'introduction' ? '/' : `/${page.navigationId}`}`
+    return `${prefix}${navigationId(page) === 'introduction' ? '/' : `/${navigationId(page)}`}`
   }
-  return { canonicalLocale, locales, defaultLocale, pageId, route }
+  const redirects = checkpoint.records.flatMap(record => {
+    if (!record.page || !remapped.has(record.page)) return []
+    const source = new URL(record.url)
+    // Redirect routes use pattern syntax. Only emit literal portable paths;
+    // source-controlled wildcard/parameter syntax must never widen a rule.
+    return source.search || !/^\/[A-Za-z0-9/_~.%+-]*$/.test(source.pathname) ? []
+      : [{ source: source.pathname, destination: route(record.page), permanent: true }]
+  })
+  return { canonicalLocale, navigationId, locales, defaultLocale, pageId, route, redirects }
 }
 
 /** Validate every selected outcome, source payload, internal destination and anchor. */
@@ -442,7 +487,7 @@ export function validateUrlMigration(checkpoint: UrlMigrationCheckpoint, cancell
   const source = new URL(checkpoint.sourceUrl)
   const projection = localeProjection(checkpoint)
   const primaryIds = new Set(checkpoint.records.flatMap((record) => record.page
-    && (!record.page.locale || projection.canonicalLocale(record.page) === projection.defaultLocale) ? [record.page.navigationId] : []))
+    && (!projection.canonicalLocale(record.page) || projection.canonicalLocale(record.page) === projection.defaultLocale) ? [projection.navigationId(record.page)] : []))
   const outputIds = new Set<string>()
   const resolve = (url: string): UrlMigrationRecord | undefined => {
     const record = records.get(canonical(url, checkpoint.sourceUrl) ?? '')
@@ -456,8 +501,8 @@ export function validateUrlMigration(checkpoint: UrlMigrationCheckpoint, cancell
     const outputId = projection.pageId(record.page)
     if (outputIds.has(outputId)) issues.push({ code: 'collision', source: record.url, message: `Multiple source pages map to runtime path ${outputId}.` })
     outputIds.add(outputId)
-    if (record.page.locale && projection.canonicalLocale(record.page) !== projection.defaultLocale && !primaryIds.has(record.page.navigationId)) {
-      issues.push({ code: 'missing-page', source: record.url, message: `Secondary locale ${record.page.locale} requires a primary ${projection.defaultLocale} page at ${record.page.navigationId}; the runtime cannot serve an orphan translation.` })
+    if (projection.canonicalLocale(record.page) && projection.canonicalLocale(record.page) !== projection.defaultLocale && !primaryIds.has(projection.navigationId(record.page))) {
+      issues.push({ code: 'missing-page', source: record.url, message: `Secondary locale ${projection.canonicalLocale(record.page)} requires a primary ${projection.defaultLocale} page at ${projection.navigationId(record.page)}; the runtime cannot serve an orphan translation.` })
     }
     const actual = markdownCode(record.page.body)
     if (JSON.stringify(actual) !== JSON.stringify(record.evidence.code)) issues.push({ code: 'code-mismatch', source: record.url, message: 'Source code payloads differ from converted code payloads.' })
@@ -486,13 +531,20 @@ export function validateUrlMigration(checkpoint: UrlMigrationCheckpoint, cancell
       }
     }
   }
-  const visit = (nodes: Array<MigrationNavigationOccurrence>): void => {
+  const visit = (nodes: Array<MigrationNavigationOccurrence>, parentLocale?: string): void => {
     for (const node of nodes) {
+      const locale = node.locale ? canonicalLanguage(node.locale) : parentLocale
       if (node.url) {
         const url = new URL(node.url, source)
-        if (inScope(url, source, checkpoint.scopePath) && !resolve(url.toString())?.page) issues.push({ code: 'navigation-missing', source: node.url, message: `Source navigation target ${node.label} was not imported.` })
+        if (inScope(url, source, checkpoint.scopePath)) {
+          const page = resolve(url.toString())?.page
+          if (!page) issues.push({ code: 'navigation-missing', source: node.url, message: `Source navigation target ${node.label} was not imported.` })
+          else if (locale && locale !== projection.defaultLocale && !outputIds.has(`${locale}/${projection.navigationId(page)}`)) {
+            issues.push({ code: 'navigation-missing', source: node.url, message: `The ${locale} sidebar target ${node.label} has no authored localized runtime page.` })
+          }
+        }
       }
-      visit(node.children ?? [])
+      visit(node.children ?? [], locale)
     }
   }
   visit(checkpoint.navigation)
@@ -885,7 +937,7 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
     }
   }
   labelPages(checkpoint.navigation)
-  const pages = checkpoint.records.flatMap((record) => record.page ? [{ ...record.page, id: projection.pageId(record.page), ...(record.page.locale ? { locale: projection.canonicalLocale(record.page) } : {}), ...(navigationLabels.has(record.url) ? { navTitle: navigationLabels.get(record.url) } : {}), body: rewriteMarkdownDestinations(record.page.body, (value) => {
+  const pages = checkpoint.records.flatMap((record) => record.page ? [{ ...record.page, id: projection.pageId(record.page), navigationId: projection.navigationId(record.page), ...(projection.canonicalLocale(record.page) ? { locale: projection.canonicalLocale(record.page) } : {}), ...(navigationLabels.has(record.url) ? { navTitle: navigationLabels.get(record.url) } : {}), body: rewriteMarkdownDestinations(record.page.body, (value) => {
     let url: URL
     try { url = new URL(value, record.evidence!.finalUrl) } catch { return value }
     const route = routeMap.get(canonical(url.toString(), sourceUrl)!)
@@ -909,11 +961,12 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
   }
   const bundle: MigrationBundle = {
     sourceUrl, sourceKind: 'url', platform: options.platform ?? 'generic', pages, assets: [...assets.values()],
-    docsConfig: navigationConfig(checkpoint.navigation, records) ?? buildNavigationFromPages(pages),
+    docsConfig: navigationConfig(checkpoint, records) ?? buildNavigationFromPages(pages),
     warnings: [...validation.issues, ...validation.warnings ?? []].map((issue) => ({ code: issue.code === 'missing-page' ? 'missing-page' : 'unsupported-config', message: issue.message, source: issue.source })),
     urlMigrationValidation: validation,
     stats: { discovered: records.size, imported: pages.length, skipped: records.size - pages.length },
   }
+  if (projection.redirects.length) bundle.docsConfig.redirects = projection.redirects
   if (projection.locales.length) {
     const locales = [...new Set([projection.defaultLocale, ...projection.locales])]
     bundle.docsConfig.i18n = { ...bundle.docsConfig.i18n, defaultLocale: projection.defaultLocale, locales: locales.map((code) => ({ code, label: code === 'en' ? 'English' : code })) }
