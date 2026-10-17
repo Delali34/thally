@@ -1235,18 +1235,24 @@ function navigationLocaleForHref(href: string): string | undefined {
     : undefined
 }
 
+/** Adjacent readable pages in first-seen navigation order, deduplicated by exact href. */
 export function getPrevNextLinks(currentHref: string, reader: ReaderContext = ANONYMOUS_READER): {
   prev: PrevNextLink | null
   next: PrevNextLink | null
 } {
   const collections = getSidebarCollections(navigationLocaleForHref(currentHref), reader)
   const flatPages: Array<{ title: string; href: string }> = []
+  // Pages may occur in several groups. Exact href membership preserves the
+  // first title/order without rescanning every earlier page on large sites.
+  const seenHrefs = new Set<string>()
 
   for (const collection of collections) {
     for (const section of collection.sections) {
       for (const item of section.items) {
-        if (!flatPages.some((p) => p.href === item.href)) {
-          flatPages.push({ title: item.title, href: item.href })
+        const href = item.href
+        if (!seenHrefs.has(href)) {
+          seenHrefs.add(href)
+          flatPages.push({ title: item.title, href })
         }
       }
     }

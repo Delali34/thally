@@ -4,17 +4,19 @@ import { createElement, type ReactNode } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SidebarCollection } from '@/data/docs'
+import type { NavigationSnapshot } from '@/lib/navigation-snapshot'
 
 const mocks = vi.hoisted(() => ({
   pathname: '/zh-Hans/guides/fees-monetization/faq',
   snapshots: {} as Record<string, Array<SidebarCollection>>,
   loadCollections: vi.fn(),
 }))
-vi.mock('next/navigation', () => ({ usePathname: () => mocks.pathname }))
+vi.mock('next/navigation', () => ({ usePathname: () => mocks.pathname, useRouter: () => ({ refresh: () => undefined }) }))
 vi.mock('@/data/docs', () => ({ loadSidebarCollections: mocks.loadCollections }))
 vi.mock('@/data/api-reference', () => ({ withApiNavigation: async (collections: unknown) => collections }))
+vi.mock('@/lib/i18n/request', () => ({ getEffectiveI18nConfig: async () => ({ defaultLocale: 'en', locales: [{ code: 'en' }, { code: 'zh-Hans' }] }) }))
 vi.mock('./sidebar-store', () => ({
-  useSidebarCollectionsStore: (selector: (state: { collectionsByScope: typeof mocks.snapshots }) => unknown) => selector({ collectionsByScope: mocks.snapshots }),
+  useSidebarCollectionsStore: (selector: (state: { collectionsByScope: typeof mocks.snapshots; navigationByScope: Record<string, never>; viewKey: null }) => unknown) => selector({ collectionsByScope: mocks.snapshots, navigationByScope: {}, viewKey: null }),
 }))
 vi.mock('./sidebar-hydrator', () => ({ SidebarCollectionsHydrator: () => null }))
 vi.mock('@/components/layout/top-bar', () => ({
@@ -43,10 +45,11 @@ function collections(prefix = ''): Array<SidebarCollection> {
   ]
 }
 
-function shellMarkup(initialCollections = collections(), navigationVersions?: Array<{ label: string; prefix: string; href: string; default?: boolean }>) {
+function shellMarkup(initialCollections = collections(), navigationVersions?: Array<{ label: string; prefix: string; href: string; default?: boolean }>, navigationSnapshot?: NavigationSnapshot) {
   return renderToStaticMarkup(
     <SiteShell
       initialCollections={initialCollections}
+      navigationSnapshot={navigationSnapshot}
       navigationPresentation={{ display: 'tabs' }}
       navigationVersions={navigationVersions}
       i18nConfig={{ defaultLocale: 'en', locales: [{ code: 'en', label: 'English' }, { code: 'zh-Hans', label: 'Chinese' }] }}
@@ -138,4 +141,16 @@ describe('localized collection selection', () => {
     expect(shellMarkup()).toContain('<nav data-active="overview"')
     expect(shellMarkup()).toContain('<aside data-active="overview"')
   })
+})
+
+
+it('keeps article content visible and declares loading until the actual locale/API descriptor hydrates', () => {
+  const snapshot: NavigationSnapshot = { schemaVersion: 1, scope: 'default', dataScope: 'default', snapshotId: 'inline-default', viewKey: 'anonymous', mode: 'inline', collections: collections() }
+  for (const pathname of ['/zh-Hans/guides/faq', '/api/reference/operation']) {
+    mocks.pathname = pathname
+    const html = shellMarkup(collections(), undefined, snapshot)
+    expect(html).toContain('data-thally-navigation-state="loading"')
+    expect(html).toContain('Loading navigation')
+    expect(html).toContain('Page')
+  }
 })

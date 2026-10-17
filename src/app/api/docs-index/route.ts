@@ -10,8 +10,12 @@ import { getReaderAuthConfig } from '@/lib/reader-auth/config'
 import { canReaderAccessUnmarkedContent } from '@/lib/reader-auth/access'
 import { getReaderContextFromRequest } from '@/lib/reader-auth/context'
 import { contentCacheControl } from '@/lib/reader-auth/cache'
+import { navigationResponse } from '@/lib/navigation-snapshot-server'
 
 export async function GET(request: NextRequest) {
+  // Existing reserved content endpoint: navigation retains the same reader
+  // gate without colliding with an authored /api/navigation documentation URL.
+  if (request.nextUrl.searchParams.get('view') === 'navigation') return navigationResponse(request)
   const baseUrl = request.nextUrl.origin
   const i18n = await getEffectiveI18nConfig()
   const requestedLocale = request.nextUrl.searchParams.get('locale')

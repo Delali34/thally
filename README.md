@@ -134,6 +134,12 @@ src/
 - **`api`** — auto-generates API reference from an OpenAPI spec
 - **`href`** — links to an internal route or external URL
 
+Large navigation trees load separately after the article appears, while small
+sidebars remain inline. Earlier/later controls replace windows of 100 visible
+entries across the collection, retaining authored groups and active-page context.
+Loading failures leave the article available and offer a navigation retry.
+Reader-restricted navigation remains private and is never publicly cached.
+
 ### Markdown page URLs
 
 Public `.md` versions of documentation pages are available as an opt-in

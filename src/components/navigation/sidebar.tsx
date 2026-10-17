@@ -4,11 +4,11 @@
 
 import { useEffect, useRef } from 'react'
 import { usePathname } from 'next/navigation'
-import type { NavigationNode, NavigationPresentation, NavigationSection, SidebarCollection, DocsNavigationShortcut } from '@/data/docs'
+import type { NavigationPresentation, NavigationSection, SidebarCollection, DocsNavigationShortcut } from '@/data/docs'
 import { Icon } from '@/components/mdx/rich-content'
-import { layout, typography } from '@/config/layout'
+import { layout } from '@/config/layout'
 import { cn } from '@/lib/utils'
-import { NavigationTree } from '@/components/navigation/navigation-tree'
+import { NavigationSections } from '@/components/navigation/navigation-tree'
 import { CollectionSelector } from '@/components/navigation/collection-selector'
 import { revealActiveLink } from '@/components/navigation/reveal-active-link'
 
@@ -84,30 +84,7 @@ export function Sidebar({
               ))}
             </div>
           ) : null}
-          {sections.map((section, index) => {
-            const nodes: Array<NavigationNode> = section.nodes
-              ?? section.items.map((item) => ({ type: 'page' as const, item }))
-            return (
-              <div key={section.id ?? `${section.title}-${index}`} className="thally-docs-sidebar-group space-y-2.5">
-                {/* Keep distinct group headings, but avoid repeating the collection label. */}
-                {section.defaultOpen === undefined && section.title !== title ? (
-                  <p className={cn(typography.meta, 'flex items-center gap-2 px-2 text-sm font-semibold normal-case leading-6 tracking-normal text-foreground')}>
-                    {showGroupIcons && section.icon ? (
-                      <Icon icon={section.icon} className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                    ) : null}
-                    <span className="truncate">{section.title}</span>
-                  </p>
-                ) : null}
-                <div className="space-y-px">
-                  <NavigationTree
-                    nodes={nodes}
-                    pathname={pathname}
-                    showGroupIcons={showGroupIcons}
-                  />
-                </div>
-              </div>
-            )
-          })}
+          <NavigationSections sections={sections} title={title} pathname={pathname} showGroupIcons={showGroupIcons} />
         </nav>
       </div>
     </aside>

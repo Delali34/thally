@@ -151,6 +151,26 @@ describe('reader-aware projections', () => {
     expect(await allowed.text()).toContain('guides/secret')
     expect(allowed.headers.get('Cache-Control')).toBe('private, no-store')
   })
+  it('lazy navigation uses the same real reader filter and never public-caches private views', async () => {
+    const { GET } = await import('@/app/api/docs-index/route')
+    const path = '/api/docs-index?view=navigation&scope=default'
+    const anonymousResponse = await GET(anonymous(path))
+    const anon = await anonymousResponse.text()
+    expect(anon).toContain('Open guide')
+    expect(anon).not.toContain('Secret roadmap')
+    expect(anon).not.toContain('Staff handbook')
+    const allowed = await GET(withCookie(path))
+    const body = await allowed.json()
+    expect(JSON.stringify(body)).toContain('Secret roadmap')
+    expect(JSON.stringify(body)).toContain('Staff handbook')
+    expect(allowed.headers.get('Cache-Control')).toBe('private, no-store')
+    expect(allowed.headers.get('Access-Control-Allow-Origin')).toBeNull()
+    const deniedRevision = await GET(anonymous(`${path}&revision=${body.revision}`))
+    expect(deniedRevision.status).toBe(409)
+    expect(await deniedRevision.text()).not.toContain('Secret roadmap')
+    expect(deniedRevision.headers.get('Cache-Control')).toBe('private, no-store')
+  })
+
 })
 
 describe('anonymous-only projections (shared, so never reader-specific)', () => {
