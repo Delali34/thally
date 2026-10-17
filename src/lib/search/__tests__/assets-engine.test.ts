@@ -3,6 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   CONTENT_MANIFEST_PATH,
+  getContentAssetFetcher,
   resetContentSourceForTests,
   setContentAssetFetcher,
 } from '@/lib/content-source'
@@ -147,5 +148,26 @@ describe('asset-backed search', () => {
       href: '/enterprise/quantum-widgets',
     })
     expect(hits[0]?.snippet).toContain('entanglement controller')
+  })
+
+  it('rejects an incomplete asset corpus and rebuilds successfully after a service outage', async () => {
+    const fetchAsset = getContentAssetFetcher()!
+    let unavailable = true
+    let attempts = 0
+    setContentAssetFetcher(async (path) => {
+      if (unavailable && path.endsWith('/enterprise/quantum-widgets.mdx')) {
+        attempts += 1
+        return new Response(null, { status: 503 })
+      }
+      return fetchAsset(path)
+    })
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    await expect(searchDocs('entanglement controller', { mode: 'fulltext' })).rejects.toThrow('temporarily unavailable (503)')
+    expect(attempts).toBe(3)
+    unavailable = false
+    // No source, document, corpus or engine reset: the same warm runtime must
+    // retry instead of retaining a successful-but-incomplete search index.
+    expect((await searchDocs('entanglement controller', { mode: 'fulltext' }))[0]?.pageId).toBe('enterprise/quantum-widgets')
+    warning.mockRestore()
   })
 })
