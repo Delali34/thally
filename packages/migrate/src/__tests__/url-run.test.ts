@@ -68,7 +68,7 @@ describe('evidence URL runner', () => {
     }
     const first = await runUrlMigration({ sourceUrl: 'https://docs.test/one', captureProvider: provider(pages), maxCaptures: 1, batchSize: 1, onCheckpoint: async (delta) => { deltas.push(JSON.parse(JSON.stringify(delta))) } })
     expect(first.validation.status).toBe('partial')
-    expect(deltas[0].converterVersion).toBe('url-evidence-v2')
+    expect(deltas[0].converterVersion).toBe('url-evidence-v3')
     expect(deltas.flatMap((delta) => delta.records).some((record) => record.url.endsWith('/two'))).toBe(true)
     const checkpoint = JSON.parse(JSON.stringify(first.checkpoint))
     checkpoint.records.find((record: { page?: unknown }) => record.page).page.body = 'corrupted'
@@ -135,7 +135,7 @@ describe('evidence URL runner', () => {
       '/other': response('/other', article('Other')),
     }) })
     expect(run.validation.status).toBe('partial')
-    expect(run.validation.issues.map((issue) => issue.code)).toContain('missing-anchor')
+    expect(run.validation.warnings?.map((issue) => issue.code)).toContain('source-link-warning')
     expect(run.validation.issues.map((issue) => issue.code)).toContain('asset-failed')
     expect(run.bundle.pages.some((page) => page.id === 'unsafe')).toBe(false)
   })
@@ -306,8 +306,8 @@ describe('evidence URL runner', () => {
     expect(run.bundle.pages[0].body).toContain('The title is rendered by the destination document header.')
     const multiple = { ...source, body: source.body.replace('</article>', '<h1>Another top-level heading</h1></article>') }
     const partial = await runUrlMigration({ sourceUrl: 'https://docs.test/guide', captureProvider: provider({ '/guide': multiple }) })
-    expect(partial.validation.status).toBe('partial')
-    expect(partial.bundle.pages[0].body).toContain('# Another top-level heading')
+    expect(partial.validation.status).toBe('passed')
+    expect(partial.bundle.pages[0].body).toContain('## Another top-level heading')
   })
 
   it('reconciles JSONB-reordered checkpoint keys without recapturing committed pages', async () => {

@@ -14,8 +14,9 @@ import { pageIdFromReference } from './path.js'
 import { isPassiveSvg } from './svg-policy.js'
 import { createMigrationAssetCache } from './url-asset-cache.js'
 import { cloneUrlMigrationCheckpoint } from './url-journal-clone.js'
+import { extractSourceNavigation, mergeSourceNavigation } from './url-navigation.js'
 import { migrationImageAttribute, migrationImageCandidates, renderMigrationSrcset } from './url-images.js'
-import { defaultMigrationFetcher, htmlPage, markdownPage, sanitizeRemoteMarkdown, validateMigrationUrl } from './url.js'
+import { defaultMigrationFetcher, extractEmbeddedOpenApi, htmlPage, markdownPage, migrationHtmlArticle, sanitizeRemoteMarkdown, validateMigrationUrl } from './url.js'
 import type { MigrationBundle, MigrationFetchResponse, MigrationNavigationGroup, MigrationPage } from './types.js'
 import type {
   MigrationCapture, MigrationCapturedAsset, MigrationEvidence, MigrationNavigationOccurrence,
@@ -23,9 +24,9 @@ import type {
   UrlMigrationRunOptions, UrlMigrationValidation,
 } from './url-run-types.js'
 
-// Version 2 observes declared HTML language on fresh captures. Never relabel
-// a version-1 journal whose stored page hash predates that observation.
-const CONVERTER_VERSION = 'url-evidence-v2'
+// Conversion and navigation evidence changed together. Older journals must be
+// recaptured rather than reusing page hashes produced by the previous rules.
+const CONVERTER_VERSION = 'url-evidence-v3'
 const parser = unified().use(remarkParse).use(remarkMdx)
 const ACCEPT = 'text/markdown,text/html,application/xhtml+xml;q=0.9'
 const MAX_RESPONSE_BYTES = 8_000_000
@@ -35,6 +36,7 @@ const LOCALES = new Set(['ar', 'cs', 'da', 'de', 'el', 'en', 'es', 'fi', 'fr', '
 
 interface MarkdownNode {
   type: string
+  name?: string
   url?: string
   value?: string
   children?: Array<MarkdownNode>
@@ -46,13 +48,15 @@ function hash(value: string | Uint8Array): string {
   return createHash('sha256').update(value).digest('hex')
 }
 
-function pageHash(page: MigrationPage): string {
+function canonicalJson(value: unknown): string {
   // JSONB and other durable stores reorder object keys. Identity binds field
   // values recursively, while ordered arrays (code/navigation) keep their order.
   const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(canonical)
     : value !== null && typeof value === 'object' ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, field]) => [key, canonical(field)])) : value
-  return hash(JSON.stringify(canonical(page)))
+  return JSON.stringify(canonical(value))
 }
+
+function pageHash(page: MigrationPage): string { return hash(canonicalJson(page)) }
 
 function inScope(url: URL, source: URL, scope: string): boolean {
   return url.origin === source.origin && !url.username && !url.password
@@ -76,6 +80,7 @@ function canonical(value: string, base: string): string | null {
 export function classifyMigrationResponse(document: MigrationFetchResponse): 'page' | 'index' | 'asset' | 'unsupported' {
   if (document.status && document.status >= 400) return 'unsupported'
   if (/\/(?:llms(?:-full)?|robots)\.txt$|\/sitemap[^/]*\.xml$|\/search(?:\.html)?$/i.test(document.finalUrl.pathname)
+    || /\.(?:json|ya?ml)$/i.test(document.finalUrl.pathname)
     || /(?:xml|json)/i.test(document.contentType)) return 'index'
   if (/^(?:image|audio|video)\//i.test(document.contentType)
     || /\.(?:pdf|zip|png|jpe?g|webp|gif|svg|ico|mp4|webm)$/i.test(document.finalUrl.pathname)) return 'asset'
@@ -105,9 +110,10 @@ function alternativeBlocks(body: string, baseline: string): string {
 }
 
 function linksOf(document: MigrationFetchResponse): Array<string> {
+  // Schemas and machine manifests are attachments, never authored Markdown.
+  if (/json|ya?ml/i.test(document.contentType) || /\.(?:json|ya?ml)$/i.test(document.finalUrl.pathname)) return []
   if (/html/i.test(document.contentType)) {
-    const $ = load(document.body)
-    const root = $('main article,article,main,[role="main"]').first()
+    const { $, root } = migrationHtmlArticle(document.body)
     root.find('nav,footer,aside').remove()
     return [...root.find('a[href]').toArray(), ...$('link[rel="sitemap"][href],link[rel="alternate"][href]').toArray()]
       .map((node) => $(node).attr('href')!).filter(Boolean)
@@ -123,8 +129,7 @@ function linksOf(document: MigrationFetchResponse): Array<string> {
 }
 
 function htmlEvidence(document: MigrationFetchResponse): Pick<MigrationEvidence, 'anchors' | 'code'> {
-  const $ = load(document.body)
-  const root = $('main article,article,main,[role="main"]').first()
+  const { $, root } = migrationHtmlArticle(document.body)
   const article = root.length ? root : $('body')
   article.find('nav,footer,aside,form,script,style').remove()
   return {
@@ -160,37 +165,7 @@ function markdownHeadingAnchors(body: string): Array<string> {
 }
 
 function sourceNavigation(capture: MigrationCapture): Array<MigrationNavigationOccurrence> {
-  if (capture.navigation) {
-    const resolve = (nodes: Array<MigrationNavigationOccurrence>, depth = 0): Array<MigrationNavigationOccurrence> => {
-      if (depth > 32 || nodes.length > 10_000) throw new Error('Source navigation exceeds its depth or width safety bound.')
-      return nodes.map((node) => ({ label: node.label, ...(node.url ? { url: new URL(node.url, capture.finalUrl).toString() } : {}), ...(node.children ? { children: resolve(node.children, depth + 1) } : {}) }))
-    }
-    return resolve(capture.navigation)
-  }
-  if (!/html/i.test(capture.contentType)) return []
-  const $ = load(capture.body)
-  const candidates = ['.theme-doc-sidebar-menu,[aria-label*="sidebar" i]', 'aside', '[role="navigation"],nav']
-  const root = candidates.map((selector) => $(selector).filter((_index, node) => $(node).find('a[href]').length > 0 && $(node).closest('header').length === 0).first()).find((candidate) => candidate.length) ?? $('aside').first()
-  if (!root.length) return []
-  const walk = (element: Parameters<typeof $>[0], excluded?: unknown): Array<MigrationNavigationOccurrence> => {
-    const result: Array<MigrationNavigationOccurrence> = []
-    $(element).children().each((_index, node) => {
-      if (node === excluded) return
-      const item = $(node)
-      if (item.is('a[href]')) {
-        result.push({ label: item.text().replace(/\s+/g, ' ').trim(), url: new URL(item.attr('href')!, capture.finalUrl).toString() })
-      } else if (item.is('li,details') || item.attr('data-migration-group') !== undefined || item.children('h2,h3,h4,h5,h6').length > 0) {
-        const directLink = item.children('a[href]').first()
-        const direct = directLink.length ? directLink : item.children('div').children('a[href]').first()
-        const label = direct.text().trim() || item.children('summary,button,span,h2,h3,h4,h5,h6').first().text().trim()
-        const children = walk(node, direct[0])
-        if (label) result.push({ label, ...(direct.length ? { url: new URL(direct.attr('href')!, capture.finalUrl).toString() } : {}), ...(children.length ? { children } : {}) })
-        else result.push(...children)
-      } else result.push(...walk(node, excluded))
-    })
-    return result
-  }
-  try { return walk(root) } catch { return [] }
+  return extractSourceNavigation(capture)
 }
 
 function idForUrl(url: URL, scope: string): string | null {
@@ -198,6 +173,22 @@ function idForUrl(url: URL, scope: string): string | null {
   const id = pageIdFromReference(relative || 'introduction', true)
   // Query-selected pages get a deterministic identity, never overwrite a variant.
   return id && `${id}${url.search ? `--${hash(url.search).slice(0, 12)}` : ''}`
+}
+
+/** A declared directory index may share its route; query-selected versions never collapse. */
+function articleIdentity(document: MigrationFetchResponse): URL {
+  if (!/html/i.test(document.contentType)) return document.finalUrl
+  const $ = load(document.body)
+  const reference = $('link[rel="canonical"][href]').first().attr('href')
+  if (!reference) return document.finalUrl
+  try {
+    const target = new URL(reference, document.finalUrl)
+    const source = document.finalUrl
+    const directory = (path: string) => path.replace(/\/index\/?$/i, '').replace(/\/$/, '')
+    return target.origin === source.origin && !target.username && !target.password
+      && target.search === source.search && directory(target.pathname) === directory(source.pathname)
+      ? target : source
+  } catch { return document.finalUrl }
 }
 
 function convert(document: MigrationFetchResponse, id: string): MigrationPage | null {
@@ -223,7 +214,14 @@ function convert(document: MigrationFetchResponse, id: string): MigrationPage | 
         const fence = '`'.repeat(Math.max(3, ...[...code.matchAll(/`+/g)].map((match) => match[0].length + 1)))
         // The final newline belongs to the fence separator; an existing source
         // newline therefore needs a second newline before the closing fence.
-        page.body = `${page.body.slice(0, start)}${fence}${info}\n${code}\n${fence}${page.body.slice(end)}`
+        // AST code spans start at the fence, after list/blockquote indentation.
+        // Carry that container prefix onto every restored line, preserving the
+        // decoded payload without turning its braces into executable MDX prose.
+        const lineStart = page.body.lastIndexOf('\n', start - 1) + 1
+        const prefix = page.body.slice(lineStart, start)
+        const indent = /^(?:[ \t]*>[ \t]?)*[ \t]*$/.test(prefix) ? prefix : ''
+        const payload = code.split('\n').map((line) => `${indent}${line}`).join('\n')
+        page.body = `${page.body.slice(0, start)}${fence}${info}\n${payload}\n${indent}${fence}${page.body.slice(end)}`
       }
     }
     return page
@@ -236,17 +234,15 @@ function assetReferences(capture: MigrationCapture): Array<string> {
   if (!/html/i.test(capture.contentType)) {
     return markdownNodes(capture.body).filter((node) => node.type === 'image').flatMap((node) => node.url ? [node.url] : [])
   }
-  const $ = load(capture.body)
-  const root = $('main article,article,main,[role="main"]').first()
+  const { $, root } = migrationHtmlArticle(capture.body)
   return [
     ...root.find('img[src],video[poster],a[download][href]').toArray().map((node) => $(node).attr('src') ?? $(node).attr('poster') ?? $(node).attr('href')!),
     ...root.find('[srcset]').toArray().flatMap((node) => migrationImageCandidates($(node).attr('srcset') ?? '', capture.finalUrl).map((candidate) => candidate.url)),
   ].filter(Boolean)
 }
 
-function unresolvedStaticControls(body: string): boolean {
-  const $ = load(body)
-  const root = $('main article,article,main,[role="main"]').first()
+function unresolvedStaticControls(body: string, hasApiSchema = false): boolean {
+  const { $, root } = migrationHtmlArticle(body)
   const tabs = root.find('[role="tab"]').toArray()
   for (const tab of tabs) {
     const controls = $(tab).attr('aria-controls')
@@ -255,6 +251,7 @@ function unresolvedStaticControls(body: string): boolean {
       || panels.find('[aria-busy="true"],[role="progressbar"]').length) return true
   }
   return root.find('details:not([open])').toArray().some((node) => {
+    if (hasApiSchema && $(node).is('.expandable') && $(node).children('summary[data-component-part="expandable-button"]').length) return false
     const clone = $(node).clone(); clone.children('summary').remove()
     return !clone.text().trim() && !clone.find('pre,img,table,svg').length
   })
@@ -301,14 +298,53 @@ function validRecord(record: UrlMigrationRecord): boolean {
     && pageIdFromReference(record.page.navigationId, true) === record.page.navigationId
     && sanitizeRemoteMarkdown(record.page.body.replace(/^<a id="[^"<]*" \/>$/gm, '')) !== null
     && /^[a-f0-9]{64}$/.test(record.evidence.sha256)
+    && (!record.apiSpecification || (hasCompleteLocalApiSchema(record.apiSpecification.document)
+      && record.apiSpecification.path === `openapi/migration-${record.apiSpecification.sha256}.json`
+      && hash(canonicalJson(record.apiSpecification.document)) === record.apiSpecification.sha256))
     && record.assets?.every((asset) => /^migration-assets\/[a-f0-9]{64}\.[a-z0-9]+$/.test(asset.path)
       && hash(Buffer.from(asset.base64, 'base64')) === asset.sha256))
+}
+
+/** A local spec can replace lazy schema UI only when every reference is available inertly. */
+function hasCompleteLocalApiSchema(document: Record<string, unknown>): boolean {
+  let visited = 0
+  const visit = (value: unknown, depth = 0): boolean => {
+    if (++visited > 100_000 || depth > 96) return false
+    if (typeof value === 'number' && !Number.isFinite(value)) return false
+    if (!value || typeof value !== 'object') return true
+    if (Array.isArray(value)) return value.every(child => visit(child, depth + 1))
+    const object = value as Record<string, unknown>
+    if (Object.prototype.hasOwnProperty.call(object, '$ref')) {
+      if (typeof object.$ref !== 'string' || !object.$ref.startsWith('#/')) return false
+      let target: unknown = document
+      try {
+        for (const encoded of object.$ref.slice(2).split('/')) {
+          const key = decodeURIComponent(encoded).replace(/~1/g, '/').replace(/~0/g, '~')
+          if (!target || typeof target !== 'object' || !Object.prototype.hasOwnProperty.call(target, key)) return false
+          target = (target as Record<string, unknown>)[key]
+        }
+      } catch { return false }
+    }
+    return Object.values(object).every(child => visit(child, depth + 1))
+  }
+  return visit(document)
+}
+
+/** Resolve bounded format/redirect chains without accepting cycles as pages. */
+function resolveMigrationRecord(records: Map<string, UrlMigrationRecord>, record?: UrlMigrationRecord): UrlMigrationRecord | undefined {
+  const seen = new Set<string>()
+  while (record?.outcome === 'alias') {
+    if (seen.has(record.url) || seen.size >= 32) return undefined
+    seen.add(record.url)
+    record = records.get(record.aliasOf ?? '')
+  }
+  return record
 }
 
 function navigationConfig(navigation: Array<MigrationNavigationOccurrence>, records: Map<string, UrlMigrationRecord>): MigrationBundle['docsConfig'] | null {
   const project = (nodes: Array<MigrationNavigationOccurrence>): Array<string | MigrationNavigationGroup> => nodes.flatMap<string | MigrationNavigationGroup>((node) => {
     const record = node.url ? records.get(canonical(node.url, node.url) ?? '') : undefined
-    const target = record?.outcome === 'alias' ? records.get(record.aliasOf ?? '') : record
+    const target = resolveMigrationRecord(records, record)
     const page = target?.page
     const children = project(node.children ?? [])
     if (children.length) {
@@ -317,6 +353,22 @@ function navigationConfig(navigation: Array<MigrationNavigationOccurrence>, reco
     }
     return page ? [page.navigationId] : []
   })
+  const tabs = navigation.filter(node => node.kind === 'tab')
+  if (tabs.length) {
+    const projection = localeProjection({ records: [...records.values()] } as UrlMigrationCheckpoint)
+    const locales = [...new Set(tabs.map(tab => tab.locale ?? projection.defaultLocale))]
+    const localizedTabs = (locale: string): MigrationBundle['docsConfig']['tabs'] => tabs
+      .filter(tab => (tab.locale ?? projection.defaultLocale) === locale)
+      .flatMap(tab => {
+        const pages = project(tab.children ?? [])
+        return pages.length || tab.url ? [{ tab: tab.label, ...(pages.length ? { pages } : {}), ...(tab.url ? { href: tab.url } : {}) }] : []
+      })
+    const primary = localizedTabs(projection.defaultLocale)
+    return { tabs: primary.length ? primary : localizedTabs(locales[0]), ...(locales.length > 1 ? {
+      i18n: { defaultLocale: projection.defaultLocale, locales: locales.map(code => ({ code, label: code === 'en' ? 'English' : code })),
+        navigation: Object.fromEntries(locales.map(locale => [locale, localizedTabs(locale)])) },
+    } : {}) }
+  }
   const pages = project(navigation)
   return pages.length ? { tabs: [{ tab: 'Documentation', pages }] } : null
 }
@@ -374,6 +426,7 @@ function localeProjection(checkpoint: UrlMigrationCheckpoint) {
 /** Validate every selected outcome, source payload, internal destination and anchor. */
 export function validateUrlMigration(checkpoint: UrlMigrationCheckpoint, cancelled = false): UrlMigrationValidation {
   const issues: Array<UrlMigrationIssue> = []
+  const warnings: Array<UrlMigrationIssue> = []
   const counts: UrlMigrationValidation['counts'] = { pending: 0, imported: 0, excluded: 0, failed: 0, alias: 0 }
   const records = new Map(checkpoint.records.map((record) => [record.url, record]))
   const source = new URL(checkpoint.sourceUrl)
@@ -383,7 +436,7 @@ export function validateUrlMigration(checkpoint: UrlMigrationCheckpoint, cancell
   const outputIds = new Set<string>()
   const resolve = (url: string): UrlMigrationRecord | undefined => {
     const record = records.get(canonical(url, checkpoint.sourceUrl) ?? '')
-    return record?.outcome === 'alias' ? records.get(record.aliasOf ?? '') : record
+    return resolveMigrationRecord(records, record)
   }
   for (const record of checkpoint.records) {
     counts[record.outcome]++
@@ -409,7 +462,17 @@ export function validateUrlMigration(checkpoint: UrlMigrationCheckpoint, cancell
       } else if (link.hash && destination.outcome === 'imported') {
         let anchor = link.hash.slice(1)
         try { anchor = decodeURIComponent(anchor) } catch { /* Invalid encoding remains a literal anchor. */ }
-        if (!destination.evidence?.anchors.includes(anchor)) issues.push({ code: 'missing-anchor', source: record.url, message: `Missing source anchor: ${link}` })
+        if (!destination.evidence?.anchors.includes(anchor)) {
+          // This exact href was already broken in the captured source. Do not
+          // invent anchors or mislabel it as lost conversion content.
+          warnings.push({ code: 'source-link-warning', source: record.url, message: `The original source link refers to an absent source anchor: ${link}` })
+        } else if (destination.page) {
+          const nodes = markdownNodes(destination.page.body)
+          const explicit = nodes.flatMap(node => node.name === 'a' ? (node.attributes ?? []).flatMap(attribute => attribute.name === 'id' && typeof attribute.value === 'string' ? [attribute.value] : []) : [])
+          if (!explicit.includes(anchor) && !markdownHeadingAnchors(destination.page.body).includes(anchor)) {
+            issues.push({ code: 'missing-anchor', source: record.url, message: `Conversion lost a source anchor: ${link}` })
+          }
+        }
       }
     }
   }
@@ -424,7 +487,7 @@ export function validateUrlMigration(checkpoint: UrlMigrationCheckpoint, cancell
   }
   visit(checkpoint.navigation)
   if (!counts.imported) issues.push({ code: 'missing-page', source: checkpoint.sourceUrl, message: 'No readable article pages were imported.' })
-  return { status: cancelled ? 'cancelled' : issues.length ? 'partial' : 'passed', issues, counts }
+  return { status: cancelled ? 'cancelled' : issues.length ? 'partial' : 'passed', issues, counts, ...(warnings.length ? { warnings } : {}) }
 }
 
 /** Run capture/conversion in bounded batches and resume only reconciled artifacts. */
@@ -459,6 +522,7 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
     if (!validRecord(record) || (record.outcome === 'failed' && options.retryFailed !== false)
       || (record.outcome !== 'pending' && options.reconcile && !await options.reconcile(record))) {
       record.outcome = 'pending'; delete record.page; delete record.pageSha256; delete record.evidence; delete record.assets
+      delete record.apiSpecification; delete record.version; delete record.issues; delete record.reason; delete record.aliasOf
     }
     if (record.page && pageIdFromReference(record.page.id, true) !== record.page.id) throw new Error('Checkpoint contains an unsafe page path.')
     records.set(record.url, record)
@@ -552,13 +616,24 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
     changed = []; navigationChanged = false
   }
   const process = async (record: UrlMigrationRecord): Promise<void> => {
-    if (options.signal?.aborted) return
+    if (options.signal?.aborted || record.outcome !== 'pending') return
+    let claimedId: string | undefined
+    let claimedFinal: string | undefined
+    let markdownRepresentation: string | undefined
     try {
       delete record.reason
+      // Pending records cannot carry a schema recovered by a previous capture.
+      delete record.apiSpecification
+      const represented = resolveMigrationRecord(records, record.representationOf ? records.get(record.representationOf) : undefined)
+      if (represented?.outcome === 'imported') {
+        record.outcome = 'alias'; record.aliasOf = represented.url
+        return
+      }
       const document = await capture({ url: new URL(record.url), signal: options.signal })
       if (options.signal?.aborted) return
       if (Buffer.byteLength(document.body) > MAX_RESPONSE_BYTES) throw new Error('Captured response exceeds the 8 MB safety bound.')
-      const final = canonical(document.finalUrl.toString(), sourceUrl)!
+      const identity = articleIdentity(document)
+      const final = canonical(identity.toString(), sourceUrl)!
       const role = classifyMigrationResponse(document)
       if (!inScope(document.finalUrl, source, scopePath) && !(role === 'index' && isDiscoveryIndex(document.finalUrl, source))) { record.outcome = 'excluded'; record.reason = 'Redirected outside the selected origin/path.'; return }
       if (document.status && document.status >= 400) throw new Error(`Source page returned HTTP ${document.status}.`)
@@ -571,18 +646,72 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
         for (const link of links) enqueue(link, final, record.url)
         return
       }
+      // A publisher may offer a Markdown representation of its exact article.
+      // Require an explicit same-origin, same-route declaration; similarly named
+      // independent sources must still produce visible destination collisions.
+      if (/html/i.test(document.contentType)) {
+        const $ = load(document.body)
+        $('link[rel="alternate"][type="text/markdown"][href]').each((_index, node) => {
+          const alternate = canonical($(node).attr('href')!, final)
+          if (!alternate) return
+          const target = new URL(alternate), primary = new URL(final)
+          const directory = (path: string) => path.replace(/\.mdx?$/i, '').replace(/\/index\/?$/i, '').replace(/\/$/, '')
+          if (target.origin !== primary.origin || target.search !== primary.search
+            || directory(target.pathname) !== directory(primary.pathname)
+            || !/\.mdx?$/i.test(target.pathname)) return
+          enqueue(alternate, final, 'declared-markdown-representation')
+          const sibling = records.get(alternate)!
+          sibling.representationOf = record.url
+          markdownRepresentation ??= alternate
+          changed.push(sibling)
+        })
+      }
+      const observedNavigation = sourceNavigation(document)
+      if (observedNavigation.length && !(checkpoint.navigation.some(node => node.kind === 'tab') && !observedNavigation.some(node => node.kind === 'tab'))) {
+        const merged = mergeSourceNavigation(checkpoint.navigation, observedNavigation)
+        if (JSON.stringify(merged) !== JSON.stringify(checkpoint.navigation)) {
+          checkpoint.navigation = merged; navigationChanged = true
+        }
+        enqueueNavigation(observedNavigation, final)
+      }
       if (imported >= maxPages) { record.outcome = 'excluded'; record.reason = 'A discovery endpoint resolved to an article after the selected page limit.'; return }
       const already = finalUrls.get(final)
       if (already && already !== record.url) { record.outcome = 'alias'; record.aliasOf = already; return }
       // Claim final identity before conversion can yield to asset acquisition.
       finalUrls.set(final, record.url)
-      const id = idForUrl(document.finalUrl, scopePath)
+      claimedFinal = final
+      const id = idForUrl(identity, scopePath)
       if (!id) throw new Error('Source URL has no safe destination path.')
-      if (usedIds.has(id) && usedIds.get(id) !== record.url) { record.outcome = 'failed'; record.reason = `Destination collision for ${id}.`; return }
-      usedIds.set(id, record.url)
+      const language = observedLocale(document, id, scopePath)
+      const locale = language.locale
+      const navigationId = locale ? id.split('/').filter(segment => segment.toLowerCase() !== locale.toLowerCase()).join('/') || 'introduction' : id
+      const identityId = locale ? `${locale}/${navigationId}` : id
+      if (usedIds.has(identityId) && usedIds.get(identityId) !== record.url) { record.outcome = 'failed'; record.reason = `Destination collision for ${identityId}.`; return }
+      usedIds.set(identityId, record.url)
+      claimedId = identityId
       const evidence = evidenceOf(document)
       const page = convert(document, id)
       if (!page) { record.outcome = 'failed'; record.reason = 'Content could not be represented as safe inert MDX.'; return }
+      const hasSchemaChoice = /html/i.test(document.contentType) && migrationHtmlArticle(document.body).root.find('select[aria-label="Select schema type"],select[aria-label="选择架构类型"]').length > 0
+      if (/html/i.test(document.contentType) && markdownRepresentation && (unresolvedStaticControls(document.body) || hasSchemaChoice)) {
+        // Lazy API fields cannot be proven from the collapsed DOM. A declared
+        // machine-readable view may carry the entire OpenAPI operation instead.
+        // Fetch through the same host boundary; no browser/API action is invoked.
+        const schemaCapture = await capture({ url: new URL(markdownRepresentation), signal: options.signal })
+        if (options.signal?.aborted) return
+        if ((schemaCapture.status && schemaCapture.status >= 400) || !/text\/(?:markdown|plain)/i.test(schemaCapture.contentType)) throw new Error('API schema representation is not a successful Markdown response.')
+        totalBytes += Buffer.byteLength(schemaCapture.body)
+        if (Buffer.byteLength(schemaCapture.body) > MAX_RESPONSE_BYTES || totalBytes > (options.maxTotalBytes ?? 500_000_000)) throw new Error('API schema capture exceeds its content byte budget.')
+        const expected = new URL(markdownRepresentation)
+        if (schemaCapture.finalUrl.origin !== expected.origin || schemaCapture.finalUrl.pathname !== expected.pathname || schemaCapture.finalUrl.search !== expected.search) throw new Error('API schema representation escaped its declared identity.')
+        const fragment = extractEmbeddedOpenApi(schemaCapture.body).fragment
+        if (fragment && hasCompleteLocalApiSchema(fragment.document)) {
+          const sha256 = hash(canonicalJson(fragment.document))
+          const path = `openapi/migration-${sha256}.json`
+          record.apiSpecification = { path, sha256, document: fragment.document }
+          page.openapi = `${path} ${fragment.method} ${fragment.path}`
+        }
+      }
       const states = document.states ?? []
       if (states.length > 64) throw new Error('Capture contains too many alternative states.')
       for (const state of states) {
@@ -604,14 +733,18 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
       record.assets = []
       record.issues = []
       if (/html/i.test(document.contentType)) {
-        const $ = load(document.body)
-        const root = $('main article,article,main,[role="main"]').first()
+        const { $, root } = migrationHtmlArticle(document.body)
         root.find('nav,footer,aside,.theme-doc-breadcrumbs,.theme-doc-toc-mobile,.table-of-contents,.hash-link').remove()
         root.find('button svg,a.hash-link svg,[aria-hidden="true"] svg,svg[aria-hidden="true"],svg[data-lucide],svg[data-icon]').remove()
-        if (root.find('h1').length > 1) record.issues.push({ code: 'unsupported-component', source: record.url, message: 'The article contains multiple level-one headings; review their hierarchy.' })
+        if (record.apiSpecification) {
+          // These specific choices and deferred child fields are represented by
+          // the complete registered OpenAPI operation, not discarded as chrome.
+          root.find('select[aria-label="Select schema type"],select[aria-label="选择架构类型"]').remove()
+          root.find('.option-dropdown svg[data-component-part="icon-svg"]').remove()
+        }
         const unsupported = [...new Set(root.find('iframe,object,embed,canvas,svg,form,input,textarea,select,math,video,audio').toArray().map((node) => node.tagName))]
         if (unsupported.length) record.issues.push({ code: 'unsupported-component', source: record.url, message: `Rendered content requires explicit review for: ${unsupported.join(', ')}.` })
-        if (!states.length && unresolvedStaticControls(document.body)) record.issues.push({ code: 'unsupported-component', source: record.url, message: 'An interactive alternative has no complete captured panel or disclosure content.' })
+        if (!states.length && unresolvedStaticControls(document.body, Boolean(record.apiSpecification))) record.issues.push({ code: 'unsupported-component', source: record.url, message: 'An interactive alternative has no complete captured panel or disclosure content.' })
       }
       const suppliedAssets = new Map((document.assets ?? []).map((asset) => [canonical(asset.url, final), asset]))
       const assetUrls = [...new Set([...assetReferences(document), ...states.flatMap((state) => assetReferences(state.response))].map((url) => canonical(url, final)).filter((url): url is string => Boolean(url)))]
@@ -649,26 +782,18 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
       if (sanitizeRemoteMarkdown(page.body.replace(/^<a id="[^"<]*" \/>$/gm, '')) === null) throw new Error('Converted content did not pass inert MDX validation.')
       record.evidence = evidence
       record.page = page
-      const language = observedLocale(document, page.id, scopePath)
       record.issues.push(...language.issues)
       const canonicalLocale = language.locale
       if (canonicalLocale) {
         page.locale = canonicalLocale
-        const segments = page.id.split('/')
-        const localeIndex = segments.findIndex((segment) => segment.toLowerCase() === canonicalLocale.toLowerCase())
-        page.navigationId = segments.filter((_segment, index) => index !== localeIndex).join('/') || 'introduction'
+        page.navigationId = navigationId
         page.id = `${canonicalLocale}/${page.navigationId}`
-        if (usedIds.has(page.id) && usedIds.get(page.id) !== record.url) throw new Error(`Destination collision for locale page ${page.id}.`)
-        usedIds.delete(id); usedIds.set(page.id, record.url)
       }
       record.version = document.version ?? [...page.id.split('/'), ...document.finalUrl.pathname.split('/')].find((segment) => /^v\d+(?:\.\d+)*$/i.test(segment))
       record.pageSha256 = pageHash(page)
       record.outcome = 'imported'
       imported++
-      const navigation = checkpoint.navigation.length ? [] : sourceNavigation(document)
-      if (!checkpoint.navigation.length && navigation.length) { checkpoint.navigation = navigation; navigationChanged = true }
       enqueueArticleLinks(evidence.links, final, record.url)
-      enqueueNavigation(navigation, final)
     } catch (error) {
       if (options.signal?.aborted) return
       const wasImported = record.outcome === 'imported'
@@ -678,14 +803,39 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
         if (wasImported) imported--
         usedIds.delete(record.page.id)
       }
-      delete record.page; delete record.pageSha256; delete record.assets
+      delete record.page; delete record.pageSha256; delete record.assets; delete record.apiSpecification
     } finally {
+      // Failed conversions must release both reservations, including failures
+      // before record.page exists. Never release another concurrent owner.
+      if (record.outcome !== 'imported') {
+        if (claimedId && usedIds.get(claimedId) === record.url) usedIds.delete(claimedId)
+        if (claimedFinal && finalUrls.get(claimedFinal) === record.url) finalUrls.delete(claimedFinal)
+      }
       if (record.outcome !== 'pending') {
         if (options.onRecord) await options.onRecord(record)
         changed.push(record)
       }
     }
   }
+  const settleRepresentations = (): void => {
+    for (const record of records.values()) {
+      if (!record.representationOf) continue
+      const primary = resolveMigrationRecord(records, records.get(record.representationOf))
+      if (!primary) continue
+      const winner = primary.outcome === 'imported' ? primary : record.outcome === 'imported' && primary.outcome === 'failed' ? record : undefined
+      if (!winner) continue
+      const alternate = winner === primary ? record : primary
+      if (alternate.outcome === 'alias' && alternate.aliasOf === winner.url) continue
+      if (alternate.outcome === 'imported') {
+        imported--
+        if (alternate.page && usedIds.get(alternate.page.id) === alternate.url) usedIds.delete(alternate.page.id)
+      }
+      alternate.outcome = 'alias'; alternate.aliasOf = winner.url
+      delete alternate.reason; delete alternate.page; delete alternate.pageSha256; delete alternate.assets; delete alternate.issues; delete alternate.apiSpecification
+      changed.push(alternate)
+    }
+  }
+  settleRepresentations()
   while (cursor < pending.length && !options.signal?.aborted && !budgetExhausted && cursor < (options.maxCaptures ?? Infinity)) {
     if (imported >= maxPages) {
       const index = pending.findIndex((record, position) => position >= cursor && isDiscoveryIndex(new URL(record.url), source))
@@ -695,6 +845,7 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
     const batch = pending.slice(cursor, cursor + Math.min(concurrency, imported >= maxPages ? 1 : maxPages - imported, (options.maxCaptures ?? Infinity) - cursor))
     cursor += batch.length
     await Promise.all(batch.map(process))
+    settleRepresentations()
     if (changed.length >= batchSize) await flush()
   }
   await flush()
@@ -702,7 +853,7 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
   const projection = localeProjection(checkpoint)
   const routeMap = new Map<string, string>()
   for (const record of checkpoint.records) {
-    const target = record.outcome === 'alias' ? records.get(record.aliasOf ?? '') : record
+    const target = resolveMigrationRecord(records, record)
     if (target?.page) {
       const route = projection.route(target.page)
       routeMap.set(record.url, route)
@@ -714,7 +865,7 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
   const labelPages = (nodes: Array<MigrationNavigationOccurrence>): void => {
     for (const node of nodes) {
       const entry = node.url ? records.get(canonical(node.url, sourceUrl) ?? '') : undefined
-      const target = entry?.outcome === 'alias' ? records.get(entry.aliasOf ?? '') : entry
+      const target = resolveMigrationRecord(records, entry)
       if (target?.page && node.label && !node.children?.length) {
         const previous = navigationLabels.get(target.url)
         if (previous && previous !== node.label) navigationIssues.push({ code: 'unsupported-component', source: target.url, message: `This page has multiple source navigation labels (${previous}, ${node.label}); review the shared sidebar title.` })
@@ -742,16 +893,23 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
       assets.set(asset.path, { path: asset.path, content: Buffer.from(content.buffer, content.byteOffset, content.byteLength) })
     }
   }
+  for (const record of checkpoint.records) if (record.page && record.apiSpecification) {
+    const spec = record.apiSpecification
+    assets.set(spec.path, { path: spec.path, projectRelative: true, content: Buffer.from(canonicalJson(spec.document)) })
+  }
   const bundle: MigrationBundle = {
     sourceUrl, sourceKind: 'url', platform: options.platform ?? 'generic', pages, assets: [...assets.values()],
     docsConfig: navigationConfig(checkpoint.navigation, records) ?? buildNavigationFromPages(pages),
-    warnings: validation.issues.map((issue) => ({ code: issue.code === 'missing-page' ? 'missing-page' : 'unsupported-config', message: issue.message, source: issue.source })),
+    warnings: [...validation.issues, ...validation.warnings ?? []].map((issue) => ({ code: issue.code === 'missing-page' ? 'missing-page' : 'unsupported-config', message: issue.message, source: issue.source })),
     urlMigrationValidation: validation,
     stats: { discovered: records.size, imported: pages.length, skipped: records.size - pages.length },
   }
   if (projection.locales.length) {
     const locales = [...new Set([projection.defaultLocale, ...projection.locales])]
-    bundle.docsConfig.i18n = { defaultLocale: projection.defaultLocale, locales: locales.map((code) => ({ code, label: code === 'en' ? 'English' : code })) }
+    bundle.docsConfig.i18n = { ...bundle.docsConfig.i18n, defaultLocale: projection.defaultLocale, locales: locales.map((code) => ({ code, label: code === 'en' ? 'English' : code })) }
+  }
+  for (const spec of assets.values()) if (spec.projectRelative && spec.path.startsWith('openapi/')) {
+    bundle.docsConfig.tabs.push({ tab: `Migration API ${spec.path.slice(-69, -5)}`, hidden: true, api: { source: spec.path, navigation: false } })
   }
   const stopReason = options.signal?.aborted ? 'cancelled'
     : budgetExhausted ? 'byte-limit'

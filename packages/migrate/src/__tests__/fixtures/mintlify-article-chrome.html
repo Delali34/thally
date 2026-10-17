@@ -1,0 +1,27 @@
+<!-- Reduced public Mintlify markup from LI.FI latency and status documentation.
+     Keep the heading permalink block and sibling API examples: both triggered
+     fidelity failures in the complete source captures. SVG paths are omitted. -->
+<html><head><title>Latency | LI.FI</title></head><body>
+<main id="content-container">
+  <div class="flex flex-row-reverse gap-12">
+    <div class="code-group"><pre><code class="language-shell">curl --request GET \
+  --url https://li.quest/v1/status</code></pre></div>
+    <div id="content-area">
+      <header id="header"><h1 id="page-title">Latency</h1></header>
+      <div id="content" class="mdx-content">
+        <h2 id="optimizing-response-timing" class="flex whitespace-pre-wrap group font-semibold"><div class="absolute" tabindex="-1"><a href="#optimizing-response-timing" aria-label="Navigate to header">​<div><svg aria-hidden="true"></svg></div></a></div><span class="cursor-pointer">Optimizing Response Timing</span></h2>
+        <h3 id="choosing-between-/quote-and-/advanced/routes"><div class="absolute" tabindex="-1"><a href="#choosing-between-/quote-and-/advanced/routes" aria-label="Navigate to header">​<div><svg aria-hidden="true"></svg></div></a></div><span class="cursor-pointer">Choosing Between <code>/quote</code> and <code>/advanced/routes</code></span></h3>
+        <p>Use <a href="/guides/latency">timing strategies</a> to configure routing.</p>
+        <table><tr><th>Field</th><th>Type</th></tr><tr><td>status</td><td>enum&lt;string&gt;</td></tr></table>
+        <pre><code>/v1/advanced/stepTransaction?skipSimulation=true
+
+/v1/quote?skipSimulation=true&amp;...
+</code></pre>
+      </div>
+      <nav id="pagination"><a href="/next">Next</a></nav>
+      <div class="chat-assistant-floating-input"><textarea id="chat-assistant-textarea" aria-label="Ask a question...">Assistant draft</textarea><a href="/assistant-only">Ask a question</a><img src="/assistant.png"><pre>Assistant example</pre></div>
+    </div>
+  </div>
+  <div id="chat-assistant-sheet" class="chat-assistant-sheet"><textarea id="chat-assistant-textarea"></textarea></div>
+</main>
+</body></html>

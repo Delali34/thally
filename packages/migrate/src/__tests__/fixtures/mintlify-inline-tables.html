@@ -1,0 +1,12 @@
+<!-- Reduced table rows from docs.li.fi/composer/lifi-api/reference/api-parameters
+     and docs.li.fi/bigmi/backend. Preserve the original inline markup. -->
+<html><body><main><article><h1>API reference examples</h1>
+<table><thead><tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>fromChain</code></td><td>number</td><td>Yes</td><td>Source chain ID (e.g., <code>1</code> for Ethereum, <code>8453</code> for Base)</td></tr>
+<tr><td><code>toChain</code></td><td>number</td><td>Yes</td><td>Destination chain ID. Same as <code>fromChain</code> for same-chain deposits.</td></tr>
+<tr><td><code>toToken</code></td><td>string</td><td>Yes</td><td><strong>Vault/staking/deposit token address.</strong> This is what triggers Composer.</td></tr>
+</tbody></table>
+<table><thead><tr><th>Parameter</th><th>Required</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>fetchOptions</code></td><td>No</td><td><code>object</code></td><td data-numeric="true">-</td><td><a href="https://developer.mozilla.org/en-US/docs/Web/API/fetch" target="_blank" rel="noreferrer" class="link"><code>fetch</code></a> options to pass to the request.</td></tr>
+</tbody></table>
+</article></main></body></html>

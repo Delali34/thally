@@ -50,7 +50,16 @@ const LOCALE_CODES = new Set([
 ])
 const PORTABLE_URL_PROPS = 'href|src|img|primaryHref|secondaryHref'
 const PORTABLE_URL_PROP_NAMES = new Set(PORTABLE_URL_PROPS.split('|'))
+// Recognize observed theme controls by exact labels; unknown/local custom
+// controls remain available for explicit review instead of being guessed away.
+const MINTLIFY_ARTICLE_LABELS = [
+  { baseUrl: 'Select base URL', permalink: 'Navigate to header' },
+  { baseUrl: '选择基础URL', permalink: '导航到标题' },
+]
 const remoteMarkdownParser = unified().use(remarkParse).use(remarkMdx)
+// Operation metadata is data inside Markdown fences, even when surrounding
+// publisher prose is not portable MDX. Never compile that surrounding prose.
+const embeddedOpenApiParser = unified().use(remarkParse)
 
 interface RemoteMarkdownAttributeValue {
   type: string
@@ -71,6 +80,8 @@ interface RemoteMarkdownNode {
   identifier?: string
   url?: string
   value?: string
+  lang?: string | null
+  meta?: string | null
   children?: Array<RemoteMarkdownNode>
   position?: {
     start: { offset?: number }
@@ -78,7 +89,8 @@ interface RemoteMarkdownNode {
   }
 }
 
-interface EmbeddedOpenApiFragment {
+/** One declared operation and its complete publisher-provided schema context. */
+export interface EmbeddedOpenApiFragment {
   method: string
   path: string
   document: Record<string, unknown>
@@ -540,6 +552,13 @@ function sanitizeMarkdownUrls(value: string): string | null {
       return
     }
     if (node.type === 'mdxJsxTextElement' || node.type === 'mdxJsxFlowElement') {
+      // Validate actual JSX nodes, not tag-shaped prose: Markdown escapes such
+      // as `enum\<string>` are inert text, while member components still need
+      // rejection even when their first segment names a portable primitive.
+      if (!node.name || !PORTABLE_MDX_COMPONENTS.has(node.name)) {
+        hasUnsafeMdxSyntax = true
+        return
+      }
       for (const attribute of node.attributes ?? []) {
         if (attribute.type !== 'mdxJsxAttribute' || !attribute.name
           || /^on[A-Z]/.test(attribute.name)) {
@@ -737,10 +756,6 @@ export function sanitizeRemoteMarkdown(body: string): string | null {
   if (hasUnsafeExpression || /[{}]/.test(withoutStaticProps)
     || /\bon[A-Z][A-Za-z]*\s*=/g.test(withoutStaticProps)
     || hasUnsafePortableUrlProp(executable)) return null
-  for (const match of withoutStaticProps.matchAll(/<\/?([A-Za-z][A-Za-z0-9.]*)(?:\s|>|\/)/g)) {
-    const component = match[1].split('.', 1)[0]
-    if (!PORTABLE_MDX_COMPONENTS.has(component)) return null
-  }
   return urlSafeMarkdown
 }
 
@@ -861,28 +876,60 @@ function stripMintlifyDocumentationIndex(body: string): string {
   return lines.slice(index).join('\n')
 }
 
-function extractEmbeddedOpenApi(content: string): {
+/**
+ * Extract one unambiguous publisher-declared operation from a bounded literal
+ * code fence. Optional source filenames are metadata only: callers choose local
+ * asset names and never fetch or write the publisher's filename.
+ */
+export function extractEmbeddedOpenApi(content: string): {
   content: string
   openapi?: string
   fragment?: EmbeddedOpenApiFragment
 } {
-  const fencePattern = /^\s{0,3}(`{3,}|~{3,})(?:yaml|yml|json)\s+(\S+\.(?:yaml|yml|json))\s+(delete|get|head|options|patch|post|put|trace)\s+(\/\S+)\s*\r?\n([\s\S]*?)^\s{0,3}\1\s*$/im
-  const match = fencePattern.exec(content)
-  if (!match) return { content }
+  if (Buffer.byteLength(content, 'utf8') > MAX_LOCAL_RESPONSE_BYTES) return { content }
   try {
-    const parsed = parseYaml(match[5], { maxAliasCount: 50 })
+    const root = embeddedOpenApiParser.parse(content) as RemoteMarkdownNode
+    const candidates = (root.children ?? []).flatMap((node) => {
+      if (node.type !== 'code' || !/^(?:yaml|yml|json)$/i.test(node.lang ?? '')) return []
+      const metadata = node.meta?.match(/^(?:(\S+\.(?:yaml|yml|json))\s+)?(delete|get|head|options|patch|post|put|trace)\s+(\/\S+)\s*$/i)
+      return metadata ? [{ node, method: metadata[2].toUpperCase(), path: metadata[3] }] : []
+    })
+    if (candidates.length !== 1) return { content }
+    const { node, method, path } = candidates[0]
+    const start = node.position?.start.offset
+    const end = node.position?.end.offset
+    if (start === undefined || end === undefined) return { content }
+    const lines = content.slice(start, end).split(/\r?\n/)
+    const opening = lines[0].match(/^ {0,3}(`{3,}|~{3,})/)
+    const closing = lines.at(-1)?.match(/^ {0,3}(`{3,}|~{3,})[\t ]*$/)
+    if (!opening || !closing || opening[1][0] !== closing[1][0]
+      || closing[1].length < opening[1].length) return { content }
+    const parsed = parseYaml(node.value ?? '', { maxAliasCount: 50 })
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { content }
     const document = parsed as Record<string, unknown>
     if (typeof document.openapi !== 'string' && typeof document.swagger !== 'string') return { content }
-    const method = match[3].toUpperCase()
-    const path = match[4]
     const paths = document.paths
     if (!paths || typeof paths !== 'object' || Array.isArray(paths)) return { content }
+    if (!Object.prototype.hasOwnProperty.call(paths, path)) return { content }
     const pathItem = (paths as Record<string, unknown>)[path]
     if (!pathItem || typeof pathItem !== 'object' || Array.isArray(pathItem)
-      || !(match[3].toLowerCase() in pathItem)) return { content }
-    const before = content.slice(0, match.index).replace(/(?:^|\n)##\s+OpenAPI\s*\n\s*$/i, '\n')
-    const after = content.slice(match.index + match[0].length)
+      || !Object.prototype.hasOwnProperty.call(pathItem, method.toLowerCase())) return { content }
+    const operation = (pathItem as Record<string, unknown>)[method.toLowerCase()]
+    if (!operation || typeof operation !== 'object' || Array.isArray(operation)) return { content }
+    // Recovery emits a local JSON/YAML asset. Reject cyclic alias graphs and
+    // bound expansion before callers serialize a remotely supplied document.
+    let values = 0
+    let textLength = 0
+    const serialized = JSON.stringify(document, (_key, value: unknown) => {
+      values += 1
+      if (typeof value === 'string') textLength += value.length
+      if (values > 100_000 || textLength > MAX_LOCAL_RESPONSE_BYTES
+        || (typeof value === 'number' && !Number.isFinite(value))) throw new Error('OpenAPI document exceeds portable data limits.')
+      return value
+    })
+    if (Buffer.byteLength(serialized, 'utf8') > MAX_LOCAL_RESPONSE_BYTES) return { content }
+    const before = content.slice(0, start).replace(/(?:^|\n)##\s+OpenAPI\s*\n\s*$/i, '\n')
+    const after = content.slice(end)
     return {
       content: `${before}${after}`.trim(),
       openapi: `${method} ${path}`,
@@ -958,7 +1005,8 @@ function mergeRecord(target: Record<string, unknown>, source: unknown): void {
   }
 }
 
-function mergeEmbeddedOpenApi(fragments: Array<EmbeddedOpenApiFragment>): Uint8Array | null {
+/** Project validated operation fragments while keeping their complete components. */
+export function mergeEmbeddedOpenApi(fragments: Array<EmbeddedOpenApiFragment>): Uint8Array | null {
   const first = fragments[0]
   if (!first) return null
   const combined: Record<string, unknown> = {
@@ -1001,27 +1049,90 @@ function mergeEmbeddedOpenApi(fragments: Array<EmbeddedOpenApiFragment>): Uint8A
   return new TextEncoder().encode(stringifyYaml(combined))
 }
 
+/**
+ * Select documentation content once for conversion and fidelity evidence.
+ * Mintlify API examples can sit beside its prose column, so retain the main
+ * content container and remove only known navigation/assistant chrome. Unknown
+ * article controls remain visible to callers that decide whether review is
+ * required; in particular, ordinary textareas are not assistant chrome.
+ */
+export function migrationHtmlArticle(body: string) {
+  const $ = load(body)
+  const root = ['main article', 'article', 'main', '[role="main"]', 'body']
+    .map((selector) => $(selector).first())
+    .find((candidate) => candidate.length)!
+  root.find([
+    'script', 'style', 'noscript', 'nav', 'footer', 'aside',
+    '.theme-doc-version-badge', '.theme-doc-breadcrumbs', '.theme-doc-toc-mobile', '.table-of-contents',
+    '.chat-assistant-floating-input', '.chat-assistant-sheet', '#chat-assistant-sheet', '#chat-assistant-textarea',
+  ].join(',')).remove()
+  const permalinkSelectors = MINTLIFY_ARTICLE_LABELS.map((labels) => `a[aria-label="${labels.permalink}"]`)
+  root.find([...permalinkSelectors, 'h1 .hash-link', 'h2 .hash-link', 'h3 .hash-link', 'h4 .hash-link', 'h5 .hash-link', 'h6 .hash-link'].join(',')).each((_index, link) => {
+    const parent = $(link).parent()
+    $(link).remove()
+    // Mintlify wraps its heading and API-parameter permalink icons in a block.
+    // Leaving the empty wrapper would separate the ATX marker from its text.
+    if (parent.is('div') && !parent.text().trim() && parent.children().length === 0) parent.remove()
+  })
+  root.find('svg.lucide-chevrons-up-down,summary[data-component-part="expandable-button"] svg[data-component-part="icon-svg"]').remove()
+  root.find('li.task-list-item > input[type="checkbox"][disabled]').each((_index, element) => {
+    const isChecked = $(element).attr('checked') !== undefined
+    $(element).replaceWith($('<span></span>')
+      .attr('data-thally-static-task-checkbox', isChecked ? 'checked' : 'unchecked')
+      .text(isChecked ? '[x] ' : '[ ] '))
+  })
+  root.find(MINTLIFY_ARTICLE_LABELS.map((labels) => `select[aria-label="${labels.baseUrl}"]`).join(',')).each((_index, element) => {
+    const select = $(element)
+    const options = select.children('option').toArray()
+    if (!options.length || options.length !== select.children().length) return
+    const urls: Array<{ label: string; href: string; isSelected: boolean }> = []
+    for (const option of options) {
+      // The option's display text is the server URL; its value is often an
+      // index. Only project complete literal HTTPS URLs without credentials.
+      if ($(option).children().length) return
+      const label = $(option).text().trim()
+      if (!/^https:\/\//i.test(label) || /[\s\u0000-\u001f\u007f]/.test(label)) return
+      try {
+        const url = new URL(label)
+        if (url.protocol !== 'https:' || url.username || url.password) return
+        urls.push({ label, href: url.href, isSelected: $(option).attr('selected') !== undefined })
+      } catch { return }
+    }
+    const projection = $('<div data-thally-static-base-urls></div>')
+    const sourceId = select.attr('id')
+    if (sourceId) projection.attr('id', sourceId)
+    projection.append($('<p></p>').text(select.attr('aria-label')!))
+    const list = $('<ul></ul>')
+    for (const url of urls) {
+      const item = $('<li></li>').append($('<a></a>').attr('href', url.href).text(url.label))
+      if (url.isSelected) item.append(' (selected)')
+      list.append(item)
+    }
+    projection.append(list)
+    select.replaceWith(projection)
+  })
+  return { $, root }
+}
+
 /** Project rendered article HTML into inert content using shared conversion rules. */
 export function htmlPage(
   document: MigrationFetchResponse,
   id: string,
   options: { preserveAnchors?: boolean; preserveResponsiveImages?: boolean; omitDocumentHeading?: boolean } = {},
 ): { page: MigrationPage | null; links: Array<string> } {
-  const $ = load(document.body)
-  const links = $('nav a[href], main a[href], article a[href], [role="main"] a[href]')
+  const { $, root } = migrationHtmlArticle(document.body)
+  const links = root.find('a[href]')
     .map((_index, element) => $(element).attr('href') ?? '')
     .get()
     .filter(Boolean)
   const scopedTitle = options.omitDocumentHeading
-    ? $('main article, article, main, [role="main"]').first().find('h1').first().text().trim()
+    ? root.find('h1').first().text().trim()
     : ''
   const title = scopedTitle || $('main h1, article h1, h1').first().text().trim()
     || $('meta[property="og:title"]').attr('content')?.trim()
     || $('title').text().split('|')[0].trim()
   const description = $('meta[name="description"]').attr('content')?.trim()
     || $('meta[property="og:description"]').attr('content')?.trim()
-  const content = $('main article, article, main, [role="main"]').first()
-  const root = content.length ? content : $('body')
   let documentHeadingAnchor = ''
   const excludedElements = options.omitDocumentHeading
     ? 'script,style,noscript,nav,footer,aside,form,button,svg,iframe,object,embed,link,meta'
@@ -1037,6 +1148,10 @@ export function htmlPage(
       if (anchorId) documentHeadingAnchor = `<a id="${migrationImageAttribute(anchorId)}" />\n\n`
       heading.remove()
     }
+    // The destination renders its only document H1 from frontmatter. Some
+    // authors use additional H1s for article sections; preserve their full
+    // content and source IDs while giving those sections the next heading level.
+    root.find('h1').each((_index, element) => { element.name = 'h2' })
   }
   root.find('a[href]').each((_index, element) => {
     const href = $(element).attr('href')
@@ -1066,8 +1181,15 @@ export function htmlPage(
       $(element).removeAttr('src')
     }
   })
-  const turndown = new TurndownService({ codeBlockStyle: 'fenced', emDelimiter: '_', headingStyle: 'atx' })
+  const turndown = new TurndownService({ codeBlockStyle: 'fenced', emDelimiter: '_', headingStyle: 'atx', preformattedCode: true })
+  let isConvertingTableCell = false
   turndown.remove(['script', 'style', 'noscript'])
+  turndown.addRule('migration-static-task-checkbox', {
+    filter: (node) => node.nodeName === 'SPAN'
+      && ['checked', 'unchecked'].includes((node as HTMLElement).getAttribute('data-thally-static-task-checkbox') ?? ''),
+    // Emit literal task-list syntax rather than escaping its brackets as copy.
+    replacement: (_content, node) => (node as HTMLElement).getAttribute('data-thally-static-task-checkbox') === 'checked' ? '[x] ' : '[ ] ',
+  })
   const anchor = (element: HTMLElement): string => {
     const value = element.getAttribute('id')
     return options.preserveAnchors && value
@@ -1079,7 +1201,7 @@ export function htmlPage(
     replacement: (content, node) => {
       const element = node as HTMLElement
       const heading = element.nodeName.match(/^H([1-6])$/)
-      return `\n\n${anchor(element)}${heading ? `${'#'.repeat(Number(heading[1]))} ` : ''}${content}\n\n`
+      return `\n\n${anchor(element)}${heading ? `${'#'.repeat(Number(heading[1]))} ${content.trim()}` : content}\n\n`
     },
   })
   if (options.preserveResponsiveImages) {
@@ -1154,10 +1276,19 @@ export function htmlPage(
     replacement: (_content, node) => {
       const fragment = load((node as HTMLElement).outerHTML)
       const rows = fragment('tr').toArray().map((row) => (
-        fragment(row).children('th,td').toArray().map((cell) => escapeMarkdownText(
-          fragment(cell).text().replace(/\s+/g, ' ').trim(),
-          true,
-        ))
+        fragment(row).children('th,td').toArray().map((cell) => {
+          const wasConvertingTableCell = isConvertingTableCell
+          isConvertingTableCell = true
+          try {
+            // Reuse the article's safe inline rules so links, code, emphasis
+            // and images survive. GFM still requires one physical line per
+            // row and escaped pipes, including pipes inside inline code.
+            return turndown.turndown(fragment(cell).html() ?? '')
+              .replace(/\r?\n/g, ' ').replace(/\|/g, '\\|').trim()
+          } finally {
+            isConvertingTableCell = wasConvertingTableCell
+          }
+        })
       )).filter((row) => row.length > 0)
       if (rows.length === 0) return ''
       const width = Math.max(...rows.map((row) => row.length))
@@ -1181,7 +1312,11 @@ export function htmlPage(
     },
   })
   const escape = turndown.escape.bind(turndown)
-  turndown.escape = (text: string) => escape(text).replace(/[<{}]/g, (match) => `\\${match}`)
+  turndown.escape = (text: string) => isConvertingTableCell
+    // Entity-encode only text nodes: code spans retain their literal payload,
+    // and generated links keep their syntax while prose stays inert MDX.
+    ? escape(text.replace(/[<>{}]/g, (character) => ({ '<': '&lt;', '>': '&gt;', '{': '&#123;', '}': '&#125;' })[character]!))
+    : escape(text).replace(/[<{}]/g, (match) => `\\${match}`)
   const body = `${documentHeadingAnchor}${turndown.turndown(root.html() ?? '').trim()}`
   // Docusaurus can intentionally publish title-only reference/partial pages.
   // Keep those real article routes while still rejecting empty search/app

@@ -1,0 +1,11 @@
+<!-- Reduced actual task-list markup from docs.li.fi/agents/workflows/approvals.
+     The original checklist is unchecked; checked state is covered by a test
+     variant, since no checked task boxes occurred in the captured corpus. -->
+<html><body><main><article><h1>Approvals</h1><ul class="contains-task-list">
+<li class="task-list-item"><input type="checkbox" disabled=""/> <code>fromToken.address</code> is NOT <code>0x0000...0000</code> (native token)</li>
+<li class="task-list-item"><input type="checkbox" disabled=""/> <!-- -->Retrieved <code>approvalAddress</code> from quote response</li>
+<li class="task-list-item"><input type="checkbox" disabled=""/> <!-- -->Checked current <code>allowance(owner, spender)</code></li>
+<li class="task-list-item"><input type="checkbox" disabled=""/> <!-- -->Compared allowance to <code>fromAmount</code></li>
+<li class="task-list-item"><input type="checkbox" disabled=""/> <!-- -->Sent approval tx if allowance &lt; fromAmount</li>
+<li class="task-list-item"><input type="checkbox" disabled=""/> <!-- -->Waited for approval confirmation</li>
+</ul></article></main></body></html>
