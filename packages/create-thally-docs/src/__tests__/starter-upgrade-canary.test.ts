@@ -41,6 +41,50 @@ describe('historical scaffold upgrade canary', () => {
     expect(checked).toEqual([target.release.id, oldest.release.id]);
   });
 
+  it.each(['historical', 'target'] as const)('checks the %s archive with identical manifests using exact release identities', async selected => {
+    const current = fixture(2), target = fixture(2);
+    target.release = {
+      ...target.release, id: 'fixture-2-republished',
+      source: { ...target.release.source, commitSha: 'c'.repeat(40), treeSha: 'd'.repeat(40), archiveUrl: `https://codeload.github.com/thallylabs/starter/tar.gz/${'c'.repeat(40)}` },
+    };
+    // The manifest records the runtime pin, not every starter archive byte.
+    // A package-only correction must still use the actual historical archive.
+    for (const [archive, version] of [[current, '0.8.86'], [target, '0.8.103']] as const) {
+      const packageJson = JSON.parse(readFileSync(join(archive.root, 'package.json'), 'utf8'));
+      packageJson.devDependencies = { '@thallylabs/cli': version };
+      writeFileSync(join(archive.root, 'package.json'), JSON.stringify(packageJson));
+      const lock = JSON.parse(readFileSync(join(archive.root, 'package-lock.json'), 'utf8'));
+      lock.packages[''].devDependencies = packageJson.devDependencies;
+      lock.packages['node_modules/@thallylabs/cli'] = { version };
+      writeFileSync(join(archive.root, 'package-lock.json'), JSON.stringify(lock));
+    }
+    const downloads: string[] = [];
+    const checked = await verifyScaffoldUpgrades({
+      target: target.release, candidateDirectory: target.root, current: selected === 'historical' ? current.release : target.release,
+      releases: [target.release, current.release, structuredClone(current.release)],
+      download: async (directory, release) => {
+        expect(release).toEqual(current.release);
+        downloads.push(release.source.commitSha);
+        cpSync(current.root, directory, { recursive: true });
+      },
+    });
+    expect(checked).toEqual(selected === 'historical' ? [current.release.id] : [target.release.id, current.release.id]);
+    // Download the fixture, prove its archive, and plan/apply the upgrade. The
+    // target must come from the candidate directory, never the old archive.
+    expect(downloads.length).toBeGreaterThan(1);
+    expect(new Set(downloads)).toEqual(new Set([current.release.source.commitSha]));
+  });
+
+  it('deduplicates repeated records of the same immutable baseline', async () => {
+    const current = fixture(1), target = fixture(2);
+    const checked = await verifyScaffoldUpgrades({
+      target: target.release, candidateDirectory: target.root, current: current.release,
+      releases: [current.release, structuredClone(current.release)],
+      download: async directory => cpSync(current.root, directory, { recursive: true }),
+    });
+    expect(checked).toEqual([current.release.id]);
+  });
+
   it('fails closed when an immutable historical archive is missing', async () => {
     const old = fixture(1), target = fixture(2);
     await expect(verifyScaffoldUpgrades({ target: target.release, candidateDirectory: target.root, current: old.release, releases: [old.release], download: async () => { throw new Error('Missing immutable archive'); } })).rejects.toThrow('Missing immutable archive');
