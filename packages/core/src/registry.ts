@@ -16,5 +16,7 @@ export type {
   ContentDocumentResolver,
 } from './content/source-registry.js'
 export type { ContentDocument } from './content/document.js'
+export { registerAsyncSearchContentSource } from './search/projection.js'
+export type { AsyncSearchContentResolver } from './search/projection.js'
 export { registerSupplementalSearchRecordsSource } from './search/supplemental.js'
 export type { SupplementalSearchRecord, SearchRecordType } from './search/supplemental.js'

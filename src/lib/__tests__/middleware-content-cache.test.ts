@@ -121,10 +121,10 @@ function enableManagedAssetsMode(): void {
 }
 
 describe('managed content cache headers', () => {
-  it('never exposes the internal authored-content asset namespace', async () => {
+  it.each(['/_thally/content/src/content/private-roadmap.mdx', '/_thally/content/search/0000.json'])('never exposes the internal content asset %s', async (assetPath) => {
     enableManagedAssetsMode()
     const response = await middleware(
-      docRequest('/_thally/content/src/content/private-roadmap.mdx'),
+      docRequest(assetPath),
       EVENT,
     )
 

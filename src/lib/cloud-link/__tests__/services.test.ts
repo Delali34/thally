@@ -17,6 +17,7 @@ vi.mock('@thallylabs/core/embeddings', () => ({
 }))
 vi.mock('@thallylabs/core/registry', () => ({
   registerAsyncContentDocumentSource: vi.fn(),
+  registerAsyncSearchContentSource: vi.fn(),
   registerAsyncDocEntriesSource: vi.fn(),
   registerContentDocumentSource: vi.fn(),
   registerDocEntriesSource: vi.fn(),

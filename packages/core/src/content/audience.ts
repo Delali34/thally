@@ -43,6 +43,11 @@ function collectExcludedRanges(nodes: Array<RootContent>, audience: Exclude<Cont
 /** Remove content explicitly addressed to the other audience without evaluating MDX. */
 export function projectMdxAudience(source: string, audience: ContentAudience = 'all'): string {
   if (audience === 'all') return source
+  // Most documents contain no audience wrappers. Parsing those here and again
+  // for the canonical content graph doubles cold-corpus work. These literal
+  // prefixes cover every wrapper recognized below; false positives (including
+  // examples inside code) deliberately retain the ordinary parser path.
+  if (!source.includes('<Human') && !source.includes('<Agent') && !source.includes('<Visibility')) return source
   let tree: Root
   try {
     tree = processor.parse(source) as Root
