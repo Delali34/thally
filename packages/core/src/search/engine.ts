@@ -151,6 +151,11 @@ export function getSearchEngine(locale?: string, includeEmbeddings = true): Prom
   if (cached) return cached
   const pending = buildEngine(locale, includeEmbeddings)
   enginePromises.set(key, pending)
+  // Share in-flight work, but allow the next request to retry a rejected
+  // build. An older rejection cannot evict a newer cache generation.
+  void pending.catch(() => {
+    if (enginePromises.get(key) === pending) enginePromises.delete(key)
+  })
   return pending
 }
 

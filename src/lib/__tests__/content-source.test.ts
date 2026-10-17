@@ -212,10 +212,10 @@ describe('assets source', () => {
     expect(warn).toHaveBeenCalled()
   })
 
-  it('falls back to embedded content when the manifest cannot be fetched', async () => {
+  it('falls back to embedded content when the deployment manifest is missing', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     const fallback = stubFallback()
-    const source = createAssetsContentSource(fallback, () => async () => new Response('boom', { status: 500 }))
+    const source = createAssetsContentSource(fallback, () => async () => new Response('missing', { status: 404 }))
 
     expect((await source.read('src/content/introduction.mdx'))?.content).toBe('embedded fallback')
     expect(await source.read('AGENTS.md')).toBeNull()
@@ -238,13 +238,12 @@ describe('assets source', () => {
       return assets.fetcher(assetPath)
     })
 
-    // First read hits the transient failure and reports the file missing…
-    expect(await source.read('src/content/introduction.mdx')).toBeNull()
-    // …but the failure is not cached: the next read fetches again and wins.
+    // A temporary network failure retries within this read; it must not be
+    // projected as a missing document into a successfully cached index.
     expect((await source.read('src/content/introduction.mdx'))?.content).toBe(
       files['src/content/introduction.mdx'],
     )
-    expect(warn).toHaveBeenCalled()
+    expect(warn).not.toHaveBeenCalled()
   })
 
   it('retries the manifest after a transient fetch failure', async () => {
@@ -260,11 +259,11 @@ describe('assets source', () => {
       return assets.fetcher(assetPath)
     })
 
-    // First read falls back to embedded content, second reaches the assets.
-    expect((await source.read('src/content/introduction.mdx'))?.content).toBe('embedded fallback')
+    // A transient manifest error retries before any embedded fallback leaks.
     expect((await source.read('src/content/introduction.mdx'))?.content).toBe(
       files['src/content/introduction.mdx'],
     )
+    expect(fallback.reads).toEqual([])
   })
 
   it('falls back when no fetcher is available, then recovers once one appears', async () => {

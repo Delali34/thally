@@ -32,7 +32,7 @@ export interface ContentSource {
   kind: ContentSourceKind
   /** Whether a content file exists at this project-relative path. */
   exists(projectPath: string): Promise<boolean>
-  /** Read one content file, or null when it does not exist. */
+  /** Read one file, null when absent; transient service failures may reject. */
   read(projectPath: string): Promise<ContentSourceFile | null>
   /** Modification time for staleness comparisons; 0 when unknown/missing. */
   modifiedAt(projectPath: string): Promise<number>

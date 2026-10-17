@@ -12,9 +12,10 @@
  *   /_thally/content/<project-relative-path>       — file bytes, verbatim
  * e.g. /_thally/content/src/content/introduction.mdx
  *
- * Failure contract: this source must never take a site down. When the assets
- * binding is missing or the manifest cannot be loaded, operations fall back
- * to the embedded filesystem source. `AGENTS.md` is the exception: it carries
+ * Missing bindings and unavailable deployment manifests fall back to embedded
+ * content. Transient transport/service failures retry, then reject: silently
+ * omitting published pages would permanently poison derived search indexes.
+ * `AGENTS.md` is the exception to fallback: it carries
  * tenant identity, so assets mode reports it missing rather than exposing a
  * baseline Worker's embedded guidance.
  */
@@ -31,6 +32,8 @@ export const CONTENT_MANIFEST_PATH = `${CONTENT_ASSET_PREFIX}manifest.json`
 
 /** Root guidance is tenant-bound and must never fall back across deployments. */
 const TENANT_IDENTITY_BOUND_PATH = 'AGENTS.md'
+const MAX_ASSET_READS = 4
+const ASSET_READ_ATTEMPTS = 3
 
 export interface ContentManifestEntry {
   /** Publish-observed modification time (e.g. commit timestamp). */
@@ -65,6 +68,7 @@ function assetUrlPath(projectPath: string): string {
   return CONTENT_ASSET_PREFIX + projectPath.split('/').map(encodeURIComponent).join('/')
 }
 
+/** Create a release-scoped reader with bounded, retryable asset transfers. */
 export function createAssetsContentSource(
   fallback: ContentSource,
   resolveFetcher: () => ContentAssetFetcher | null = getContentAssetFetcher,
@@ -77,6 +81,46 @@ export function createAssetsContentSource(
     sizeOf: (file) => file ? file.content.length * 2 + 128 : 0,
   })
   let warnedUnavailable = false
+  let activeReads = 0
+  const waitingReads = new Set<() => void>()
+
+  /** Hold capacity through body consumption, not merely response headers. */
+  async function withReadSlot<T>(read: () => Promise<T>): Promise<T> {
+    if (activeReads < MAX_ASSET_READS) activeReads += 1
+    else await new Promise<void>((resolve) => waitingReads.add(resolve))
+    try {
+      return await read()
+    } finally {
+      // Transfer ownership directly so a new caller cannot steal a slot
+      // between waking the oldest reader and its promise continuation.
+      const next = waitingReads.values().next().value
+      if (next) {
+        waitingReads.delete(next)
+        next()
+      } else activeReads -= 1
+    }
+  }
+
+  async function readResponse(fetchAsset: ContentAssetFetcher, assetPath: string): Promise<{ status: number; body: string | null }> {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await withReadSlot(async () => {
+          const response = await fetchAsset(assetPath)
+          if (response.ok) return { status: response.status, body: await response.text() }
+          // Failed response bodies still occupy a connection until cancelled.
+          await response.body?.cancel()
+          if ([408, 425, 429].includes(response.status) || response.status >= 500) {
+            throw new Error(`Published content asset temporarily unavailable (${response.status})`)
+          }
+          return { status: response.status, body: null }
+        })
+      } catch (error) {
+        if (attempt + 1 >= ASSET_READ_ATTEMPTS) throw error
+        // Retry outside the slot so healthy queued reads can make progress.
+        await new Promise<void>((resolve) => setTimeout(resolve, 25 * 2 ** attempt))
+      }
+    }
+  }
 
   function readFallback(projectPath: string): Promise<ContentSourceFile | null> {
     return projectPath === TENANT_IDENTITY_BOUND_PATH
@@ -94,8 +138,9 @@ export function createAssetsContentSource(
 
   /**
    * Load the manifest once per isolate. A missing fetcher is not cached as a
-   * failure — the Cloudflare context may simply not exist yet — but a fetched
-   * failure is, to avoid hammering a broken deployment on every read.
+   * failure — the Cloudflare context may simply not exist yet. Terminal
+   * deployment defects are cached; exhausted transient failures reject and
+   * clear the attempt so a later request can recover in the same isolate.
    */
   function loadManifest(): Promise<ContentManifest | null> {
     const fetchAsset = resolveFetcher()
@@ -104,27 +149,17 @@ export function createAssetsContentSource(
       return Promise.resolve(null)
     }
     if (!manifestPromise) {
-      manifestPromise = (async () => {
-        let response: Response
-        try {
-          response = await fetchAsset(CONTENT_MANIFEST_PATH)
-        } catch (error) {
-          // A thrown fetch is transient: fall back for this read but clear
-          // the cached attempt so the next read retries instead of pinning
-          // the whole isolate to embedded content.
-          manifestPromise = null
-          warnFallbackOnce(error instanceof Error ? error.message : 'manifest fetch failed')
-          return null
-        }
+      const pending = (async () => {
+        const response = await readResponse(fetchAsset, CONTENT_MANIFEST_PATH)
         // A served-but-unusable manifest (missing, or malformed JSON) is a
         // deployment defect a retry cannot fix — cache the failure so a
         // broken release does not hammer the asset host on every read.
-        if (!response.ok) {
+        if (response.body === null) {
           warnFallbackOnce(`manifest fetch returned ${response.status}`)
           return null
         }
         try {
-          const parsed: unknown = await response.json()
+          const parsed: unknown = JSON.parse(response.body)
           if (!isContentManifest(parsed)) {
             warnFallbackOnce('manifest is malformed')
             return null
@@ -135,6 +170,10 @@ export function createAssetsContentSource(
           return null
         }
       })()
+      manifestPromise = pending
+      void pending.catch(() => {
+        if (manifestPromise === pending) manifestPromise = null
+      })
     }
     return manifestPromise
   }
@@ -146,18 +185,18 @@ export function createAssetsContentSource(
     if (!fetchAsset) return readFallback(projectPath)
     return files.getOrLoad(projectPath, async () => {
       try {
-        const response = await fetchAsset(assetUrlPath(projectPath))
-        if (!response.ok) {
+        const response = await readResponse(fetchAsset, assetUrlPath(projectPath))
+        if (response.body === null) {
           console.warn(`[thally] published content asset missing: ${projectPath} (${response.status})`)
           return null
         }
         return {
-          content: await response.text(),
+          content: response.body,
           modifiedAtMs: manifest.files[projectPath]?.modifiedAtMs ?? 0,
         }
       } catch (error) {
         console.warn(`[thally] published content asset read failed: ${projectPath} (${error instanceof Error ? error.message : 'fetch failed'})`)
-        return null
+        throw error
       }
     })
   }

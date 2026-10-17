@@ -125,6 +125,11 @@ export function buildSearchCorpusAsync(locale?: string): Promise<Array<SearchRec
   if (cached) return cached
   const pending = buildRecordsAsync(BODY_LIMIT, locale)
   asyncServerCorpora.set(key, pending)
+  // A temporary content-service outage must not pin a failed index until
+  // the next deployment. Identity fencing preserves a newer reset/retry.
+  void pending.catch(() => {
+    if (asyncServerCorpora.get(key) === pending) asyncServerCorpora.delete(key)
+  })
   return pending
 }
 
