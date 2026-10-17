@@ -12,6 +12,8 @@ import { unified } from 'unified'
 import { buildNavigationFromPages } from './navigation.js'
 import { pageIdFromReference } from './path.js'
 import { isPassiveSvg } from './svg-policy.js'
+import { createMigrationAssetCache } from './url-asset-cache.js'
+import { cloneUrlMigrationCheckpoint } from './url-journal-clone.js'
 import { migrationImageAttribute, migrationImageCandidates, renderMigrationSrcset } from './url-images.js'
 import { defaultMigrationFetcher, htmlPage, markdownPage, sanitizeRemoteMarkdown, validateMigrationUrl } from './url.js'
 import type { MigrationBundle, MigrationFetchResponse, MigrationNavigationGroup, MigrationPage } from './types.js'
@@ -444,8 +446,9 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
     || (options.maxCaptures !== undefined && (!Number.isInteger(options.maxCaptures) || options.maxCaptures < 1))
     || (options.maxTotalBytes !== undefined && (!Number.isFinite(options.maxTotalBytes) || options.maxTotalBytes < 1))) throw new Error('Migration batch, concurrency and byte limits must be positive finite numbers.')
   const captureVersion = options.captureVersion ?? 'fetch-v1'
+  if (options.checkpoint && options.checkpoint.records.length > MAX_RECORDS) throw new Error('Checkpoint inventory exceeds its bound.')
   const checkpoint: UrlMigrationCheckpoint = options.checkpoint
-    ? JSON.parse(JSON.stringify(options.checkpoint)) as UrlMigrationCheckpoint
+    ? cloneUrlMigrationCheckpoint(options.checkpoint)
     : { schemaVersion: 1, converterVersion: CONVERTER_VERSION, sourceUrl, scopePath, captureVersion, records: [], navigation: [] }
   if (checkpoint.schemaVersion !== 1 || checkpoint.converterVersion !== CONVERTER_VERSION || checkpoint.sourceUrl !== sourceUrl || checkpoint.scopePath !== scopePath || checkpoint.captureVersion !== captureVersion) throw new Error('Checkpoint does not match this source, scope or capture/converter version.')
   if (checkpoint.records.length > MAX_RECORDS) throw new Error('Checkpoint inventory exceeds its bound.')
@@ -486,9 +489,26 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
   const finalUrls = new Map([...records.values()].filter((record) => record.evidence && record.page).map((record) => [canonical(record.evidence!.finalUrl, sourceUrl)!, record.url]))
   let imported = usedIds.size
   const assetPayloads = new Map(checkpoint.records.flatMap((record) => (record.assets ?? []).map((asset) => [asset.sha256, asset] as const)))
-  const assetRequests = new Map<string, Promise<MigrationCapturedAsset>>()
+  // URL aliases retain their own provenance, but never their own copy of an
+  // identical binary payload. Normalize before a cached promise fulfills:
+  // replacing only the local awaited value leaves the original Buffer alive.
+  const assetBytes = new Map<string, Uint8Array>()
+  const retainAsset = (asset: MigrationCapturedAsset): MigrationCapturedAsset => {
+    if (!acceptedAsset(asset)) throw new Error('Asset MIME/signature is unsupported or unsafe to serve.')
+    const sha256 = hash(asset.content)
+    // Own the retained bytes: adapters may recycle their capture buffers after
+    // returning them, while checkpoint hashes must stay bound to this snapshot.
+    const content = assetBytes.get(sha256) ?? Buffer.from(asset.content)
+    assetBytes.set(sha256, content)
+    return { ...asset, content }
+  }
+  const assetRequests = createMigrationAssetCache()
   for (const record of checkpoint.records) for (const asset of record.assets ?? []) {
-    if (!assetRequests.has(asset.url)) assetRequests.set(asset.url, Promise.resolve({ url: asset.url, contentType: asset.contentType, content: Buffer.from(asset.base64, 'base64') }))
+    if (!assetRequests.has(asset.url)) {
+      const content = assetBytes.get(asset.sha256) ?? Buffer.from(asset.base64, 'base64')
+      assetBytes.set(asset.sha256, content)
+      assetRequests.remember(asset.url, { url: asset.url, contentType: asset.contentType, content })
+    }
   }
   let totalBytes = checkpoint.records.reduce((sum, record) => sum + (record.evidence?.byteLength ?? 0), 0)
     + [...assetPayloads.values()].reduce((sum, asset) => sum + Buffer.byteLength(asset.base64, 'base64'), 0)
@@ -570,10 +590,10 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
         try {
           let assetRequest = assetRequests.get(url)
           if (!suppliedAssets.has(url) && !assetRequest && assetFetcher) {
-            assetRequest = assetFetcher(new URL(url), options.signal)
-            assetRequests.set(url, assetRequest)
+            assetRequest = assetRequests.load(url, () => assetFetcher(new URL(url), options.signal).then(retainAsset))
           }
-          const asset = suppliedAssets.get(url) ?? (assetRequest ? await assetRequest : null)
+          const supplied = suppliedAssets.get(url)
+          const asset = supplied ? retainAsset(supplied) : (assetRequest ? await assetRequest : null)
           if (!asset) throw new Error('Capture host did not supply asset bytes or a binary fetch boundary.')
           const extension = acceptedAsset(asset)
           if (!extension) throw new Error('Asset MIME/signature is unsupported or unsafe to serve.')
@@ -587,7 +607,7 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
           const receipt = { url, path, sha256, contentType: asset.contentType, base64: existing?.base64 ?? Buffer.from(asset.content).toString('base64') }
           record.assets.push(receipt)
           if (!existing) assetPayloads.set(sha256, receipt)
-          if (!assetRequests.has(url)) assetRequests.set(url, Promise.resolve(asset))
+          if (!assetRequests.has(url)) assetRequests.remember(url, asset)
           // Only prose destinations are rewritten; example code is immutable.
           page.body = rewriteMarkdownDestinations(page.body, (destination) => canonical(destination, final) === url ? `/${path}${new URL(destination, final).hash}` : destination)
         } catch (error) {
@@ -691,7 +711,15 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
   const validation = validateUrlMigration(checkpoint, Boolean(options.signal?.aborted))
   validation.issues.push(...navigationIssues)
   if (navigationIssues.length && validation.status === 'passed') validation.status = 'partial'
-  const assets = new Map(checkpoint.records.flatMap((record) => (record.assets ?? []).map((asset) => [asset.path, { path: asset.path, content: Buffer.from(asset.base64, 'base64') }] as const)))
+  const assets = new Map<string, MigrationBundle['assets'][number]>()
+  for (const record of checkpoint.records) for (const asset of record.assets ?? []) {
+    if (!assets.has(asset.path)) {
+      const content = assetBytes.get(asset.sha256) ?? Buffer.from(asset.base64, 'base64')
+      // Keep the public bundle's historical Buffer JSON shape, including when
+      // an adapter supplied a plain Uint8Array or a view into a larger buffer.
+      assets.set(asset.path, { path: asset.path, content: Buffer.from(content.buffer, content.byteOffset, content.byteLength) })
+    }
+  }
   const bundle: MigrationBundle = {
     sourceUrl, sourceKind: 'url', platform: options.platform ?? 'generic', pages, assets: [...assets.values()],
     docsConfig: navigationConfig(checkpoint.navigation, records) ?? buildNavigationFromPages(pages),

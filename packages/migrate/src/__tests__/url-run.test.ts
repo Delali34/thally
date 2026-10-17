@@ -1,5 +1,7 @@
 /** Evidence-bearing imports prove actual conversion, JSON recovery and inventory coverage. */
 import { describe, expect, it } from 'vitest'
+import { execFileSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { classifyMigrationResponse, runUrlMigration } from '../url-run.js'
 import { compile } from '@mdx-js/mdx'
 import type { MigrationCapture, MigrationCaptureProvider, UrlMigrationCheckpointDelta } from '../url-run-types.js'
@@ -200,6 +202,32 @@ describe('evidence URL runner', () => {
     expect(limited.validation.status).toBe('partial')
     expect(limited.stopReason).toBe('byte-limit')
     expect(limited.bundle.assets).toHaveLength(1)
+  })
+
+  it('preserves URL receipts and exact artifacts when fetched and supplied aliases share bytes', async () => {
+    const png = Buffer.from('iVBORw0KGgo=', 'base64')
+    const paths = Array.from({ length: 24 }, (_, index) => `/alias-${index}.png`)
+    const source = response('/guide', article('Aliases', paths.map((path) => `<img src="${path}">`).join('')))
+    const fetched = await runUrlMigration({ sourceUrl: 'https://docs.test/guide', captureProvider: provider({ '/guide': source }), assetFetcher: async (url) => ({ url: url.href, contentType: 'image/png', content: Buffer.from(png) }) })
+    const supplied = await runUrlMigration({ sourceUrl: 'https://docs.test/guide', captureProvider: provider({ '/guide': { ...source, assets: paths.map((path) => ({ url: `https://docs.test${path}`, contentType: 'image/png', content: new Uint8Array([0, ...png, 0]).subarray(1, png.length + 1) })) } }) })
+    expect(fetched.validation.status).toBe('passed')
+    expect(fetched.checkpoint.records.find((record) => record.page)?.assets?.map((asset) => asset.url)).toEqual(paths.map((path) => `https://docs.test${path}`))
+    expect(JSON.stringify(supplied)).toBe(JSON.stringify(fetched))
+    const resumed = await runUrlMigration({ sourceUrl: 'https://docs.test/guide', checkpoint: JSON.parse(JSON.stringify(fetched.checkpoint)), captureProvider: { capture: async () => { throw new Error('Must not recapture committed aliases') } } })
+    expect(JSON.stringify(resumed)).toBe(JSON.stringify(fetched))
+    expect(fetched.bundle.assets).toHaveLength(1)
+  })
+
+  it('bounds retained binary payloads across many aliases during capture and JSON resume', () => {
+    // Buffers are external to V8's heap limit. Sample arrayBuffers under forced
+    // GC inside the running migration, while its URL promise cache is live.
+    const result = execFileSync(process.execPath, ['--expose-gc', '--max-old-space-size=192', fileURLToPath(new URL('./fixtures/url-asset-memory.mjs', import.meta.url))], { encoding: 'utf8', timeout: 30_000 })
+    const memory = JSON.parse(result)
+    expect(memory.freshRetainedBytes).toBeLessThan(2 * 1024 * 1024)
+    expect(memory.resumedRetainedBytes).toBeLessThan(2 * 1024 * 1024)
+    expect(memory.aliases).toBe(64)
+    expect(memory.assets).toBe(1)
+    expect(memory.status).toBe('passed')
   })
 
   it('drains discovery at the article cap and preserves complete static tab alternatives', async () => {
