@@ -1,4 +1,8 @@
-/** Full-text and hybrid search over local or asynchronously resolved content. */
+/**
+ * Full-text and hybrid search over local or asynchronously resolved content.
+ * Raw engines retain their public filter/sort contract; the internal full-text
+ * query profile indexes only ranked text and keeps metadata in the doc store.
+ */
 
 import { create, insertMultiple, search } from '@orama/orama'
 import type { AnyOrama, Tokenizer } from '@orama/orama'
@@ -39,6 +43,10 @@ interface SearchEngine {
   db: AnyOrama
   dimensions: number
 }
+
+// This is internal execution policy, not a new public search option. Callers
+// of getSearchEngine may query/sort metadata directly, unlike searchDocs.
+type SearchIndexProfile = 'raw' | 'query-fulltext'
 
 function meanPool(vectors: Array<EmbeddingVector>, dimensions: number): EmbeddingVector {
   const acc = new Array<number>(dimensions).fill(0)
@@ -108,7 +116,9 @@ function createLocaleTokenizer(locale?: string): Tokenizer {
   }
 }
 
-async function buildEngine(locale?: string, includeEmbeddings = true): Promise<SearchEngine> {
+async function buildEngine(
+  profile: SearchIndexProfile, locale?: string, includeEmbeddings = true,
+): Promise<SearchEngine> {
   const provider = getEmbeddingProvider()
   const dimensions = provider.dimensions
   const records = await buildSearchCorpusAsync(locale)
@@ -118,23 +128,28 @@ async function buildEngine(locale?: string, includeEmbeddings = true): Promise<S
 
   const db = create({
     components: { tokenizer: createLocaleTokenizer(locale) },
+    // Full-text queries rank explicitly selected fields and never sort them.
+    // Orama otherwise retains sorter structures for every string field, even
+    // though searchDocs never asks for them. Keep that raw API behavior only
+    // on the public engine, not on the internal query profile.
+    ...(profile === 'query-fulltext' ? { sort: { enabled: false } } : {}),
     schema: {
-      pageId: 'string',
+      ...(profile === 'raw' ? { pageId: 'string' as const } : {}),
       title: 'string',
       description: 'string',
       headings: 'string',
       body: 'string',
       keywords: 'string',
-      href: 'string',
-      type: 'string',
+      ...(profile === 'raw' ? { href: 'string' as const, type: 'string' as const } : {}),
       // Full-text ranking never uses vectors. Even zero vectors retain
       // dimensions × pages backing stores, exceeding Worker memory at scale.
       ...(includeEmbeddings ? { embedding: `vector[${dimensions}]` as const } : {}),
     },
   }) as AnyOrama
 
-  // Fields outside the schema (sections, method, path) ride along in Orama's
-  // document store unindexed, so hits can carry them back.
+  // All metadata rides along in Orama's document store, including fields
+  // omitted by the query profile. Hits retain the exact same URLs, types,
+  // sections and API metadata without constructing unused inverted indexes.
   const indexed: Array<IndexedRecord> = records.map((record) => ({
     ...record,
     type: record.type ?? 'page',
@@ -145,11 +160,13 @@ async function buildEngine(locale?: string, includeEmbeddings = true): Promise<S
   return { db, dimensions }
 }
 
-export function getSearchEngine(locale?: string, includeEmbeddings = true): Promise<SearchEngine> {
-  const key = `${locale ?? ''}:${includeEmbeddings ? 'hybrid' : 'fulltext'}`
+function getCachedSearchEngine(
+  profile: SearchIndexProfile, locale?: string, includeEmbeddings = true,
+): Promise<SearchEngine> {
+  const key = `${profile}:${locale ?? ''}:${includeEmbeddings ? 'hybrid' : 'fulltext'}`
   const cached = enginePromises.get(key)
   if (cached) return cached
-  const pending = buildEngine(locale, includeEmbeddings)
+  const pending = buildEngine(profile, locale, includeEmbeddings)
   enginePromises.set(key, pending)
   // Share in-flight work, but allow the next request to retry a rejected
   // build. An older rejection cannot evict a newer cache generation.
@@ -157,6 +174,11 @@ export function getSearchEngine(locale?: string, includeEmbeddings = true): Prom
     if (enginePromises.get(key) === pending) enginePromises.delete(key)
   })
   return pending
+}
+
+/** Return a raw engine whose metadata indexes and sorting remain available. */
+export function getSearchEngine(locale?: string, includeEmbeddings = true): Promise<SearchEngine> {
+  return getCachedSearchEngine('raw', locale, includeEmbeddings)
 }
 
 export function resetSearchEngine() {
@@ -250,7 +272,9 @@ export async function searchDocs(
 
   const limit = options.limit ?? 8
   const mode = options.mode ?? 'hybrid'
-  const engine = await getSearchEngine(options.locale, mode === 'hybrid')
+  const engine = mode === 'hybrid'
+    ? await getSearchEngine(options.locale, true)
+    : await getCachedSearchEngine('query-fulltext', options.locale, false)
 
   const searchParams: Record<string, unknown> = {
     term: fullTextQuery(trimmed),

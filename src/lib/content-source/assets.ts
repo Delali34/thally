@@ -27,6 +27,11 @@ import {
   decodePreparedSearchShard, isPreparedSearchDescriptor, isRawSha256,
   MAX_SEARCH_SHARD_BYTES, type PreparedSearchDescriptor, type PreparedSearchShard,
 } from '@/lib/search/prepared-content-contract'
+import { bulkSourceRevision } from '@/lib/agent-export/source-revision'
+import {
+  isPreparedBulkDescriptor, MAX_BULK_DESCRIPTOR_BYTES, PREPARED_BULK_DESCRIPTOR_PATH,
+  type PreparedBulkDescriptor,
+} from '@/lib/agent-export/prepared-contract'
 
 /** Reserved asset prefix for published content. Shared with the publish pipeline. */
 export const CONTENT_ASSET_PREFIX = '/_thally/content/'
@@ -90,6 +95,7 @@ export function createAssetsContentSource(
   // Release identity makes reuse correct; budgets keep a long-lived isolate
   // from retaining every page that a crawler or reader has ever requested.
   let manifestPromise: Promise<ContentManifest | null> | null = null
+  let bulkPromise: Promise<PreparedBulkDescriptor | null> | null = null
   const files = createBoundedPromiseCache<ContentSourceFile | null>({
     maxEntries: 128, maxBytes: 4 * 1024 * 1024,
     sizeOf: (file) => file ? file.content.length * 2 + 128 : 0,
@@ -295,6 +301,35 @@ export function createAssetsContentSource(
 
   return {
     kind: 'assets',
+
+    async bulkExport(): Promise<PreparedBulkDescriptor | null> {
+      const fetchAsset = resolveFetcher()
+      if (!fetchAsset) return null
+      if (!bulkPromise) {
+        const owner = resolveReadContext()
+        const pending = (async () => {
+          const manifest = await loadManifest()
+          if (!manifest) return null
+          const response = await readResponse(fetchAsset, PREPARED_BULK_DESCRIPTOR_PATH, MAX_BULK_DESCRIPTOR_BYTES, undefined, owner)
+          if (!response.body) return null
+          let descriptor: unknown
+          try { descriptor = JSON.parse(response.body) } catch { return null }
+          if (!isPreparedBulkDescriptor(descriptor) || descriptor.sourceRevision !== bulkSourceRevision(manifest.files)) return null
+          for (const [physicalPath, record] of Object.entries(descriptor.records)) {
+            if (!Object.hasOwn(manifest.files, physicalPath) || manifest.files[physicalPath]?.sha256 !== record.sha256) return null
+          }
+          for (const physicalPath of Object.keys(manifest.files)) {
+            if (physicalPath.startsWith('src/content/') && physicalPath.endsWith('.mdx') && !Object.hasOwn(descriptor.records, physicalPath)) return null
+          }
+          return descriptor
+        })()
+        bulkPromise = pending
+        // Retry transport failures in the next request. A cancelled owner may
+        // not permanently pin a release to its first pending attempt.
+        void pending.catch(() => { if (bulkPromise === pending) bulkPromise = null })
+      }
+      return bulkPromise
+    },
 
     async searchContent(projectPath) {
       if (!isSafeProjectPath(projectPath)) return undefined

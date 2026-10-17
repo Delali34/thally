@@ -25,6 +25,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 import { parseOpenApiFrontmatter } from '../../src/lib/openapi/page-frontmatter'
 import { UNPUBLISHED_PAGES_FILE, pageReferenceState, type RoutedSpec } from '../../src/lib/openapi/publication'
 import { sanitizeSpecForPublication } from '../../src/lib/openapi/sanitize'
+import { bulkPhysicalOrder, createPreparedBulkWriter } from './prepared-bulk-assets'
 import type { ApiSpecConfig, OpenAPIDocument, OperationOverride } from '../../src/lib/openapi/types'
 
 export interface RuntimeSourceEntry {
@@ -399,10 +400,23 @@ function rawSha256(value: string): string {
 async function writePreparedSearchAssets(outputRoot: string, sources: Readonly<RuntimeSourceMap>, manifest: ContentAssetManifest): Promise<void> {
   // Ordinary monorepo postinstall generates embedded sources before workspace
   // dist exists. Only a managed build needs the published canonical parser.
-  const [{ parseMdxContent }, { projectSearchContent }] = await Promise.all([
-    import('@thallylabs/core/markdown'), import('@thallylabs/core/search'),
+  const [{ parseMdxContent }, { projectSearchContent }, { projectNavigationContract }] = await Promise.all([
+    import('@thallylabs/core/markdown'), import('@thallylabs/core/search'), import('@thallylabs/core/navigation'),
   ])
   const descriptor: PreparedSearchDescriptor = { version: 1, shards: [] }
+  const bulk = createPreparedBulkWriter(outputRoot, manifest.files)
+  const rawConfig = sources['docs.json'] ? JSON.parse(sources['docs.json'].content) : {}
+  const navigationConfig = { ...rawConfig, tabs: rawConfig.tabs ?? [] }
+  const versions = new Set<string>((rawConfig.navigation?.versions ?? []).map((version: { label: string }) => version.label))
+  // Match getSidebarCollections: registered version tabs remain available even
+  // when hidden in the combined navigation. Reader/version filtering later is
+  // a subsequence; docs.json-hidden groups move behind visible sidebar pages.
+  const sidebarConfig = { ...navigationConfig, tabs: navigationConfig.tabs.map((tab: { hidden?: boolean; version?: string }) => tab.hidden && tab.version && versions.has(tab.version) ? { ...tab, hidden: false } : tab) }
+  const pageOrder = [...projectNavigationContract(sidebarConfig).visiblePageIds, ...projectNavigationContract(navigationConfig).authoredPageIds]
+  const orderedPaths = new Set([
+    ...bulkPhysicalOrder(Object.keys(sources), rawConfig, pageOrder),
+    ...Object.keys(manifest.files),
+  ])
   const prefix = `{"version":1,"format":${JSON.stringify(PREPARED_SEARCH_FORMAT)},"records":{`
   const suffix = '}}'
   let pairs: Array<{ path: string; json: string }> = []
@@ -419,23 +433,28 @@ async function writePreparedSearchAssets(outputRoot: string, sources: Readonly<R
     pairs = []
     size = Buffer.byteLength(prefix + suffix)
   }
-  for (const filePath of Object.keys(manifest.files)) {
+  for (const filePath of orderedPaths) {
     if (!filePath.startsWith('src/content/') || !filePath.endsWith('.mdx')) continue
     const { content } = parseFrontmatter(sources[filePath].content)
+    // One canonical parse feeds both derived forms; neither writer invents a
+    // second extractor or freezes access decisions into its payload.
+    const parsed = parseMdxContent(content, 'agents')
+    bulk.add(filePath, parsed.markdown)
     const record: PreparedSearchRecord = {
       sha256: manifest.files[filePath].sha256,
-      content: projectSearchContent(parseMdxContent(content, 'agents')),
+      content: projectSearchContent(parsed),
     }
     const json = `${JSON.stringify(filePath)}:${JSON.stringify(record)}`
     const bytes = Buffer.byteLength(json)
     if (bytes + Buffer.byteLength(prefix + suffix) > MAX_SEARCH_SHARD_BYTES) continue
     if (size + bytes + (pairs.length ? 1 : 0) > MAX_SEARCH_SHARD_BYTES) flush()
-    if (descriptor.shards.length >= MAX_SEARCH_SHARDS) break
+    if (descriptor.shards.length >= MAX_SEARCH_SHARDS) continue
     size += bytes + (pairs.length ? 1 : 0)
     pairs.push({ path: filePath, json })
   }
   flush()
   if (descriptor.shards.length) manifest.search = descriptor
+  bulk.finish()
 }
 
 /** Remove a previous managed tree when switching back to embedded mode. */

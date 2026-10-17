@@ -18,6 +18,7 @@
  */
 
 import type { SearchContentProjection } from '@thallylabs/core/search'
+import type { PreparedBulkDescriptor } from '@/lib/agent-export/prepared-contract'
 
 export type ContentSourceKind = 'filesystem' | 'assets'
 
@@ -42,4 +43,6 @@ export interface ContentSource {
   list(prefix: string): Promise<Array<string>>
   /** Optional verified canonical search text; undefined uses the ordinary document parser. */
   searchContent?(projectPath: string): Promise<SearchContentProjection | undefined>
+  /** Optional source-verified Markdown ranges; callers still authorize every page. */
+  bulkExport?(): Promise<PreparedBulkDescriptor | null>
 }

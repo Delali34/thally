@@ -8,7 +8,7 @@ afterEach(resetSearchEngine)
 const entries = [{ id: 'recovered', title: 'Recovery', description: '', keywords: [], href: '/recovered' }]
 const document = {
   pageId: 'recovered', frontmatter: {}, rawBody: 'recoveryneedle',
-  content: { text: 'recoveryneedle', markdown: '', headings: [], codeBlocks: [], links: [], toc: [] },
+  content: { text: 'recoveryneedle', markdown: '', headings: [], codeBlocks: [], links: [], toc: [], sections: [] },
 }
 
 describe('search build recovery', () => {

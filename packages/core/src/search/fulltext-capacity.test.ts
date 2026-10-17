@@ -11,7 +11,7 @@ function registerPages(count: number) {
   })))
   registerAsyncContentDocumentSource(async (id) => ({
     pageId: id, frontmatter: {}, rawBody: '',
-    content: { text: id === 'capacity-7123' ? 'uniquecapacityneedle' : 'Ordinary page', markdown: '', headings: [], codeBlocks: [], links: [], toc: [] },
+    content: { text: id === 'capacity-7123' ? 'uniquecapacityneedle' : 'Ordinary page', markdown: '', headings: [], codeBlocks: [], links: [], toc: [], sections: [] },
   }))
   resetSearchEngine()
 }

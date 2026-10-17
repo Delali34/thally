@@ -9,6 +9,10 @@
 
 import { spawnSync } from 'node:child_process'
 import { mkdirSync, writeFileSync } from 'node:fs'
+// tsx's extensionless CJS interop matches the other runtime generators.
+// @ts-expect-error -- runtime interop intentionally provides the default object
+import nativeWorkerModule from './lib/native-agent-worker'
+const { writeNativeAgentWorker } = nativeWorkerModule as unknown as typeof import('./lib/native-agent-worker')
 
 const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm'
 const environment = {
@@ -37,5 +41,6 @@ writeFileSync(
   `${JSON.stringify({ version: 1, docsConfigBinding: true, showPoweredByPolicy: true })}\n`,
   'utf8',
 )
+writeNativeAgentWorker(process.cwd())
 runNpmScript('package:cloudflare')
 runNpmScript('check:cloudflare-size')

@@ -229,6 +229,11 @@ each prepared record must match its current source SHA. Changed or legacy pages
 use the ordinary canonical parser until the next full build. Transfers and
 decoded shard caches are bounded; this does not change the Worker's CPU or memory limits.
 
+Managed builds also prepare complete agent Markdown fragments for native
+`llms-full.txt` delivery. Reader, locale and version decisions remain request
+scoped; descriptor-bearing releases require a full build after content or
+configuration changes. See [the prepared bulk export contract](docs/prepared-bulk-export.md).
+
 ## Production
 
 ```bash

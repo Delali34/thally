@@ -21,6 +21,7 @@ describe('localized search', () => {
             codeBlocks: [],
             links: [],
             toc: [],
+            sections: [],
           },
         }
       : null)
@@ -42,7 +43,7 @@ describe('localized search', () => {
           pageId: 'guide',
           frontmatter: { title: body },
           rawBody: body,
-          content: { text: body, headings: [], markdown: body, codeBlocks: [], links: [], toc: [] },
+          content: { text: body, headings: [], markdown: body, codeBlocks: [], links: [], toc: [], sections: [] },
         }
       : null)
     resetSearchEngine()

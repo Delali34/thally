@@ -38,7 +38,7 @@
     "@radix-ui/react-accordion": "^1.2.12",
     "@radix-ui/react-dialog": "^1.1.4",
     "@radix-ui/react-slot": "^1.1.0",
-    "@thallylabs/core": "^0.2.15",
+    "@thallylabs/core": "^0.2.16",
     "clsx": "^2.1.1",
     "cmdk": "^1.0.0",
     "ipaddr.js": "2.5.0",

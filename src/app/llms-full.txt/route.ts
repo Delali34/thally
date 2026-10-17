@@ -10,6 +10,11 @@ import { apiOperationMarkdown, describeApiOperation } from '@/lib/openapi/operat
 import { resolveRequestSiteConfig } from '@/lib/site-config'
 import { getReaderContextFromRequest } from '@/lib/reader-auth/context'
 import { contentCacheControl } from '@/lib/reader-auth/cache'
+import { agentExportHeader, agentExportPagePrefix, AGENT_EXPORT_PAGE_SUFFIX, agentExportApiHeader, orderAgentExport } from '@/lib/agent-export/format'
+
+import { getRequestNativeAgentExportCapability } from '@/lib/agent-export/request-capability'
+import { createPreparedAgentExportPlan, isPreparedAgentExportUnavailable } from '@/lib/agent-export/prepared-plan'
+import { NATIVE_AGENT_EXPORT_HANDOFF_HEADER, NATIVE_AGENT_EXPORT_HANDOFF_VALUE } from '@/lib/agent-export/native-protocol'
 
 /**
  * `llms-full.txt` — the whole documentation corpus as one Markdown file.
@@ -37,11 +42,15 @@ import { contentCacheControl } from '@/lib/reader-auth/cache'
  * a whole-body token estimate: computing that header would buffer the corpus
  * or fetch/parse it twice before sending the first byte.
  */
+// An authorized empty handoff is invocation-local and must never be framework cached.
+export const dynamic = 'force-dynamic'
+
 export async function GET(request: NextRequest) {
   // Under the assets ContentSource this route must render per request — the
   // corpus below reflects published content, not the build. No-op by default.
   const effectiveSite = await resolveRequestSiteConfig()
-  const baseUrl = request.nextUrl.origin
+  const native = getRequestNativeAgentExportCapability(request)
+  const baseUrl = native ? new URL(native.requestUrl).origin : request.nextUrl.origin
 
   const i18n = await getEffectiveI18nConfig()
   const requestedLocale = request.nextUrl.searchParams.get('locale')
@@ -69,74 +78,52 @@ export async function GET(request: NextRequest) {
       : loadVisibleApiOperationNodes(reader).catch(() => [] as Array<ApiOperationNode>),
   ])
 
-  // Sidebar items carry default-locale hrefs; map them back to page ids, then
-  // keep only pages the search listing includes for this locale.
-  const idByHref = new Map(entries.map((entry) => [entry.href, entry.id]))
-  const listableById = new Map(listable.map((entry) => [entry.id, entry]))
-  const apiNodeByHref = new Map(apiNodes.map((node) => [node.href, node]))
+  const { pageIds, operations } = orderAgentExport(entries, listable, collections, apiNodes)
+  const listedById = new Map(listable.map((entry) => [entry.id, entry]))
 
-  const pageOrder: Array<string> = []
-  const operationOrder: Array<ApiOperationNode> = []
-  const seenPages = new Set<string>()
-  const seenOperations = new Set<ApiOperationNode>()
-  for (const collection of collections) {
-    const hrefs = [
-      ...(collection.sections.length === 0 && collection.href ? [collection.href] : []),
-      ...collection.sections.flatMap((section) => section.items.map((item) => item.href)),
-    ]
-    for (const href of hrefs) {
-      const node = apiNodeByHref.get(href)
-      if (node && !seenOperations.has(node)) {
-        seenOperations.add(node)
-        operationOrder.push(node)
-        continue
-      }
-      const id = idByHref.get(href)
-      if (id && listableById.has(id) && !seenPages.has(id)) {
-        seenPages.add(id)
-        pageOrder.push(id)
-      }
+  const responseHeaders = {
+    'Content-Type': 'text/plain; charset=utf-8',
+    'Content-Language': locale,
+    'Cache-Control': contentCacheControl('public, max-age=3600, s-maxage=3600'),
+  }
+  if (native) {
+    // This branch runs AFTER the same ordinary reader/listable/version/locale
+    // projection as the legacy response. Prepared bytes never list pages.
+    function* operationMarkdown(): Generator<string> {
+      for (const node of operations) yield apiOperationMarkdown(describeApiOperation(node, baseUrl))
+    }
+    let plan
+    try { plan = await createPreparedAgentExportPlan({
+      origin: baseUrl, locale, engineLocale,
+      siteName: effectiveSite.name, siteDescription: effectiveSite.description,
+      pages: pageIds.flatMap((id) => { const entry = listedById.get(id); return entry ? [entry] : [] }),
+      apiMarkdown: operationMarkdown(),
+    }) } catch (error) {
+      if (!isPreparedAgentExportUnavailable(error)) throw error
+      return problemResponse({ status: 503, code: 'prepared_export_unavailable', title: 'Prepared export unavailable', detail: error.message,
+        resolution: 'Run a full build with the current docs.json. Individual documents remain available through llms.txt.', instance: request.nextUrl.pathname })
+    }
+    if (plan && native.accept(plan)) {
+      // A request-owned in-process plan plus this marker are BOTH required.
+      // The native wrapper drains this empty response before reading ASSETS.
+      return new Response(null, { headers: { ...responseHeaders, [NATIVE_AGENT_EXPORT_HANDOFF_HEADER]: NATIVE_AGENT_EXPORT_HANDOFF_VALUE } })
     }
   }
-  for (const entry of listable) if (!seenPages.has(entry.id)) pageOrder.push(entry.id)
-  for (const node of apiNodes) if (!seenOperations.has(node)) operationOrder.push(node)
 
-  const lines: Array<string> = []
-  lines.push(`# ${effectiveSite.name} — Complete Documentation`)
-  lines.push('')
-  lines.push(`> ${effectiveSite.description}`)
-  lines.push('')
-  lines.push(`Source: ${baseUrl}`)
-  lines.push(`Language: ${locale}`)
-  lines.push('')
-  lines.push('## Instructions for agents')
-  lines.push('')
-  lines.push(`- Use ${baseUrl}/llms.txt to inspect the page index before scanning this full corpus.`)
-  lines.push(`- Use ${baseUrl}/skill.md for retrieval rules and ${baseUrl}/AGENTS.md before editing.`)
-  lines.push(`- Use ${baseUrl}/api/mcp for read-only search, section retrieval, page, API and changelog tools.`)
-  lines.push('- Cite canonical page URLs, distinguish documented facts from inference, and state when the documentation does not support a claim.')
-  lines.push('')
-  lines.push('---')
-  lines.push('')
-
-  // Join the same line sequence as the original buffered response, including
-  // its final newline. Only metadata/order remain corpus-wide; each canonical
-  // document graph and encoded chunk can be released before the next page.
+  // This framing is shared with native managed delivery. Both paths retain
+  // current reader/locale metadata and consume the same document projection.
   async function* chunks(): AsyncGenerator<string> {
-    yield lines.join('\n')
-    for (const id of pageOrder) {
-      const entry = listableById.get(id)
+    yield agentExportHeader(effectiveSite, baseUrl, locale)
+    for (const id of pageIds) {
+      const entry = listedById.get(id)
       if (!entry) continue
       const document = await loadContentDocument(id, engineLocale)
       if (!document) continue
-      const page = [`# ${entry.title}`, '']
-      if (entry.description) page.push(`> ${entry.description}`, '')
-      page.push(`URL: ${baseUrl}${entry.href}`, '', document.content.markdown, '', '---', '')
-      yield `\n${page.join('\n')}`
+      yield agentExportPagePrefix(entry, baseUrl) + document.content.markdown + AGENT_EXPORT_PAGE_SUFFIX
     }
-    if (operationOrder.length) {
-      yield `\n${['# API reference', '', `Full schemas: MCP \`get_api_operation\` at ${baseUrl}/api/mcp, or the human reference pages below.`, ''].join('\n')}`
-      for (const node of operationOrder) yield `\n${apiOperationMarkdown(describeApiOperation(node, baseUrl))}\n`
+    if (operations.length) {
+      yield agentExportApiHeader(baseUrl)
+      for (const node of operations) yield `\n${apiOperationMarkdown(describeApiOperation(node, baseUrl))}\n`
     }
   }
 
@@ -174,11 +161,5 @@ export async function GET(request: NextRequest) {
     cancel: stop,
   }, { highWaterMark: 0 })
 
-  return new Response(body, {
-    headers: {
-      'Content-Type': 'text/plain; charset=utf-8',
-      'Content-Language': locale,
-      'Cache-Control': contentCacheControl('public, max-age=3600, s-maxage=3600'),
-    },
-  })
+  return new Response(body, { headers: responseHeaders })
 }
