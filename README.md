@@ -195,7 +195,7 @@ cp .env.example .env.local
 | `THALLY_CLOUD_SITE_TOKEN` | Optional server-only credential from Thally Cloud. The deployed site exchanges it automatically on its next visit; never prefix it with `NEXT_PUBLIC_` |
 | `THALLY_CLOUD_URL` | Optional Thally Cloud base URL. Defaults to `https://app.thally.io` |
 | `THALLY_CLOUD_SITE_CONFIG` | Managed-hosting release snapshot injected by Thally Cloud. Self-hosted sites should leave this unset and use `THALLY_CLOUD_SITE_TOKEN` |
-| `THALLY_CONTENT_SOURCE` | Optional — where doc content is read from: `filesystem` (default; build-embedded, SSG) or `assets` (managed hosting; content served from the deployment's static assets and rendered per request). Self-hosted sites should leave this unset |
+| `THALLY_CONTENT_SOURCE` | Optional — where doc content is read from: `filesystem` (default; build-embedded, SSG) or `assets` (managed hosting; content served from static assets and rendered per request). Asset-backed sites answer hybrid search requests with full-text results and `mode_degraded_reason: "runtime_capacity"` to avoid unbounded vector allocation. Self-hosted sites should leave this unset |
 | `THALLY_DOCS_CONFIG` | Optional managed-hosting snapshot of `docs.json`, used to publish presentation and navigation settings without recompiling the Worker. Self-hosted sites should leave this unset and edit `docs.json` |
 | `THALLY_ADMIN_PASSWORD` / `THALLY_ADMIN_SECRET` | Optional break-glass admin password plus its required high-entropy production session-signing secret |
 | `THALLY_ACCESS_PASSWORD` / `THALLY_ACCESS_SECRET` | Optional docs-access password plus its required high-entropy production session-signing secret; the access secret may fall back to `THALLY_ADMIN_SECRET` |

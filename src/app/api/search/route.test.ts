@@ -1,6 +1,6 @@
 /** Machine-actionable validation coverage for public documentation search. */
 
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { NextRequest } from 'next/server'
 
 const mocks = vi.hoisted(() => ({
@@ -8,11 +8,12 @@ const mocks = vi.hoisted(() => ({
   providerId: 'local-hash-v3',
   counters: new Map<string, number>(),
   failStorage: false,
+  providerReads: 0,
 }))
 
 vi.mock('@/lib/search/engine', () => ({ searchDocs: mocks.searchDocs }))
 vi.mock('@thallylabs/core/embeddings', () => ({
-  getEmbeddingProvider: () => ({ id: mocks.providerId }),
+  getEmbeddingProvider: () => { mocks.providerReads += 1; return { id: mocks.providerId } },
   localHashProvider: { id: 'local-hash-v3' },
 }))
 vi.mock('@/lib/storage', () => ({
@@ -36,6 +37,15 @@ vi.mock('@/lib/i18n/request', () => ({
 }))
 
 import { GET } from './route'
+
+beforeEach(() => {
+  vi.stubEnv('THALLY_CONTENT_SOURCE', 'filesystem')
+  mocks.providerReads = 0
+})
+afterEach(() => {
+  vi.unstubAllEnvs()
+  mocks.providerId = 'local-hash-v3'
+})
 
 describe('GET /api/search', () => {
   it('explains how to repair a missing query', async () => {
@@ -74,6 +84,36 @@ describe('GET /api/search', () => {
     mocks.providerId = 'local-hash-v3'
     expect((await (await GET(new NextRequest('https://docs.example.com/api/search?q=a'))).json()).mode).toBe('fulltext')
     expect((await (await GET(new NextRequest('https://docs.example.com/api/search?q=a&mode=hybrid'))).json()).mode).toBe('hybrid')
+  })
+
+  it.each(['local-hash-v3', 'openai:text-embedding-3-small'])('degrades asset-backed hybrid before resolving %s or allocating vectors', async (providerId) => {
+    vi.stubEnv('THALLY_CONTENT_SOURCE', 'assets')
+    mocks.providerId = providerId
+    mocks.counters.clear()
+    mocks.searchDocs.mockResolvedValue([{
+      type: 'page', pageId: 'version-2/guide', title: 'Guide', description: '',
+      href: '/version-2/guide', score: 1, snippet: 'Exact unique result',
+    }])
+    const response = await GET(new NextRequest('https://docs.example.com/api/search?q=unique&mode=hybrid'))
+    expect(response.status).toBe(200)
+    expect(response.headers.get('cache-control')).toBe('no-store')
+    expect(await response.json()).toMatchObject({
+      mode: 'fulltext', mode_requested: 'hybrid', mode_degraded_reason: 'runtime_capacity',
+      total: 1, results: [{ page_id: 'version-2/guide', url: 'https://docs.example.com/version-2/guide' }],
+    })
+    expect(mocks.searchDocs).toHaveBeenLastCalledWith('unique', { limit: 8, mode: 'fulltext', locale: undefined })
+    expect(mocks.providerReads).toBe(0)
+    expect(mocks.counters.size).toBe(0)
+  })
+
+  it('does not label an ordinary asset-backed fulltext request as degraded', async () => {
+    vi.stubEnv('THALLY_CONTENT_SOURCE', 'assets')
+    mocks.searchDocs.mockResolvedValue([])
+    const body = await (await GET(new NextRequest('https://docs.example.com/api/search?q=unique'))).json()
+    expect(body.mode).toBe('fulltext')
+    expect(body.mode_requested).toBeUndefined()
+    expect(body.mode_degraded_reason).toBeUndefined()
+    expect(mocks.providerReads).toBe(0)
   })
 
   it('meters hosted-embedding hybrid queries per client and degrades to full-text over the limit', async () => {
