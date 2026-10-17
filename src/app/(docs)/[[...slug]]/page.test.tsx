@@ -1,16 +1,17 @@
 /** A page whose `openapi:` frontmatter cannot be resolved keeps its authored body. */
 import { renderToStaticMarkup } from 'react-dom/server'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const fixtures = vi.hoisted(() => ({ lookup: { node: null, reason: 'unresolved' } as unknown }))
+const fixtures = vi.hoisted(() => ({ lookup: { node: null, reason: 'unresolved' } as unknown, missing: false, privateIntro: false, privateDefault: false, root: vi.fn() }))
 
 vi.mock('next/navigation', () => ({
+  redirect: (path: string) => { throw new Error(`NEXT_REDIRECT:${path}`) },
   notFound: () => {
     throw new Error('NEXT_NOT_FOUND')
   },
 }))
 vi.mock('@/data/get-doc', () => ({
-  getDocFromParams: async () => ({
+  getDocFromParams: async () => fixtures.missing ? null : ({
     id: 'api-reference/endpoint/scrape',
     title: 'Scrape',
     description: '',
@@ -19,9 +20,12 @@ vi.mock('@/data/get-doc', () => ({
     lastUpdated: '2026-01-01',
     component: () => <p>Authored scrape body</p>,
     openapi: { specId: 'default', specRef: 'openapi/missing.json', method: 'POST', path: '/scrape' },
-    access: { groupSets: [], isMalformed: false },
+    access: { groupSets: [], isMalformed: false, isPublic: !fixtures.privateIntro },
   }),
 }))
+vi.mock('@/lib/document-root-redirect', () => ({ loadRootDocumentRedirect: (...args: unknown[]) => fixtures.root(...args) }))
+vi.mock('@/lib/reader-auth/context', () => ({ getReaderContext: async () => ({ isAuthenticated: false, groups: [], source: 'anonymous' }) }))
+vi.mock('@/lib/reader-auth/config', () => ({ getReaderAuthConfig: () => ({ isEnabled: fixtures.privateDefault, defaultVisibility: fixtures.privateDefault ? 'private' : 'public' }), isReaderAuthActive: () => fixtures.privateDefault }))
 vi.mock('@/data/api-reference', () => ({ lookupApiOperationForFrontmatter: async () => fixtures.lookup }))
 vi.mock('@/data/docs', () => ({
   ensureDocPublication: async () => undefined,
@@ -42,7 +46,7 @@ vi.mock('@/components/layout/localized-sidebar-hydrator', () => ({ LocalizedSide
 vi.mock('@/components/layout/locale-availability', () => ({ LocaleAvailabilityHydrator: () => null }))
 vi.mock('@/components/docs/locale-fallback-banner', () => ({ LocaleFallbackBanner: () => null }))
 vi.mock('@/components/docs/locale-stale-banner', () => ({ LocaleStaleBanner: () => null }))
-vi.mock('@/lib/i18n/request', () => ({ getEffectiveI18nConfig: async () => ({ defaultLocale: 'en', locales: [{ code: 'en' }] }) }))
+vi.mock('@/lib/i18n/request', () => ({ getEffectiveI18nConfig: async () => ({ defaultLocale: 'en', locales: [{ code: 'en' }, { code: 'fr' }] }) }))
 vi.mock('@/lib/i18n/content', () => ({ getContentI18nConfig: async () => ({ locales: [] }) }))
 vi.mock('@/lib/i18n/navigation', () => ({ localizeDocNavigation: async (nav: unknown) => nav }))
 vi.mock('@/lib/i18n/translation-source', () => ({ hasDocTranslation: async () => false }))
@@ -55,6 +59,8 @@ vi.mock('@/lib/i18n/metadata', () => ({ buildLocaleAlternates: () => ({}) }))
 vi.mock('@/lib/json-ld', () => ({ buildDocPageJsonLd: () => ({}) }))
 
 import DocsPage from './page'
+
+beforeEach(() => { fixtures.missing = false; fixtures.privateIntro = false; fixtures.privateDefault = false; fixtures.lookup = { node: null, reason: 'unresolved' }; fixtures.root.mockReset().mockResolvedValue('/docs') })
 
 const render = async () => renderToStaticMarkup(await DocsPage({ params: Promise.resolve({ slug: ['api-reference', 'endpoint', 'scrape'] }) }))
 
@@ -78,4 +84,34 @@ describe('docs page with an unresolved openapi spec', () => {
     fixtures.lookup = { node: null, reason: 'withheld' }
     await expect(render()).rejects.toThrow('NEXT_NOT_FOUND')
   })
+})
+
+
+for (const slug of [undefined, [], ['fr']]) {
+  it(`redirects a missing ${JSON.stringify(slug)} root through the reader-scoped fallback`, async () => {
+    fixtures.missing = true
+    await expect(DocsPage({ params: Promise.resolve({ slug }) })).rejects.toThrow('NEXT_REDIRECT:/docs')
+    expect(fixtures.root).toHaveBeenCalledWith(expect.objectContaining({ locale: slug?.[0] === 'fr' ? 'fr' : undefined, reader: expect.objectContaining({ isAuthenticated: false }) }))
+  })
+}
+
+it('keeps a present introduction and ordinary missing routes on their existing paths', async () => {
+  await DocsPage({ params: Promise.resolve({ slug: [] }) })
+  expect(fixtures.root).not.toHaveBeenCalled()
+  fixtures.missing = true
+  await expect(DocsPage({ params: Promise.resolve({ slug: ['missing'] }) })).rejects.toThrow('NEXT_NOT_FOUND')
+  expect(fixtures.root).not.toHaveBeenCalled()
+})
+
+it('never bypasses a private introduction through another visible navigation page', async () => {
+  fixtures.privateIntro = true
+  await expect(DocsPage({ params: Promise.resolve({ slug: [] }) })).rejects.toThrow('NEXT_NOT_FOUND')
+  expect(fixtures.root).not.toHaveBeenCalled()
+})
+
+it('retains no-visible-document 404 and private-by-default login behavior', async () => {
+  fixtures.missing = true; fixtures.root.mockResolvedValue(null)
+  await expect(DocsPage({ params: Promise.resolve({ slug: [] }) })).rejects.toThrow('NEXT_NOT_FOUND')
+  fixtures.privateDefault = true
+  await expect(DocsPage({ params: Promise.resolve({ slug: [] }) })).rejects.toThrow('NEXT_REDIRECT:/api/reader/login?redirect=%2F')
 })

@@ -5,7 +5,7 @@
  */
 
 import type { Metadata } from 'next'
-import { notFound } from 'next/navigation'
+import { notFound, redirect } from 'next/navigation'
 import { ApiLayout } from '@/components/api/api-layout'
 import { ManualApiEndpoint } from '@/components/api/manual-api-endpoint'
 import { OperationPanel } from '@/components/api/operation-panel'
@@ -21,6 +21,7 @@ import { JsonLdScript } from '@/components/seo/json-ld-script'
 import { lookupApiOperationForFrontmatter } from '@/data/api-reference'
 import { ensureDocPublication, getApiPlaygroundDisplay, getDocEntries, getSeoConfig, isDocPublished, loadNavContext } from '@/data/docs'
 import { getDocFromParams } from '@/data/get-doc'
+import { loadRootDocumentRedirect } from '@/lib/document-root-redirect'
 import { hasDocTranslation } from '@/lib/i18n/translation-source'
 import { buildAgentAlternateLinks } from '@/lib/agent-discovery'
 import { isRemoteContentSource } from '@/lib/content-source'
@@ -165,7 +166,16 @@ export default async function DocsPage({ params }: PageProps) {
     route.docSlug,
     route.isLocaleRoute ? route.locale : undefined,
   )
-  if (!doc) denyDocumentAccess(reader, requestedPath)
+  if (!doc) {
+    // Imported sites may intentionally have no introduction.mdx. Only the
+    // missing root gets a navigation fallback; private introductions and all
+    // ordinary missing paths retain their existing access/404 behavior.
+    if (!route.docSlug?.length) {
+      const target = await loadRootDocumentRedirect({ i18n, reader, locale: route.isLocaleRoute ? route.locale : undefined })
+      if (target) redirect(target)
+    }
+    denyDocumentAccess(reader, requestedPath)
+  }
   if (!(await canReaderViewResolvedDoc(doc, reader, route.isLocaleRoute ? route.locale : undefined))) {
     denyDocumentAccess(reader, requestedPath)
   }

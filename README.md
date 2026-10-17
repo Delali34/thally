@@ -139,6 +139,8 @@ sidebars remain inline. Earlier/later controls replace windows of 100 visible
 entries across the collection, retaining authored groups and active-page context.
 Loading failures leave the article available and offer a navigation retry.
 Reader-restricted navigation remains private and is never publicly cached.
+If no introduction page exists, the homepage redirects to the first available
+internal document in navigation order, respecting the reader and current locale.
 
 ### Markdown page URLs
 
