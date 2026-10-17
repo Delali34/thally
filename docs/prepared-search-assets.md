@@ -80,7 +80,10 @@ of cold-search capacity; a full build prepares the new corpus.
 
 Transient transfer failures reject the corpus build and clear failed attempts;
 they must not silently omit pages or pin a partial index. Prepared reads share
-the ordinary four transfer slots through body consumption and hash verification.
+the ordinary four transfer slots per Cloudflare invocation through body consumption
+and hash verification. Non-Cloudflare hosts retain one shared four-slot queue.
+Queues never transfer a promise resolver between Worker invocations; immutable
+settled cache values remain release-scoped.
 Bodies are bounded before JSON parsing. Pending work coalesces per immutable
 release; settled decoded shards use a 128-entry, approximately 16 MiB retained
 payload cache. Those are cache ownership limits, not guarantees about total

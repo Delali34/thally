@@ -30,6 +30,7 @@ let injectedFetcher: ContentAssetFetcher | null = null
 
 interface CloudflareContextShape {
   env?: Record<string, unknown>
+  ctx?: object
 }
 
 interface AssetsBindingShape {
@@ -43,6 +44,19 @@ interface AssetsBindingShape {
  */
 export function setContentAssetFetcher(fetcher: ContentAssetFetcher | null): void {
   injectedFetcher = fetcher
+}
+
+/**
+ * Identity for pending work owned by one adapter invocation, never its shared
+ * environment/binding. OpenNext's symbol is an AsyncLocalStorage getter and
+ * each request receives its own context and ExecutionContext. A host exposing
+ * only the wrapper still gets independent ownership instead of a global queue.
+ */
+export function getContentAssetRequestContext(): object | null {
+  const context = (globalThis as Record<symbol, unknown>)[CLOUDFLARE_CONTEXT_SYMBOL]
+  if (!context || typeof context !== 'object') return null
+  const ctx = (context as CloudflareContextShape).ctx
+  return ctx && typeof ctx === 'object' ? ctx : context
 }
 
 /**

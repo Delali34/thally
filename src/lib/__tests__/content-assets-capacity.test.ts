@@ -1,5 +1,6 @@
 /** Asset-service backpressure covers response bodies, retries and recovery. */
 import { describe, expect, it, vi } from 'vitest'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { CONTENT_MANIFEST_PATH, createAssetsContentSource, type ContentSource } from '@/lib/content-source'
 
 const fallback: ContentSource = {
@@ -10,7 +11,7 @@ const paths = (count: number) => Array.from({ length: count }, (_, index) => `sr
 const manifest = (files: Array<string>) => Response.json({ version: 1, files: Object.fromEntries(files.map((path) => [path, {}])) })
 
 describe('bounded asset reads', () => {
-  it('reads all 10,000 requested bodies with at most four active transfers', async () => {
+  it('reads all 10,000 requested bodies with at most four transfers in one owner', async () => {
     const files = paths(10_000)
     let active = 0
     let peak = 0
@@ -39,6 +40,36 @@ describe('bounded asset reads', () => {
     expect(active).toBe(0)
     expect(completed).toBe(10_000)
     expect(result.every((file, index) => file?.content === `Exact /_thally/content/${files[index]}`)).toBe(true)
+  })
+
+  it('keeps four transfer slots per request with one shared binding, without cross-request wakeups', async () => {
+    const contexts = new AsyncLocalStorage<object>()
+    const files = paths(10)
+    const releases = new Map<string, () => void>()
+    const started: Array<string> = []
+    const sharedFetcher = async (path: string) => {
+      if (path === CONTENT_MANIFEST_PATH) return manifest(files)
+      started.push(path)
+      return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+        releases.set(path, () => { controller.enqueue(new TextEncoder().encode(path)); controller.close() })
+      } }))
+    }
+    const source = createAssetsContentSource(fallback, () => sharedFetcher, () => contexts.getStore() ?? null)
+    await source.exists(files[0])
+    const first = contexts.run({}, () => Promise.all(files.slice(0, 5).map((path) => source.read(path))))
+    await vi.waitFor(() => expect(started).toHaveLength(4))
+    const second = contexts.run({}, () => Promise.all(files.slice(5).map((path) => source.read(path))))
+    await vi.waitFor(() => expect(started).toHaveLength(8))
+    // Releasing one first-request slot may start only its own fifth read.
+    releases.get(`/_thally/content/${files[0]}`)!()
+    releases.delete(`/_thally/content/${files[0]}`)
+    await vi.waitFor(() => expect(started).toContain(`/_thally/content/${files[4]}`))
+    expect(started).not.toContain(`/_thally/content/${files[9]}`)
+    releases.get(`/_thally/content/${files[5]}`)!()
+    releases.delete(`/_thally/content/${files[5]}`)
+    await vi.waitFor(() => expect(started).toHaveLength(10))
+    for (const release of releases.values()) release()
+    expect((await first).length + (await second).length).toBe(10)
   })
 
   it('does not release slots while headers are available but bodies are pending', async () => {

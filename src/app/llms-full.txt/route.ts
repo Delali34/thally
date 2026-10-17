@@ -1,4 +1,5 @@
 import { type NextRequest } from 'next/server'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { type ApiOperationNode } from '@/data/api-reference'
 import { loadDocEntries, loadSidebarCollections } from '@/data/docs'
 import { loadContentDocument } from '@/lib/content'
@@ -143,21 +144,23 @@ export async function GET(request: NextRequest) {
   const iterator = chunks()
   let isStopped = false
   let onAbort: (() => void) | undefined
-  const stop = () => {
+  const stop = AsyncLocalStorage.bind(() => {
     if (isStopped) return
     isStopped = true
     if (onAbort) request.signal.removeEventListener('abort', onAbort)
     // Cancellation must return immediately even if an authoritative read is
     // already in flight. It may finish, but it cannot enqueue or start another.
     void iterator.return(undefined).catch(() => undefined)
-  }
+  })
   const body = new ReadableStream<Uint8Array>({
     start(controller) {
-      onAbort = () => { stop(); controller.close() }
+      onAbort = AsyncLocalStorage.bind(() => { stop(); controller.close() })
       if (request.signal.aborted) onAbort()
       else request.signal.addEventListener('abort', onAbort, { once: true })
     },
-    async pull(controller) {
+    // The adapter's binding/reader context must outlive GET's stack, while
+    // every lazy page read still belongs to this response's own invocation.
+    pull: AsyncLocalStorage.bind(async (controller: ReadableStreamDefaultController<Uint8Array>) => {
       if (isStopped) return
       try {
         const chunk = await iterator.next()
@@ -167,7 +170,7 @@ export async function GET(request: NextRequest) {
       } catch (error) {
         if (!isStopped) { stop(); controller.error(error) }
       }
-    },
+    }),
     cancel: stop,
   }, { highWaterMark: 0 })
 
