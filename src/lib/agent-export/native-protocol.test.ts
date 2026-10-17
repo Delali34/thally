@@ -1,6 +1,7 @@
 /** The in-process capability cannot be forged by HTTP or reused across fetches. */
 import { describe, expect, it } from 'vitest'
-import { createNativeAgentExportCapability, isNativeAgentExportPlan, nativeAgentExportCapability, NATIVE_AGENT_EXPORT_SYMBOL, type NativeAgentExportPlan } from './native-protocol'
+import { Buffer } from 'node:buffer'
+import { createNativeAgentExportCapability, isNativeAgentExportPlan, nativeAgentExportCapability, nativeAgentExportStringBytes, MAX_NATIVE_PLAN_PAYLOAD_BYTES, NATIVE_AGENT_EXPORT_SYMBOL, type NativeAgentExportPlan } from './native-protocol'
 
 function plan(origin = 'https://public.example'): NativeAgentExportPlan {
   return { version: 1, origin, locale: 'en', siteName: 'Docs', siteDescription: 'Description', shards: [], pages: [], apiMarkdown: [] }
@@ -49,8 +50,29 @@ describe('native export capability', () => {
   it('rejects functions, framework objects, extra data and oversized metadata', () => {
     expect(isNativeAgentExportPlan({ ...plan(), apiMarkdown: [() => 'secret'] })).toBe(false)
     expect(isNativeAgentExportPlan({ ...plan(), headers: new Headers() })).toBe(false)
-    expect(isNativeAgentExportPlan({ ...plan(), siteDescription: 'x'.repeat(3 * 1024 * 1024) })).toBe(false)
+    expect(isNativeAgentExportPlan({ ...plan(), siteDescription: 'x'.repeat(MAX_NATIVE_PLAN_PAYLOAD_BYTES + 1) })).toBe(false)
     expect(isNativeAgentExportPlan(Object.assign(new Date(), plan()))).toBe(false)
+  })
+
+  it('counts every UTF-16 unit and surrogate boundary exactly like native UTF-8 encoders', () => {
+    const allUnits = Array.from({ length: 65536 }, (_, unit) => String.fromCharCode(unit)).join('')
+    const samples = ['', 'ASCII\0\n"\\', '\u007f\u0080\u07ff\u0800\uffff', 'Français 中文 العربية', '😀𐀀', '\ud800', '\udfff', '\ud800x\udc00', '\ud800\ud800\udc00\udc00', allUnits]
+    for (const sample of samples) {
+      expect(nativeAgentExportStringBytes(sample)).toBe(Buffer.byteLength(sample, 'utf8'))
+      expect(nativeAgentExportStringBytes(sample)).toBe(new TextEncoder().encode(sample).byteLength)
+    }
+  })
+
+  it('retains the exact 8 MiB payload cap without rejecting 3 MiB of ASCII', () => {
+    expect(isNativeAgentExportPlan({ ...plan(), siteDescription: 'x'.repeat(3 * 1024 * 1024) })).toBe(true)
+    const candidate = { ...plan(), siteDescription: '' }
+    const fixedBytes = [candidate.origin, candidate.locale, candidate.siteName].reduce((bytes, value) => bytes + Buffer.byteLength(value), 128)
+    candidate.siteDescription = 'x'.repeat(MAX_NATIVE_PLAN_PAYLOAD_BYTES - fixedBytes)
+    expect(isNativeAgentExportPlan(candidate)).toBe(true)
+    candidate.siteDescription += 'x'
+    expect(isNativeAgentExportPlan(candidate)).toBe(false)
+    expect(isNativeAgentExportPlan({ ...plan(), apiMarkdown: ['漢'.repeat(Math.floor(MAX_NATIVE_PLAN_PAYLOAD_BYTES / 3) + 1)] })).toBe(false)
+    expect(isNativeAgentExportPlan({ ...plan(), apiMarkdown: ['\ud800'.repeat(Math.floor(MAX_NATIVE_PLAN_PAYLOAD_BYTES / 3) + 1)] })).toBe(false)
   })
 
   it('rejects backward, overlapping and out-of-bounds physical ranges', () => {

@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ContentSource } from '@/lib/content-source/types'
 import { createPreparedAgentExportPlan } from './prepared-plan'
 import { PREPARED_BULK_FORMAT, type PreparedBulkDescriptor } from './prepared-contract'
+import { isNativeAgentExportPlan, MAX_NATIVE_PLAN_PAYLOAD_BYTES } from './native-protocol'
 
 const state = vi.hoisted(() => ({ source: null as ContentSource | null }))
 vi.mock('@/lib/content-source', () => ({ getContentSource: () => state.source }))
@@ -56,5 +57,26 @@ describe('authorized prepared range plan', () => {
     expect(await createPreparedAgentExportPlan(input)).toBeNull()
     state.source = { ...state.source!, bulkExport: async () => null }
     expect(await createPreparedAgentExportPlan(input)).toBeNull()
+  })
+
+  it('keeps all descriptions in a 10,000-page ASCII handoff under the unchanged payload budget', async () => {
+    const pages = Array.from({ length: 10000 }, (_, index) => ({ id: `page-${index}`, title: `Documentation page ${index}`, description: 'd'.repeat(240), href: `/page-${index}` }))
+    state.source = {
+      ...state.source!,
+      bulkExport: async () => ({
+        ...descriptor,
+        shards: [{ path: 'bulk/0000.txt', bytes: pages.length, sha256: sha }],
+        records: Object.fromEntries(pages.map((page, index) => [`src/content/${page.id}.mdx`, { sha256: sha, ranges: [{ shard: 0, start: index, end: index + 1 }] }])),
+      }),
+    }
+    const plan = await createPreparedAgentExportPlan({ ...input, pages, apiMarkdown: [] })
+    expect(plan?.pages).toHaveLength(10000)
+    expect(plan?.pages.map(({ title, description, href }) => ({ title, description, href }))).toEqual(pages.map(({ title, description, href }) => ({ title, description, href })))
+    expect(isNativeAgentExportPlan(plan)).toBe(true)
+  })
+
+  it('rejects actual over-budget UTF-8 metadata before accepting a native plan', async () => {
+    await expect(createPreparedAgentExportPlan({ ...input, apiMarkdown: ['漢'.repeat(Math.floor(MAX_NATIVE_PLAN_PAYLOAD_BYTES / 3) + 1)] })).rejects.toThrow(/handoff budget/)
+    await expect(createPreparedAgentExportPlan({ ...input, pages: [{ ...input.pages[0], description: '\ud800'.repeat(Math.floor(MAX_NATIVE_PLAN_PAYLOAD_BYTES / 3) + 1) }] })).rejects.toThrow(/handoff budget/)
   })
 })

@@ -50,15 +50,33 @@ function keysAre(value: Record<string, unknown>, keys: ReadonlyArray<string>): b
   return Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key))
 }
 
+/**
+ * Count the exact UTF-8 payload without allocating an encoded copy. Paired
+ * surrogates use four bytes; lone surrogates use the encoder's three-byte
+ * replacement character. This bounds payload bytes, not total retained heap.
+ */
+export function nativeAgentExportStringBytes(value: string): number {
+  let bytes = 0
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index)
+    if (unit <= 0x7f) bytes += 1
+    else if (unit <= 0x7ff) bytes += 2
+    else if (unit >= 0xd800 && unit <= 0xdbff && index + 1 < value.length && value.charCodeAt(index + 1) >= 0xdc00 && value.charCodeAt(index + 1) <= 0xdfff) {
+      bytes += 4
+      index += 1
+    } else bytes += 3
+  }
+  return bytes
+}
+
 /** Reject unexpected objects/functions and unbounded data at the native seam. */
 export function isNativeAgentExportPlan(value: unknown): value is NativeAgentExportPlan {
   if (!plain(value) || !keysAre(value, ['version', 'origin', 'locale', 'siteName', 'siteDescription', 'shards', 'pages', 'apiMarkdown']) || value.version !== 1) return false
   let size = 0
   const string = (item: unknown): item is string => {
     if (typeof item !== 'string') return false
-    // Three bytes per UTF-16 unit bounds UTF-8 without allocating encodings.
-    // This is a transfer/retention budget, not a total-heap guarantee.
-    size += item.length * 3 + 32
+    // Preserve the payload cap without tripling ordinary ASCII metadata.
+    size += nativeAgentExportStringBytes(item) + 32
     return size <= MAX_NATIVE_PLAN_PAYLOAD_BYTES
   }
   if (!string(value.origin) || !string(value.locale) || !string(value.siteName) || !string(value.siteDescription)) return false

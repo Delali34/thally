@@ -8,7 +8,7 @@
 import { contentFileCandidates } from '@/lib/content/document'
 import { getContentSource } from '@/lib/content-source'
 import type { AgentExportEntry } from './format'
-import { isNativeAgentExportPlan, MAX_NATIVE_PLAN_PAYLOAD_BYTES, type NativeAgentExportPlan } from './native-protocol'
+import { isNativeAgentExportPlan, nativeAgentExportStringBytes, MAX_NATIVE_PLAN_PAYLOAD_BYTES, type NativeAgentExportPlan } from './native-protocol'
 
 const UNAVAILABLE_CODE = 'prepared_export_unavailable'
 
@@ -45,7 +45,7 @@ export async function createPreparedAgentExportPlan(input: {
     pages: [],
     apiMarkdown: [],
   }
-  let payload = (input.origin.length + input.locale.length + input.siteName.length + input.siteDescription.length) * 3 + descriptor.shards.length * 160 + 128
+  let payload = [input.origin, input.locale, input.siteName, input.siteDescription].reduce((bytes, value) => bytes + nativeAgentExportStringBytes(value), 0) + descriptor.shards.length * 160 + 128
   for (const entry of input.pages) {
     const physicalPath = contentFileCandidates(entry.id, input.engineLocale)
       .find((candidate) => Object.hasOwn(descriptor.records, candidate))
@@ -54,12 +54,12 @@ export async function createPreparedAgentExportPlan(input: {
     // so this cannot substitute index.mdx for a missing prepared primary file.
     if (!physicalPath) continue
     const record = descriptor.records[physicalPath]
-    payload += (entry.title.length + (entry.description?.length ?? 0) + entry.href.length) * 3 + 192 + record.ranges.length * 64
+    payload += nativeAgentExportStringBytes(entry.title) + nativeAgentExportStringBytes(entry.description ?? '') + nativeAgentExportStringBytes(entry.href) + 192 + record.ranges.length * 64
     if (payload > MAX_NATIVE_PLAN_PAYLOAD_BYTES) unavailable('The authorized export metadata exceeds the native handoff budget.')
     plan.pages.push({ title: entry.title, description: entry.description ?? '', href: entry.href, ranges: record.ranges })
   }
   for (const markdown of input.apiMarkdown) {
-    payload += markdown.length * 3 + 32
+    payload += nativeAgentExportStringBytes(markdown) + 32
     if (payload > MAX_NATIVE_PLAN_PAYLOAD_BYTES) unavailable('The authorized export metadata exceeds the native handoff budget.')
     plan.apiMarkdown.push(markdown)
   }
