@@ -9,7 +9,7 @@ import { NavigationSections } from './navigation-tree'
 import { projectNavigationWindow, visibleNavigationRows } from './navigation-window'
 
 vi.mock('./intent-prefetch-link', () => ({ IntentPrefetchLink: (props: AnchorHTMLAttributes<HTMLAnchorElement>) => createElement('a', props) }))
-const page = (index: number): NavigationNode => ({ type: 'page', item: { id: `page-${index}`, title: `Page ${index}`, href: `/v2/fr/page-${index}`, method: 'GET', badge: 'New' } })
+const page = (index: number): NavigationNode => ({ type: 'page', item: { id: `page-${index}`, title: `Page ${index}`, href: `/v2/fr/page-${index}` } })
 const flat = (): Array<NavigationSection> => [{ title: 'Docs', items: [], nodes: Array.from({ length: 10_000 }, (_, index) => page(index)) }]
 const groups = (): Array<NavigationSection> => [{ title: 'Docs', items: [], nodes: Array.from({ length: 100 }, (_, group) => ({ type: 'group', group: { id: `group-${group}`, title: `Group ${group}`, defaultOpen: true, nodes: Array.from({ length: 100 }, (_, index) => page(group * 100 + index)) } })) }]
 const manySections = (): Array<NavigationSection> => Array.from({ length: 1000 }, (_, section) => ({ title: `Section ${section}`, items: [], nodes: Array.from({ length: 10 }, (_, index) => page(section * 10 + index)) }))
@@ -33,17 +33,26 @@ for (const [name, fixture] of [['flat 10k', flat], ['100 default-open groups', g
     const reached = new Set<string>()
     const ordered: Array<string> = []
     await render(sections)
+    // Paging controls are stable across replacement windows; do not repeatedly
+    // traverse every disclosure just to find the same button in this stress test.
+    const later = paging('later')
     for (let step = 0; step < 120; step++) {
       expect(container.querySelectorAll('[data-navigation-row]').length).toBeLessThanOrEqual(165)
-      for (const link of links()) if (!reached.has(link.getAttribute('href')!)) { reached.add(link.getAttribute('href')!); ordered.push(link.getAttribute('href')!) }
-      if (paging('later').disabled) break
-      await act(async () => paging('later').click())
+      for (const link of links()) {
+        const href = link.getAttribute('href')!
+        if (!reached.has(href)) { reached.add(href); ordered.push(href) }
+      }
+      if (later.disabled) break
+      await act(async () => later.click())
     }
     expect(ordered).toEqual(expected)
     expect(reached.size).toBe(10_000)
-    expect(paging('later').disabled).toBe(true)
+    expect(later.disabled).toBe(true)
     expect(container.querySelectorAll('[role="tree"]')).toHaveLength(0)
-  })
+    // This is 100–110 real React commits over 10,000 links, not a microbenchmark.
+    // Shared Linux CI exceeded the default 5s even though every traversal is
+    // finite (<=120 windows). Keep the larger budget local to these three cases.
+  }, 30_000)
 }
 
 it('SSR and route transitions center the exact deep active page, including the final page', async () => {
@@ -78,8 +87,12 @@ it('keeps nested ancestor context and manual disclosure state after paging, reop
 
 it('uses native stable paging controls and transfers keyboard focus; mobile navigation preserves link actions', async () => {
   const sections = flat()
+  const first = sections[0].nodes![0]
+  if (first.type === 'page') { first.item.method = 'GET'; first.item.badge = 'New' }
   const onNavigate = vi.fn()
   await act(async () => root.render(<NavigationSections sections={sections} pathname="/missing" mobile onNavigate={onNavigate} />))
+  expect(links()[0].textContent).toContain('GET')
+  expect(links()[0].textContent).toContain('New')
   const later = paging('later')
   later.focus()
   await act(async () => later.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 0 })))
