@@ -1,3 +1,4 @@
+/** Public search with explicit ranking degradation in constrained runtimes. */
 import { type NextRequest } from 'next/server'
 import { searchDocs, type SearchMode } from '@/lib/search/engine'
 import { recordAnalyticsEvent } from '@/lib/cloud-bridge'
@@ -6,6 +7,7 @@ import { problemResponse } from '@/lib/http/problem'
 import { getEffectiveI18nConfig } from '@/lib/i18n/request'
 import { consumePublicQuota, readRateLimitEnv } from '@/lib/http/public-rate-limit'
 import { getEmbeddingProvider, localHashProvider } from '@thallylabs/core/embeddings'
+import { isRemoteContentSource } from '@/lib/content-source'
 
 export const runtime = 'nodejs'
 
@@ -22,18 +24,22 @@ const HYBRID_RATE_PER_MIN = readRateLimitEnv('SEARCH_HYBRID_RATE_PER_MIN', 20)
  * metered per client (non-spoofable key, see `public-rate-limit`); over the
  * limit — or when the limiter cannot be consulted — the query degrades to
  * full-text instead of failing. The local embedder costs nothing, so it is
- * never metered.
+ * never metered. Asset-backed runtimes serve full-text for every hybrid
+ * request until a separately bounded vector index is qualified: 10,000 local
+ * vectors alone exceed a Worker's memory limit. No page-count estimate can
+ * establish the remaining heap available to the parser and ranking index.
  */
-async function resolveSearchMode(request: NextRequest): Promise<{ mode: SearchMode; isDegraded: boolean }> {
-  if (request.nextUrl.searchParams.get('mode') !== 'hybrid') return { mode: 'fulltext', isDegraded: false }
-  if (getEmbeddingProvider().id === localHashProvider.id) return { mode: 'hybrid', isDegraded: false }
+async function resolveSearchMode(request: NextRequest): Promise<{ mode: SearchMode; degradedReason?: 'rate_limited' | 'runtime_capacity' }> {
+  if (request.nextUrl.searchParams.get('mode') !== 'hybrid') return { mode: 'fulltext' }
+  if (isRemoteContentSource()) return { mode: 'fulltext', degradedReason: 'runtime_capacity' }
+  if (getEmbeddingProvider().id === localHashProvider.id) return { mode: 'hybrid' }
   const { allowed } = await consumePublicQuota({
     bucket: 'search_hybrid_rate',
     headers: request.headers,
     limitPerMinute: HYBRID_RATE_PER_MIN,
     failOpen: false,
   })
-  return allowed ? { mode: 'hybrid', isDegraded: false } : { mode: 'fulltext', isDegraded: true }
+  return allowed ? { mode: 'hybrid' } : { mode: 'fulltext', degradedReason: 'rate_limited' }
 }
 
 export async function GET(request: NextRequest) {
@@ -69,7 +75,7 @@ export async function GET(request: NextRequest) {
     ? requestedLocale
     : undefined
 
-  const { mode, isDegraded } = await resolveSearchMode(request)
+  const { mode, degradedReason } = await resolveSearchMode(request)
   const hits = await searchDocs(query, { limit, mode, locale })
 
   // Record the search (best-effort) — feeds the admin Search analytics.
@@ -93,7 +99,7 @@ export async function GET(request: NextRequest) {
       query,
       locale: requestedLocale ?? i18n.defaultLocale,
       mode,
-      ...(isDegraded ? { mode_requested: 'hybrid', mode_degraded_reason: 'rate_limited' } : {}),
+      ...(degradedReason ? { mode_requested: 'hybrid', mode_degraded_reason: degradedReason } : {}),
       total: hits.length,
       as_of: new Date().toISOString(),
       results: hits.map((hit) => ({
@@ -114,7 +120,7 @@ export async function GET(request: NextRequest) {
     {
       headers: {
         // A degraded answer must not be cached under the hybrid URL.
-        'Cache-Control': isDegraded ? 'no-store' : 'public, s-maxage=300, stale-while-revalidate=3600',
+        'Cache-Control': degradedReason ? 'no-store' : 'public, s-maxage=300, stale-while-revalidate=3600',
         Vary: 'Accept',
       },
     },

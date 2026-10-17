@@ -70,4 +70,13 @@ describe('buildDocumentationApiOpenApi', () => {
       'text/markdown',
     ])
   })
+
+  it('documents requested hybrid ranking and both explicit fulltext degradation reasons', () => {
+    const document = buildDocumentationApiOpenApi('https://docs.example.com')
+    const schemas = (document.components as { schemas: Record<string, { properties: Record<string, unknown> }> }).schemas
+    const paths = document.paths as Record<string, unknown>
+    expect(schemas.SearchResults.properties.mode_requested).toEqual({ type: 'string', enum: ['hybrid'] })
+    expect(schemas.SearchResults.properties.mode_degraded_reason).toEqual({ type: 'string', enum: ['rate_limited', 'runtime_capacity'] })
+    expect(JSON.stringify(paths['/api/search'])).toContain('runtime_capacity')
+  })
 })
