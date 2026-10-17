@@ -147,9 +147,14 @@ describe('prepared search assets', () => {
     const source = createAssetsContentSource(fallback, () => fetcher)
     await Promise.all(Object.keys(sources).flatMap((file) => [source.searchContent!(file), source.searchContent!(file)]))
     expect(fetcher.mock.calls.filter(([url]) => url.includes('/search/'))).toHaveLength(130)
-    // 128 settled entries: the oldest completed shard is no longer retained.
+    // Native digests can settle out of order. Establish known LRU order
+    // before checking the 128-entry bound instead of assuming shard 0 won
+    // the concurrent hash race above.
     await source.searchContent!('src/content/0.mdx')
-    expect(fetcher.mock.calls.filter(([url]) => url.includes('/search/'))).toHaveLength(131)
+    for (const file of Object.keys(sources).slice(1)) await source.searchContent!(file)
+    const beforeRefetch = fetcher.mock.calls.filter(([url]) => url.includes('/search/')).length
+    await source.searchContent!('src/content/0.mdx')
+    expect(fetcher.mock.calls.filter(([url]) => url.includes('/search/'))).toHaveLength(beforeRefetch + 1)
   })
 
   it('builds the exact ordinary 10000-page corpus and keyword results with bounded prepared reads', async () => {
