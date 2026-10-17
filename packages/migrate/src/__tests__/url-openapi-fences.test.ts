@@ -3,7 +3,6 @@
 import { parse as parseYaml } from 'yaml'
 import { describe, expect, it } from 'vitest'
 
-import { findSpecForRef, parseOpenApiFrontmatter } from '../../../../src/lib/openapi/page-frontmatter'
 import { extractEmbeddedOpenApi, mergeEmbeddedOpenApi } from '../url.js'
 
 const schema = `openapi: 3.0.2
@@ -63,15 +62,10 @@ describe('publisher OpenAPI metadata', () => {
     expect(projected.paths['/v1/chains/{chainId}'].get.responses['200'].content['application/json'].schema.$ref).toBe('#/components/schemas/Chain')
   })
 
-  it('treats publisher filenames as inert hints and uses caller-chosen local file bindings', () => {
+  it('treats publisher filenames as inert hints', () => {
     const result = extractEmbeddedOpenApi(publisherFence('../../outside.yaml get /v1/chains/{chainId}'))
     expect(result.fragment?.path).toBe('/v1/chains/{chainId}')
     expect(JSON.stringify(result.fragment)).not.toContain('../../outside.yaml')
-    const source = 'openapi/migration-1234.json'
-    const reference = parseOpenApiFrontmatter(`${source} GET /v1/chains/{chainId}`)!
-    expect(reference).toMatchObject({ specRef: source, method: 'GET', path: '/v1/chains/{chainId}' })
-    expect(findSpecForRef([{ id: 'operation-1234', label: 'API', source: { type: 'file', path: source }, pageOnly: true }], reference.specRef!)?.id).toBe('operation-1234')
-    expect(findSpecForRef([], reference.specRef!)).toBeNull()
   })
 
   it('ignores quoted/nested/example fences and rejects ambiguous declared operations', () => {

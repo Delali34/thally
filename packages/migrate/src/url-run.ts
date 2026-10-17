@@ -219,7 +219,17 @@ function convert(document: MigrationFetchResponse, id: string): MigrationPage | 
         // decoded payload without turning its braces into executable MDX prose.
         const lineStart = page.body.lastIndexOf('\n', start - 1) + 1
         const prefix = page.body.slice(lineStart, start)
-        const indent = /^(?:[ \t]*>[ \t]?)*[ \t]*$/.test(prefix) ? prefix : ''
+        // A prefix contains only indentation and blockquote markers. Scan once:
+        // overlapping whitespace repetitions in a regex can backtrack on a
+        // hostile document containing a long near-match before its code fence.
+        let hasContainerPrefix = true
+        for (const character of prefix) {
+          if (character !== ' ' && character !== '\t' && character !== '>') {
+            hasContainerPrefix = false
+            break
+          }
+        }
+        const indent = hasContainerPrefix ? prefix : ''
         const payload = code.split('\n').map((line) => `${indent}${line}`).join('\n')
         page.body = `${page.body.slice(0, start)}${fence}${info}\n${payload}\n${indent}${fence}${page.body.slice(end)}`
       }

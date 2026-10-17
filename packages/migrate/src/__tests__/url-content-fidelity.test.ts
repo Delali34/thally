@@ -1,6 +1,7 @@
 /** Reduced source fixtures cover content fidelity without trusting remote MDX. */
 
 import { readFileSync } from 'node:fs'
+import { compile } from '@mdx-js/mdx'
 import remarkGfm from 'remark-gfm'
 import remarkMdx from 'remark-mdx'
 import remarkParse from 'remark-parse'
@@ -151,6 +152,43 @@ describe('HTML table inline fidelity', () => {
     expect(page.body).toContain('&lt;script&gt;alert(1)&lt;/script&gt; &#123;globalThis.process.exit()&#125;')
     expect(page.body).not.toMatch(/javascript:|data:image/)
     expect(sanitizeRemoteMarkdown(page.body)).toBe(page.body)
+  })
+
+  it.each([0, 1, 2, 3, 4, 5, 6])('round-trips %i literal backslashes before table pipes in prose, code and links', async (count) => {
+    const value = `before${'\\'.repeat(count)}|after`
+    const body = `<article><h1>Escaped pipes</h1><table><tr><th>Text</th><th>Code</th><th>Link</th></tr><tr><td>${value}</td><td><code>${value}</code></td><td><a href="https://safe.test/search?q=one|two">${value}</a></td></tr></table></article>`
+    const page = htmlPage({ body, finalUrl: new URL('https://docs.test/'), contentType: 'text/html' }, 'pipes', { omitDocumentHeading: true }).page!
+    const tree = parser.parse(page.body)
+    const table = tree.children.find((node) => node.type === 'table')!
+    expect(table.children.map((row) => row.children.length)).toEqual([3, 3])
+    const [textCell, codeCell, linkCell] = table.children[1].children
+    expect(textCell.children).toContainEqual(expect.objectContaining({ type: 'text', value }))
+    if (count % 2 === 0) {
+      expect(codeCell.children).toContainEqual(expect.objectContaining({ type: 'inlineCode', value }))
+    } else {
+      expect(codeCell.children).toContainEqual(expect.objectContaining({ type: 'mdxJsxTextElement', name: 'code', attributes: [], children: [expect.objectContaining({ type: 'text', value })] }))
+    }
+    expect(linkCell.children).toContainEqual(expect.objectContaining({ type: 'link', url: 'https://safe.test/search?q=one|two', children: [expect.objectContaining({ type: 'text', value })] }))
+    expect(sanitizeRemoteMarkdown(page.body)).toBe(page.body)
+    // Package tests prove grammar portability; the public app separately
+    // verifies its own interpreter and Code component against this behavior.
+    await compile(page.body, { remarkPlugins: [remarkGfm] })
+  })
+
+  it('keeps syntax-shaped odd-backslash code literal without admitting executable JSX', async () => {
+    const value = '\\|</code><script>{globalThis.process.exit()}</script> & **literal** `ticks` [link](javascript:alert(1))'
+    const body = `<article><h1>Code</h1><table><tr><th>Code</th></tr><tr><td><code>${value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</code></td></tr></table></article>`
+    const page = htmlPage({ body, finalUrl: new URL('https://docs.test/'), contentType: 'text/html' }, 'literal', { omitDocumentHeading: true }).page!
+    expect(sanitizeRemoteMarkdown(page.body)).toBe(page.body)
+    const tree = parser.parse(page.body)
+    const table = tree.children.find((node) => node.type === 'table')!
+    expect(table.children[1].children[0].children).toEqual([
+      expect.objectContaining({ type: 'mdxJsxTextElement', name: 'code', attributes: [], children: [expect.objectContaining({ type: 'text', value })] }),
+    ])
+    await compile(page.body, { remarkPlugins: [remarkGfm] })
+    for (const unsafe of ['<code title="value">text</code>', '<code onclick="execute()">text</code>', '<code>{globalThis.process.exit()}</code>', '<code><Note>Nested component</Note></code>', '<code dangerouslySetInnerHTML={{"__html":"bad"}} />']) {
+      expect(sanitizeRemoteMarkdown(unsafe)).toBeNull()
+    }
   })
 })
 

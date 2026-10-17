@@ -117,6 +117,15 @@ describe('URL import fidelity regressions', () => {
     expect(result.checkpoint.records[0].evidence?.code).toEqual([code])
   })
 
+  it('preserves nested blockquote code with long source indentation', async () => {
+    const code = `${' '.repeat(16_384)}{ "strategy": "minWaitTime" }\n`
+    const result = await runUrlMigration({ sourceUrl: 'https://docs.test/guide', maxCaptures: 1, captureProvider: { capture: async () => response('/guide', html('Guide', `<blockquote><blockquote><pre><code class="language-json">${code}</code></pre></blockquote></blockquote>`)) } })
+    expect(result.checkpoint.records[0].outcome).toBe('imported')
+    expect(result.validation.issues.filter(issue => issue.code === 'code-mismatch' || issue.code === 'unsafe-content')).toEqual([])
+    expect(result.checkpoint.records[0].evidence?.code).toEqual([code])
+    expect(result.bundle.pages[0].body).toContain('> > ```json')
+  })
+
   it('merges later tab sidebars into exact ordered tabs and retains repeated placements', async () => {
     const result = await runUrlMigration({ sourceUrl: 'https://docs.test/one', captureProvider: { capture: async ({ url }) => {
       if (!['/one', '/two'].includes(url.pathname)) throw new Error('Missing source')

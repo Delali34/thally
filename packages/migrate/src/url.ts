@@ -449,6 +449,49 @@ function escapeMarkdownText(value: string, escapeTableSeparator = false): string
   return escaped
 }
 
+/** Keep Turndown's existing Markdown escapes while protecting GFM delimiters. */
+function portableMarkdownTableCell(value: string): string {
+  let output = ''
+  let hasOddBackslashes = false
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index]
+    if (character === '\\') {
+      output += character
+      hasOddBackslashes = !hasOddBackslashes
+      continue
+    }
+    if (character === '|' && !hasOddBackslashes) output += '\\'
+    if (character === '\r' || character === '\n') {
+      output += ' '
+      if (character === '\r' && value[index + 1] === '\n') index += 1
+    } else output += character
+    hasOddBackslashes = false
+  }
+  return output.trim()
+}
+
+/** GFM code spans cannot preserve an odd literal backslash run before a pipe. */
+function needsLiteralTableCode(value: string): boolean {
+  let hasOddBackslashes = false
+  for (const character of value) {
+    if (character === '\\') hasOddBackslashes = !hasOddBackslashes
+    else {
+      if (character === '|' && hasOddBackslashes) return true
+      hasOddBackslashes = false
+    }
+  }
+  return false
+}
+
+/** Encode syntax as character references so a literal inline code leaf stays data. */
+function literalMdxCodeText(value: string): string {
+  let output = ''
+  for (const character of value) {
+    output += /[A-Za-z0-9 ]/.test(character) ? character : `&#${character.codePointAt(0)!};`
+  }
+  return output
+}
+
 function markdownLinkDestination(value: string): string | null {
   try {
     return encodeURI(value)
@@ -555,7 +598,9 @@ function sanitizeMarkdownUrls(value: string): string | null {
       // Validate actual JSX nodes, not tag-shaped prose: Markdown escapes such
       // as `enum\<string>` are inert text, while member components still need
       // rejection even when their first segment names a portable primitive.
-      if (!node.name || !PORTABLE_MDX_COMPONENTS.has(node.name)) {
+      const isLiteralCode = node.type === 'mdxJsxTextElement' && node.name === 'code'
+        && !node.attributes?.length && (node.children ?? []).every((child) => child.type === 'text')
+      if (!isLiteralCode && (!node.name || !PORTABLE_MDX_COMPONENTS.has(node.name))) {
         hasUnsafeMdxSyntax = true
         return
       }
@@ -1184,6 +1229,13 @@ export function htmlPage(
   const turndown = new TurndownService({ codeBlockStyle: 'fenced', emDelimiter: '_', headingStyle: 'atx', preformattedCode: true })
   let isConvertingTableCell = false
   turndown.remove(['script', 'style', 'noscript'])
+  turndown.addRule('migration-literal-table-code', {
+    filter: (node) => isConvertingTableCell && node.nodeName === 'CODE' && node.parentNode?.nodeName !== 'PRE'
+      && needsLiteralTableCode(node.textContent ?? ''),
+    // A strict, attribute-free text leaf preserves the payload that GFM's
+    // escaped-pipe code-span grammar cannot represent without changing it.
+    replacement: (_content, node) => `<code>${literalMdxCodeText(node.textContent ?? '')}</code>`,
+  })
   turndown.addRule('migration-static-task-checkbox', {
     filter: (node) => node.nodeName === 'SPAN'
       && ['checked', 'unchecked'].includes((node as HTMLElement).getAttribute('data-thally-static-task-checkbox') ?? ''),
@@ -1283,8 +1335,7 @@ export function htmlPage(
             // Reuse the article's safe inline rules so links, code, emphasis
             // and images survive. GFM still requires one physical line per
             // row and escaped pipes, including pipes inside inline code.
-            return turndown.turndown(fragment(cell).html() ?? '')
-              .replace(/\r?\n/g, ' ').replace(/\|/g, '\\|').trim()
+            return portableMarkdownTableCell(turndown.turndown(fragment(cell).html() ?? ''))
           } finally {
             isConvertingTableCell = wasConvertingTableCell
           }
