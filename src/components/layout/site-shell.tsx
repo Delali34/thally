@@ -15,6 +15,8 @@ import { useMemo, useState } from 'react'
 import { localizeCollectionHrefs } from '@/components/layout/localize-collections'
 import { SiteNameProvider } from '@/components/layout/use-site-name'
 import type { SiteIdentity } from '@/lib/site-config'
+import type { NavigationSnapshot } from '@/lib/navigation-snapshot'
+import { NavigationLoader, NavigationStatus } from './navigation-loader'
 
 export interface I18nConfig {
   defaultLocale: string
@@ -72,7 +74,9 @@ function navigationScopeKey(
     return `locale:${currentLocale}`
   }
   if (matchesPath('/api', currentPath)) {
-    const specId = currentPath.split('/').filter(Boolean)[1] ?? 'default'
+    const segment = currentPath.split('/').filter(Boolean)[1] ?? 'default'
+    let specId = segment
+    try { specId = decodeURIComponent(segment) } catch { /* Preserve an invalid escape as an opaque scope. */ }
     return `api:${specId}`
   }
   return 'default'
@@ -81,6 +85,7 @@ function navigationScopeKey(
 interface SiteShellProps {
   children: React.ReactNode
   initialCollections: Array<SidebarCollection>
+  navigationSnapshot?: NavigationSnapshot
   i18nConfig?: I18nConfig | null
   navbarConfig?: DocsJsonNavbar | null
   showPoweredBy?: boolean
@@ -96,6 +101,7 @@ interface SiteShellProps {
 export function SiteShell({
   children,
   initialCollections,
+  navigationSnapshot,
   i18nConfig,
   navbarConfig,
   footerConfig,
@@ -124,8 +130,12 @@ export function SiteShell({
   const scopeKey = navigationScopeKey(currentLocale, currentPath, i18nConfig)
   const localeRoot = pathname !== currentPath ? `/${currentLocale}` : undefined
   const hydratedCollections = useSidebarCollectionsStore(
-    (state) => state.collectionsByScope[scopeKey],
+    (state) => !navigationSnapshot || state.viewKey === navigationSnapshot.viewKey ? state.collectionsByScope[scopeKey] : undefined,
   )
+  const navigationLoad = useSidebarCollectionsStore(state => !navigationSnapshot || state.viewKey === navigationSnapshot.viewKey ? state.navigationByScope?.[scopeKey] : undefined)
+  const isNavigationPending = navigationLoad
+    ? navigationLoad.snapshot.mode === 'deferred' && navigationLoad.status !== 'ready'
+    : Boolean(navigationSnapshot && (scopeKey !== 'default' || navigationSnapshot.mode === 'deferred'))
   const routeLocale = currentLocale
   const isSecondaryLocale = Boolean(i18nConfig) && routeLocale !== i18nConfig?.defaultLocale
   const localizedInitialCollections = useMemo(
@@ -155,14 +165,10 @@ export function SiteShell({
   // leaves that collection. Deriving validity here avoids an effect-driven state reset.
   const [selectedCollectionId, setSelectedCollectionId] = useState<SidebarCollection['id'] | null>(null)
   const selectedCollection = navigableCollections.find((collection) => collection.id === selectedCollectionId)
-  const activeCollection =
+  const activeCollection = (
     selectedCollection && collectionContainsPath(selectedCollection, pathname, currentPath, localeRoot)
       ? selectedCollection
-      : matchedCollection
-
-  if (!activeCollection) {
-    return null
-  }
+      : matchedCollection) ?? { id: 'navigation-empty', label: identity.name, sections: [] }
 
   // The tab to highlight. A standalone href tab (e.g. Changelog) that owns no
   // sidebar sections still wins the highlight when its href matches the current
@@ -180,7 +186,8 @@ export function SiteShell({
   // which lets the banner-aware desktop sidebar remain sticky.
   return (
     <SiteNameProvider initialName={identity.name}>
-      <div className="thally-docs-root min-h-screen w-full overflow-x-clip bg-background text-foreground" data-navigation={navigationPresentation.display} data-header-layout={getHeaderNavigationLayout(navigationPresentation.display, visibleCollections.length)}>
+      {navigationSnapshot ? <NavigationLoader scope={scopeKey} /> : null}
+      <div className="thally-docs-root min-h-screen w-full overflow-x-clip bg-background text-foreground" data-navigation={navigationPresentation.display} data-header-layout={getHeaderNavigationLayout(navigationPresentation.display, visibleCollections.length)} data-thally-navigation-state={isNavigationPending ? (navigationLoad?.status === 'error' ? 'error' : 'loading') : 'ready'}>
         <a
           href="#main-content"
           className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-[100] focus:rounded-md focus:bg-background focus:px-4 focus:py-2 focus:text-foreground focus:shadow-lg"
@@ -205,9 +212,10 @@ export function SiteShell({
           navbarConfig={navbarConfig ?? null}
           siteLinks={identity.links}
           showSidebarGroupIcons={showSidebarGroupIcons}
+          navigationStatus={isNavigationPending ? <NavigationStatus scope={scopeKey} /> : undefined}
         />
         <div className={`thally-docs-shell flex min-h-[calc(100dvh-var(--docs-header-height,60px))] w-full ${shell.wrapper}`}>
-          <Sidebar
+          {isNavigationPending ? <aside className={`thally-docs-sidebar hidden shrink-0 lg:block ${layout.sidebarWidth}`}><NavigationStatus scope={scopeKey} /></aside> : <Sidebar
             sections={activeCollection.sections}
             title={activeCollection.label}
             collections={visibleCollections}
@@ -216,7 +224,7 @@ export function SiteShell({
             navigationPresentation={navigationPresentation}
             shortcuts={navigationShortcuts}
             showGroupIcons={showSidebarGroupIcons}
-          />
+          />}
           <div className="flex min-h-[calc(100dvh-var(--docs-header-height,60px))] w-full min-w-0 flex-1 flex-col">
             <main id="main-content" className="thally-docs-main flex-1 py-10 pb-24">
               <PageContainer className={layout.pageGap}>{children}</PageContainer>

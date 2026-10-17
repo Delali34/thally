@@ -18,6 +18,8 @@ import DocsPage, { generateMetadata as generateDocsMetadata } from '@/app/(docs)
 import { isReaderAuthActive } from '@/lib/reader-auth/config'
 import { getReaderContext } from '@/lib/reader-auth/context'
 import { canReaderSeeUnmarkedContent, denyDocumentAccess } from '@/lib/reader-auth/page-gate'
+import { loadNavigationSnapshot } from '@/lib/navigation-snapshot-server'
+import { SidebarCollectionsHydrator } from '@/components/layout/sidebar-hydrator'
 
 interface PageProps {
   params: Promise<{ slug?: Array<string> }>
@@ -91,6 +93,13 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
 }
 
 export default async function ApiReferencePage({ params }: PageProps) {
+  const resolved = await params
+  const content = await renderApiReferencePage({ params: Promise.resolve(resolved) })
+  const snapshot = await loadNavigationSnapshot(`api:${resolved.slug?.[0] ?? 'default'}`)
+  return <><SidebarCollectionsHydrator collections={snapshot.collections} scope={snapshot.scope} snapshot={snapshot} />{content}</>
+}
+
+async function renderApiReferencePage({ params }: PageProps) {
   const resolved = await params
   const siteUrl = getSiteUrl()
   const effectiveSite = resolveBuildSiteConfig()

@@ -1,10 +1,7 @@
 /** Builds the locale-prefixed sidebar state shared by localized docs and API pages. */
 
 import { SidebarCollectionsHydrator } from '@/components/layout/sidebar-hydrator'
-import { withApiNavigation } from '@/data/api-reference'
-import { loadSidebarCollections } from '@/data/docs'
-import { getReaderContext } from '@/lib/reader-auth/context'
-import { canReaderSeeUnmarkedContent } from '@/lib/reader-auth/page-gate'
+import { loadNavigationSnapshot } from '@/lib/navigation-snapshot-server'
 
 interface LocalizedSidebarHydratorProps {
   locale: string
@@ -14,20 +11,8 @@ interface LocalizedSidebarHydratorProps {
 export async function LocalizedSidebarHydrator({
   locale,
 }: LocalizedSidebarHydratorProps) {
-  const reader = await getReaderContext()
-  const readerCollections = await loadSidebarCollections(locale, reader)
-  const sidebarCollections = canReaderSeeUnmarkedContent(reader)
-    ? await withApiNavigation(readerCollections, `/${locale}`)
-    : readerCollections
-  const collections = sidebarCollections.map((collection) => {
-    // Keep collection destinations source-owned. Inventing a locale-root href
-    // for Overview makes its prefix match every page in every other collection.
-    if (collection.api && collection.api.navigation !== false) return collection
-    if (collection.href && !/^https?:\/\//i.test(collection.href)) {
-      return { ...collection, href: `/${locale}${collection.href}` }
-    }
-    return collection
-  })
+  const snapshot = await loadNavigationSnapshot(`locale:${locale}`)
+  const collections = snapshot.collections
 
-  return <SidebarCollectionsHydrator collections={collections} scope={`locale:${locale}`} />
+  return <SidebarCollectionsHydrator collections={collections} snapshot={snapshot} scope={`locale:${locale}`} />
 }

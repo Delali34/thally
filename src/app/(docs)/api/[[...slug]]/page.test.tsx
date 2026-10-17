@@ -23,6 +23,7 @@ vi.mock('@/data/docs', () => ({
 vi.mock('@/lib/site-url', () => ({ getSiteUrl: () => 'https://docs.example.test' }))
 vi.mock('@/config/api-reference', () => ({ apiReferenceConfig: { defaultSpecId: 'default' }, getOpenApiSpecUrl: () => 'https://docs.example.test/openapi.json' }))
 vi.mock('@/lib/site-config', () => ({ resolveBuildSiteConfig: () => ({ name: 'OpenRouter' }) }))
+vi.mock('@/lib/navigation-snapshot-server', () => ({ loadNavigationSnapshot: async (scope: string) => ({ schemaVersion: 1, scope, mode: 'inline', collections: [], viewKey: 'anonymous', snapshotId: 'fixture' }) }))
 
 import ApiReferencePage, { generateMetadata } from './page'
 

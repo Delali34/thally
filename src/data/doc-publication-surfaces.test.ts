@@ -12,7 +12,7 @@ const root = process.cwd()
 const read = (file: string) => readFileSync(join(root, file), 'utf8')
 
 /** Async loaders in docs.ts that decide publication before answering. */
-const PUBLICATION_AWARE = /\b(loadDocEntries|loadSidebarCollections|loadNavContext|ensureDocPublication)\(/
+const PUBLICATION_AWARE = /\b(loadDocEntries|loadSidebarCollections|loadNavigationSnapshot|loadNavContext|ensureDocPublication)\(/
 
 const surfaces: Record<string, string> = {
   'src/app/sitemap.ts': 'sitemap',
@@ -26,7 +26,8 @@ const surfaces: Record<string, string> = {
   'src/lib/changelog.ts': 'changelog feeds and MCP list_changes',
   'src/lib/search/register-doc-source.ts': 'search index',
   'src/app/(docs)/layout.tsx': 'sidebar navigation',
-  'src/app/(docs)/api/layout.tsx': 'API sidebar navigation',
+  'src/app/(docs)/api/[[...slug]]/page.tsx': 'API sidebar navigation',
+  'src/lib/navigation-snapshot-server.ts': 'shared lazy/inline navigation projection',
   'src/components/layout/localized-sidebar-hydrator.tsx': 'localized sidebar',
   'src/app/(docs)/[[...slug]]/page.tsx': 'page navigation, breadcrumbs and prev/next',
 }

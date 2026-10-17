@@ -3,6 +3,7 @@
 /** Shared documentation header with a dedicated full-width collection row. */
 
 import { useEffect, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 import { ExternalLink, Github, Sparkles, Star } from 'lucide-react'
 import type { SidebarCollection, DocsJsonNavbar, NavigationPresentation, DocsNavigationVersion } from '@/data/docs'
 import { MobileNav } from '@/components/navigation/mobile-nav'
@@ -60,6 +61,7 @@ interface TopBarProps {
   navbarConfig?: DocsJsonNavbar | null
   siteLinks: Array<SiteLink>
   showSidebarGroupIcons?: boolean
+  navigationStatus?: ReactNode
 }
 
 export function TopBar({
@@ -76,6 +78,7 @@ export function TopBar({
   navbarConfig,
   siteLinks,
   showSidebarGroupIcons = true,
+  navigationStatus,
 }: TopBarProps) {
   const headerRef = useRef<HTMLElement>(null)
   const availableLocales = useLocaleAvailability((state) => state.availableByPath[currentPath ?? '/'])
@@ -133,6 +136,7 @@ export function TopBar({
           activeCollectionId={activeCollectionId}
           onCollectionChange={onCollectionChange}
           showGroupIcons={showSidebarGroupIcons}
+          status={navigationStatus}
         />
         <IntentPrefetchLink
           href="/"

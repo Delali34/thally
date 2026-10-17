@@ -6,12 +6,12 @@ import * as Dialog from '@radix-ui/react-dialog'
 import { Menu, X } from 'lucide-react'
 import { usePathname } from 'next/navigation'
 import { useState } from 'react'
-import type { NavigationNode, NavigationSection, SidebarCollection } from '@/data/docs'
-import { typography } from '@/config/layout'
+import type { ReactNode } from 'react'
+import type { NavigationSection, SidebarCollection } from '@/data/docs'
 import { Logo } from '@/components/layout/logo'
 import { displaySiteName, useSiteName } from '@/components/layout/use-site-name'
 import { CollectionSelector } from '@/components/navigation/collection-selector'
-import { NavigationTree } from '@/components/navigation/navigation-tree'
+import { NavigationSections } from '@/components/navigation/navigation-tree'
 
 interface MobileNavProps {
   sections: Array<NavigationSection>
@@ -19,6 +19,7 @@ interface MobileNavProps {
   activeCollectionId: string
   onCollectionChange: (id: string) => void
   showGroupIcons?: boolean
+  status?: ReactNode
 }
 
 export function MobileNav({
@@ -27,6 +28,7 @@ export function MobileNav({
   activeCollectionId,
   onCollectionChange,
   showGroupIcons = true,
+  status,
 }: MobileNavProps) {
   const siteName = useSiteName()
   const [open, setOpen] = useState(false)
@@ -64,24 +66,7 @@ export function MobileNav({
               }}
               compact
             />
-            {sections.map((section, index) => {
-              const nodes: Array<NavigationNode> = section.nodes
-                ?? section.items.map((item) => ({ type: 'page' as const, item }))
-              return (
-                <div key={section.id ?? `${section.title}-${index}`} className="space-y-2">
-                  {section.defaultOpen === undefined ? <p className={typography.meta}>{section.title}</p> : null}
-                  <div className="ml-1 border-l border-border/55 pl-1.5">
-                    <NavigationTree
-                      nodes={nodes}
-                      pathname={pathname}
-                      onNavigate={() => setOpen(false)}
-                      mobile
-                      showGroupIcons={showGroupIcons}
-                    />
-                  </div>
-                </div>
-              )
-            })}
+            {status ?? <NavigationSections sections={sections} pathname={pathname} onNavigate={() => setOpen(false)} mobile showGroupIcons={showGroupIcons} />}
           </nav>
         </Dialog.Content>
       </Dialog.Portal>
