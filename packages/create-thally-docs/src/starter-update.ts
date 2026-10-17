@@ -187,6 +187,31 @@ function assertRecoveryPackages(targetDir: string, baselineDir: string, packages
   }
 }
 
+/** Prove canonical direct package inputs while permitting customer additions. */
+function hasArchivePackageIdentity(targetDir: string, baselineDir: string): boolean {
+  const installed = JSON.parse(readFileSync(join(targetDir, 'package.json'), 'utf8'))
+  const canonical = JSON.parse(readFileSync(join(baselineDir, 'package.json'), 'utf8'))
+  const hasLock = existsSync(join(baselineDir, 'package-lock.json'))
+  if (hasLock && !existsSync(join(targetDir, 'package-lock.json'))) return false
+  const baselineLock = hasLock ? JSON.parse(readFileSync(join(baselineDir, 'package-lock.json'), 'utf8')) : undefined
+  const installedLock = hasLock ? JSON.parse(readFileSync(join(targetDir, 'package-lock.json'), 'utf8')) : undefined
+  const fields = ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']
+  const names = new Set(fields.flatMap(field => Object.keys(canonical[field] ?? {})))
+  for (const name of names) {
+    // The same name in another group can override npm's effective input. Only
+    // additions of independent package names count as customer customization.
+    for (const field of fields) {
+      if (installed[field]?.[name] !== canonical[field]?.[name]) return false
+      if (hasLock && installedLock.packages?.['']?.[field]?.[name] !== baselineLock.packages?.['']?.[field]?.[name]) return false
+    }
+    if (hasLock) {
+      const path = `node_modules/${name}`
+      if (!baselineLock.packages?.[path] || !isDeepStrictEqual(installedLock.packages?.[path], baselineLock.packages[path])) return false
+    }
+  }
+  return true
+}
+
 /** Trusted catalog and bounded download seams shared by CLI and managed callers. */
 export interface ResolveStarterUpdateBaseOptions {
   targetDir: string
@@ -214,7 +239,32 @@ export async function resolveStarterUpdateBase(options: ResolveStarterUpdateBase
   const source = readDownstreamManifest(options.targetDir, manifestPath)
   const manifestSha256 = starterManifestSha256(source)
   const exact = releases.filter((release) => release.source.manifestSha256 === manifestSha256)
-  if (exact.length) return { release: resolveStarterReleaseFromManifest(source, releases), recoveredProvenance: false, manifestSha256 }
+  if (exact.length === 1) return { release: resolveStarterReleaseFromManifest(source, releases), recoveredProvenance: false, manifestSha256 }
+  if (exact.length > 1) {
+    // A manifest pins runtime provenance, so source-only repromotions can share
+    // its bytes. Prove the complete framework and direct package inputs against
+    // every trusted archive; catalog order must never silently choose a base.
+    const download = options.download ?? (async (directory, release) => {
+      await downloadStarter(directory, undefined, release, { announce: false })
+    })
+    const workspace = mkdtempSync(join(tmpdir(), 'thally-starter-exact-base-'))
+    try {
+      const proven: ScaffoldRelease[] = []
+      const candidates = exact.filter((release, index, all) => all.findIndex(other => isDeepStrictEqual(other, release)) === index)
+      for (const [index, release] of candidates.entries()) {
+        const baselineDir = join(workspace, String(index))
+        mkdirSync(baselineDir)
+        await download(baselineDir, release)
+        const baseline = readStarterReleaseManifest(baselineDir, release)
+        const ownership = mergeStarterOwnershipContracts(baseline.ownership, baseline.ownership)
+        const proof = planStarterRuntimeSync(baselineDir, baselineDir, options.targetDir, ownership)
+        if (proof.copyPaths.length || proof.deletePaths.length || proof.preservedPaths.length || proof.conflictPaths.length) continue
+        if (hasArchivePackageIdentity(options.targetDir, baselineDir)) proven.push(release)
+      }
+      if (proven.length !== 1) throw new Error('The project starter manifest has no unique verified archive baseline; refusing to update.')
+      return { release: proven[0], recoveredProvenance: false, manifestSha256 }
+    } finally { rmSync(workspace, { recursive: true, force: true }) }
+  }
   if (Buffer.byteLength(source, 'utf8') > 256 * 1024) throw new Error('The project starter manifest is too large.')
   let candidate: Record<string, unknown>
   try { candidate = JSON.parse(source) } catch { throw new Error('The project starter manifest is invalid JSON.') }

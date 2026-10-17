@@ -23,6 +23,21 @@ export interface UpgradeCanaryOptions {
   download?: StarterUpdateDownload;
 }
 
+/** Manifest bytes can recur across distinct immutable starter archives. */
+function releaseIdentity(release: ScaffoldRelease): string {
+  return JSON.stringify([
+    release.schemaVersion, release.id, release.starterVersion,
+    release.source.repository, release.source.commitSha, release.source.treeSha,
+    release.source.archiveUrl, release.source.manifestPath, release.source.manifestSha256,
+    release.runtime.repository, release.runtime.commitSha, release.runtime.treeSha,
+    release.runtime.contentSource, release.runtime.identityContractVersion,
+  ]);
+}
+
+function distinctReleases(releases: readonly ScaffoldRelease[]): ScaffoldRelease[] {
+  return releases.filter((release, index, all) => all.findIndex(other => releaseIdentity(other) === releaseIdentity(release)) === index);
+}
+
 function files(root: string, prefix = ''): Map<string, Buffer> {
   const result = new Map<string, Buffer>();
   for (const entry of readdirSync(join(root, prefix))) {
@@ -56,27 +71,28 @@ export async function verifyScaffoldUpgrades(options: UpgradeCanaryOptions): Pro
   const targetManifest = readStarterReleaseManifest(options.candidateDirectory, target);
   const targetFiles = files(options.candidateDirectory);
   const history = [...(options.releases ?? SUPPORTED_SCAFFOLD_RELEASES)]
-    .filter(release => release.source.manifestSha256 !== target.source.manifestSha256);
+    .filter(release => releaseIdentity(release) !== releaseIdentity(target));
   if (!history.length) throw new Error('Historical upgrade canary has no retained baseline.');
   const current = options.current ?? STABLE_SCAFFOLD_RELEASE;
-  const bases = [current, history.at(-1)!].filter((release, index, all) => all.findIndex(other => other.source.manifestSha256 === release.source.manifestSha256) === index);
-  const catalog = [target, ...bases, ...history].filter((release, index, all) => all.findIndex(other => other.source.manifestSha256 === release.source.manifestSha256) === index);
+  const bases = distinctReleases([current, history.at(-1)!]);
+  const catalog = distinctReleases([target, ...bases, ...history]);
   catalog.forEach(assertCanonicalScaffoldUpgradeRelease);
   const workspace = mkdtempSync(join(tmpdir(), 'thally-upgrade-canary-'));
   const snapshots = new Map<string, string>();
   const download: StarterUpdateDownload = async (destination, release) => {
-    if (!catalog.some(known => known.id === release.id && known.source.manifestSha256 === release.source.manifestSha256)) throw new Error('Canary requested an uncatalogued release.');
-    if (release.source.manifestSha256 === target.source.manifestSha256) cpSync(options.candidateDirectory, destination, { recursive: true });
+    if (!catalog.some(known => releaseIdentity(known) === releaseIdentity(release))) throw new Error('Canary requested an uncatalogued release.');
+    if (releaseIdentity(release) === releaseIdentity(target)) cpSync(options.candidateDirectory, destination, { recursive: true });
     else if (options.download) await options.download(destination, release);
     else {
-      let snapshot = snapshots.get(release.source.manifestSha256);
+      const identity = releaseIdentity(release);
+      let snapshot = snapshots.get(identity);
       if (!snapshot) {
-        snapshot = join(workspace, 'archives', release.source.manifestSha256);
+        snapshot = join(workspace, 'archives', createHash('sha256').update(identity).digest('hex'));
         mkdirSync(snapshot, { recursive: true });
         await downloadStarter(snapshot, undefined, release, { announce: false });
         readStarterReleaseManifest(snapshot, release);
         files(snapshot);
-        snapshots.set(release.source.manifestSha256, snapshot);
+        snapshots.set(identity, snapshot);
       }
       cpSync(snapshot, destination, { recursive: true });
     }

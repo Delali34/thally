@@ -146,6 +146,29 @@ function fixtureDownload(
   }
 }
 
+function sharedManifestFixtures() {
+  const ownership = { ...oldOwnership, manualReview: [...oldOwnership.manualReview, 'package.json', 'package-lock.json'] }
+  const old = releaseFixture(1, ownership), next = releaseFixture(1, ownership, 1)
+  next.release.runtime = { ...old.release.runtime }
+  next.release.source.manifestSha256 = old.release.source.manifestSha256
+  write(next.tree, 'starter-release.json', old.manifestSource)
+  const canonicalPackage = JSON.parse(readFileSync(join(old.tree, 'package.json'), 'utf8'))
+  write(old.tree, 'package.json', JSON.stringify({ ...canonicalPackage, devDependencies: { '@thallylabs/cli': '0.8.86' } }))
+  write(next.tree, 'package.json', JSON.stringify({ ...canonicalPackage, devDependencies: { '@thallylabs/cli': '0.8.103' } }))
+  write(next.tree, 'framework/runtime.ts', 'runtime 1\n')
+  for (const [archive, version] of [[old, '0.8.86'], [next, '0.8.103']] as const) {
+    const packageJson = JSON.parse(readFileSync(join(archive.tree, 'package.json'), 'utf8'))
+    write(archive.tree, 'package-lock.json', JSON.stringify({ lockfileVersion: 3, packages: {
+      '': { dependencies: packageJson.dependencies, devDependencies: packageJson.devDependencies },
+      'node_modules/next': { version: '1.0.0' },
+      'node_modules/@thallylabs/core': { version: '1.0.0' },
+      'node_modules/@thallylabs/cli': { version },
+    } }))
+  }
+  const download = fixtureDownload(new Map([[old.release.source.commitSha, old.tree], [next.release.source.commitSha, next.tree]]))
+  return { old, next, canonicalPackage, download }
+}
+
 afterEach(() => {
   for (const path of directories.splice(0)) {
     rmSync(path, { recursive: true, force: true })
@@ -195,6 +218,77 @@ describe('immutable starter update orchestration', () => {
     expect(readFileSync(join(target, 'starter-release.json'), 'utf8')).toBe(
       old.manifestSource,
     )
+  })
+
+  it('proves a unique archive base for shared manifests and preserves customer additions', async () => {
+    const { old, next, canonicalPackage, download } = sharedManifestFixtures()
+    const target = directory('thally-shared-manifest-')
+    copyTree(old.tree, target)
+    write(target, 'package.json', JSON.stringify({ ...canonicalPackage, name: 'customer-docs', private: true,
+      dependencies: { ...canonicalPackage.dependencies, 'customer-library': '^1.0.0' },
+      devDependencies: { '@thallylabs/cli': '0.8.86' },
+    }))
+    const result = await updateStarterProject({
+      targetDir: target, targetRelease: next.release, releases: [next.release, old.release],
+      download,
+      apply: true, confirmed: true,
+    })
+    expect(result.isUpToDate).toBe(false)
+    expect(result.applied).toBe(true)
+    expect(result.previousRelease).toEqual(old.release)
+    expect(JSON.parse(readFileSync(join(target, 'package.json'), 'utf8'))).toMatchObject({
+      name: 'customer-docs', private: true, dependencies: { 'customer-library': '^1.0.0' },
+      devDependencies: { '@thallylabs/cli': '0.8.103' },
+    })
+    expect(readFileSync(join(target, 'next.config.ts'), 'utf8')).toBe('config 1.1\n')
+    expect(readFileSync(join(target, 'src/content/index.mdx'), 'utf8')).toBe('customer content 1\n')
+  })
+
+  it('recognizes the current archive with a retained same-manifest older release', async () => {
+    const { old, next, download } = sharedManifestFixtures()
+    const target = directory('thally-shared-current-')
+    copyTree(next.tree, target)
+    const result = await updateStarterProject({ targetDir: target, targetRelease: next.release,
+      releases: [next.release, old.release], download,
+    })
+    expect(result.isUpToDate).toBe(true)
+    expect(result.previousRelease).toEqual(next.release)
+  })
+
+  it.each(['modified', 'framework', 'lockfile', 'override', 'indistinguishable'] as const)('rejects %s same-manifest archive bases', async kind => {
+    const { old, next, download } = sharedManifestFixtures()
+    const target = directory('thally-shared-reject-')
+    copyTree(old.tree, target)
+    if (kind === 'modified') write(target, 'package.json', JSON.stringify({ dependencies: { next: 'unknown' } }))
+    else if (kind === 'override') {
+      const packageJson = JSON.parse(readFileSync(join(target, 'package.json'), 'utf8'))
+      packageJson.optionalDependencies = { next: '2.0.0' }
+      write(target, 'package.json', JSON.stringify(packageJson))
+    } else if (kind === 'framework') write(target, 'framework/runtime.ts', 'modified runtime\n')
+    else if (kind === 'lockfile') {
+      const lock = JSON.parse(readFileSync(join(target, 'package-lock.json'), 'utf8'))
+      lock.packages['node_modules/@thallylabs/cli'].version = 'unknown'
+      write(target, 'package-lock.json', JSON.stringify(lock))
+    } else {
+      // Differences confined to customer-owned/manual defaults do not prove
+      // archive identity; never select whichever record appears first.
+      copyTree(old.tree, next.tree)
+    }
+    await expect(updateStarterProject({ targetDir: target, targetRelease: next.release,
+      releases: [next.release, old.release], download,
+    })).rejects.toThrow('no unique verified archive baseline')
+  })
+
+  it('rejects a tampered same-manifest archive before it can establish trust', async () => {
+    const { old, next, download } = sharedManifestFixtures()
+    const target = directory('thally-shared-tampered-')
+    copyTree(old.tree, target)
+    await expect(updateStarterProject({ targetDir: target, targetRelease: next.release,
+      releases: [next.release, old.release], download: async (directory, release) => {
+        await download(directory, release)
+        write(directory, 'starter-release.json', '{}')
+      },
+    })).rejects.toThrow('promoted SHA-256')
   })
 
   it('preserves old protected policy and reports two-sided customer conflicts', async () => {
