@@ -1,9 +1,9 @@
 /** Byte fidelity, reader-range isolation and cancellation of native delivery. */
 import { createHash } from 'node:crypto'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { nativeAgentExportByteLength, nativeAgentExportStream } from './native-stream'
 import type { NativeAgentExportPlan } from './native-protocol'
-import { agentExportHeader, agentExportPagePrefix, AGENT_EXPORT_PAGE_SUFFIX } from './format'
+import { agentExportApiHeader, agentExportHeader, agentExportPagePrefix, AGENT_EXPORT_PAGE_SUFFIX } from './format'
 
 const digest = (bytes: Uint8Array): string => createHash('sha256').update(bytes).digest('hex')
 const page = { title: 'Page', description: 'Current description', href: '/page' }
@@ -14,18 +14,52 @@ function makePlan(parts: Array<Uint8Array>): NativeAgentExportPlan {
     pages: [{ ...page, ranges: parts.map((bytes, shard) => ({ shard, start: 0, end: bytes.length })) }], apiMarkdown: [],
   }
 }
-async function collect(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+async function collect(stream: ReadableStream<Uint8Array>, onChunk?: (bytes: Uint8Array) => void): Promise<Uint8Array> {
   const reader = stream.getReader()
   const parts: Array<Uint8Array> = []
   for (;;) {
     const part = await reader.read()
     if (part.done) break
+    expect(part.value.byteLength).toBeGreaterThan(0)
     expect(part.value.byteLength).toBeLessThanOrEqual(64 * 1024)
+    onChunk?.(part.value)
     parts.push(part.value)
   }
   return Buffer.concat(parts)
 }
 const header = (plan: NativeAgentExportPlan) => agentExportHeader({ name: plan.siteName, description: plan.siteDescription }, plan.origin, plan.locale)
+
+/** Reference framing uses the ordinary shared formatter, not the stream cursor. */
+function canonicalBytes(plan: NativeAgentExportPlan, shards: Array<Uint8Array>): Buffer {
+  const pieces = [Buffer.from(header(plan))]
+  for (const entry of plan.pages) {
+    pieces.push(Buffer.from(agentExportPagePrefix(entry, plan.origin)))
+    for (const range of entry.ranges) pieces.push(Buffer.from(shards[range.shard].subarray(range.start, range.end)))
+    pieces.push(Buffer.from(AGENT_EXPORT_PAGE_SUFFIX))
+  }
+  if (plan.apiMarkdown.length) {
+    pieces.push(Buffer.from(agentExportApiHeader(plan.origin)))
+    for (const markdown of plan.apiMarkdown) pieces.push(Buffer.from(`\n${markdown}\n`))
+  }
+  return Buffer.concat(pieces)
+}
+
+const scalarBoundaries = [1, 2, 3].flatMap((remaining) => ['é', '漢', '😀', '\ud800']
+  .filter((scalar) => Buffer.byteLength(scalar) > remaining)
+  .map((scalar) => ({ name: `${Buffer.from(scalar).toString('hex')} with ${remaining} bytes remaining`, remaining, scalar })))
+
+function scalarBoundaryPlan(remaining: number, scalar: string): { plan: NativeAgentExportPlan; bytes: Buffer<ArrayBuffer> } {
+  const initial = makePlan([Buffer.alloc(1)])
+  const beforeTitle = Buffer.byteLength(header(initial) + '\n# ')
+  initial.pages[0].title = 'a'.repeat(64 * 1024 - remaining - beforeTitle) + scalar + 'tail'
+  initial.pages[0].description = ''
+  initial.pages[0].ranges[0].end = 0
+  const framingBytes = canonicalBytes(initial, [Buffer.alloc(0)]).byteLength
+  const bytes = Buffer.alloc(128 * 1024 - framingBytes, 120)
+  initial.shards[0] = { ...initial.shards[0], bytes: bytes.length, sha256: digest(bytes) }
+  initial.pages[0].ranges[0].end = bytes.length
+  return { plan: initial, bytes }
+}
 
 describe('native agent export', () => {
   it('preserves canonical bytes across UTF-8 splits between shards and chunks', async () => {
@@ -49,6 +83,63 @@ describe('native agent export', () => {
     plan.apiMarkdown = ['## Café 🙂\n\nGET /v1/items\n']
     const result = await collect(nativeAgentExportStream(plan, { async fetch() { throw new Error('No asset ranges selected') } }, new AbortController().signal))
     expect(nativeAgentExportByteLength(plan)).toBe(result.byteLength)
+  })
+
+  it.each([
+    { name: 'ASCII', value: 'plain\0\n"\\' },
+    { name: 'multilingual and astral', value: 'Français 中文 العربية 😀𐀀' },
+    { name: 'malformed surrogate sequence', value: '\ud800x\udc00\ud800\ud800\udc00' },
+  ])('counts exact $name page and API framing', async ({ value }) => {
+    const bytes = Buffer.from('```typescript\nconst exact = "{safe}";\n```\n')
+    const plan = makePlan([bytes])
+    plan.pages[0] = { ...plan.pages[0], title: value, description: value, href: '/référence/😀' }
+    plan.siteDescription = value
+    plan.apiMarkdown = [`## API\n${value}\n\nGET /v1/items\n`]
+    const expected = canonicalBytes(plan, [bytes])
+    expect(nativeAgentExportByteLength(plan)).toBe(expected.byteLength)
+    expect(await collect(nativeAgentExportStream(plan, { async fetch() { return new Response(bytes) } }, new AbortController().signal))).toEqual(expected)
+  })
+
+  it('does not allocate a separate encoded framing buffer for every page', async () => {
+    const bytes = Buffer.from('body')
+    const plan = makePlan([bytes])
+    const expected = canonicalBytes(plan, [bytes])
+    // Large exports previously performed this allocation in both the length
+    // pass and every delivered prefix/suffix. Existing output batches suffice.
+    const encode = vi.spyOn(TextEncoder.prototype, 'encode').mockImplementation(() => { throw new Error('Unexpected per-piece encoded allocation') })
+    try {
+      expect(nativeAgentExportByteLength(plan)).toBe(expected.byteLength)
+      expect(await collect(nativeAgentExportStream(plan, { async fetch() { return new Response(bytes) } }, new AbortController().signal))).toEqual(expected)
+    } finally { encode.mockRestore() }
+  })
+
+  it('rejects lengths outside the safe integer bound', () => {
+    const plan = makePlan([Buffer.from('body')])
+    plan.pages[0].ranges[0].end = Number.MAX_SAFE_INTEGER
+    expect(() => nativeAgentExportByteLength(plan)).toThrow(/integer bound/)
+  })
+
+  it.each(scalarBoundaries)('retries the complete UTF-8 scalar at $name without empty chunks', async ({ remaining, scalar }) => {
+    const { plan, bytes } = scalarBoundaryPlan(remaining, scalar)
+    const expected = canonicalBytes(plan, [bytes])
+    const sizes: Array<number> = []
+    const result = await collect(nativeAgentExportStream(plan, { async fetch() { return new Response(bytes) } }, new AbortController().signal), (chunk) => sizes.push(chunk.byteLength))
+    expect(expected.byteLength).toBe(128 * 1024)
+    expect(nativeAgentExportByteLength(plan)).toBe(expected.byteLength)
+    expect(result).toEqual(expected)
+    expect(sizes[0]).toBe(64 * 1024 - remaining)
+  })
+
+  it.each(scalarBoundaries)('withholds the last partial batch through late SHA failure at $name', async ({ remaining, scalar }) => {
+    const { plan, bytes } = scalarBoundaryPlan(remaining, scalar)
+    const expected = canonicalBytes(plan, [bytes])
+    plan.shards[0].sha256 = '0'.repeat(64)
+    const delivered: Array<Uint8Array> = []
+    await expect(collect(nativeAgentExportStream(plan, { async fetch() { return new Response(bytes) } }, new AbortController().signal), (chunk) => delivered.push(chunk))).rejects.toThrow(/integrity/)
+    const prefix = Buffer.concat(delivered)
+    expect(prefix.byteLength).toBeGreaterThan(0)
+    expect(prefix.byteLength).toBeLessThan(expected.byteLength)
+    expect(prefix).toEqual(expected.subarray(0, prefix.byteLength))
   })
 
   it('does not emit unauthorized bytes between selected ranges', async () => {

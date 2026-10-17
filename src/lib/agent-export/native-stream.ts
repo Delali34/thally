@@ -2,14 +2,14 @@
  * Native, pull-driven delivery of an already-authorized plain-data plan.
  *
  * It runs after Next has completed its empty handoff. Only one asset transfer,
- * one source chunk and at most two 64 KiB output batches are live at a time. Page framing
- * is synchronous: crossing ten thousand page boundaries does not create ten
- * thousand framework/pipeline promise continuations. This is a bounded payload
- * design, not a guarantee about the host's total isolate heap.
+ * one source chunk and at most two 64 KiB output batches are live at a time.
+ * Framing writes directly into those batches instead of allocating encoded
+ * buffers for every page. Its synchronous cursor also avoids per-page promise
+ * continuations. This bounds payload allocations, not the host's total heap.
  */
 import { createHash } from 'node:crypto'
 import { agentExportApiHeader, agentExportHeader, agentExportPagePrefix, AGENT_EXPORT_PAGE_SUFFIX } from './format'
-import type { NativeAgentExportPlan } from './native-protocol'
+import { nativeAgentExportStringBytes, type NativeAgentExportPlan } from './native-protocol'
 import type { PreparedBulkRange, PreparedBulkShard } from './prepared-contract'
 
 export interface NativeExportAssetBinding {
@@ -36,9 +36,8 @@ function* exportPieces(plan: NativeAgentExportPlan): Generator<ExportPiece> {
 /** Exact UTF-8 framing plus selected byte ranges for a native fixed-length body. */
 export function nativeAgentExportByteLength(plan: NativeAgentExportPlan): number {
   let bytes = 0
-  const encoder = new TextEncoder()
   for (const piece of exportPieces(plan)) {
-    bytes += piece.kind === 'text' ? encoder.encode(piece.value).byteLength : piece.range.end - piece.range.start
+    bytes += piece.kind === 'text' ? nativeAgentExportStringBytes(piece.value) : piece.range.end - piece.range.start
   }
   if (!Number.isSafeInteger(bytes)) throw new Error('Prepared export length exceeded its integer bound.')
   return bytes
@@ -54,7 +53,7 @@ export function nativeAgentExportStream(
   let shards: ReadonlyArray<PreparedBulkShard> = plan.shards
   const encoder = new TextEncoder()
   let piece: ExportPiece | null = null
-  let text = new Uint8Array(0)
+  let text = ''
   let textPosition = 0
   let reader: ReadableStreamDefaultReader<Uint8Array> | null = null
   let shardIndex = -1
@@ -78,7 +77,8 @@ export function nativeAgentExportStream(
     pieces = null
     piece = null
     pendingOutput = null
-    text = source = new Uint8Array(0)
+    text = ''
+    source = new Uint8Array(0)
     shards = []
     const activeReader = reader
     reader = null
@@ -166,14 +166,20 @@ export function nativeAgentExportStream(
                 return
               }
               piece = next.value
-              if (piece.kind === 'text') { text = encoder.encode(piece.value); textPosition = 0 }
+              if (piece.kind === 'text') { text = piece.value; textPosition = 0 }
             }
             if (piece.kind === 'text') {
-              const count = Math.min(text.length - textPosition, output.length - used)
-              output.set(text.subarray(textPosition, textPosition + count), used)
-              used += count
-              textPosition += count
-              if (textPosition === text.length) { piece = null; text = new Uint8Array(0) }
+              const encoded = encoder.encodeInto(text.slice(textPosition), output.subarray(used))
+              textPosition += encoded.read
+              used += encoded.written
+              if (textPosition === text.length) { piece = null; text = '' }
+              else if (encoded.read === 0 && encoded.written === 0) {
+                // A UTF-8 scalar needs up to four bytes. Flush the nonempty
+                // partial batch and retry it in fresh space, preserving the
+                // encoder's UTF-16 cursor and lone-surrogate replacement rules.
+                if (used === 0) throw new Error('UTF-8 scalar could not fit a native export batch.')
+                break
+              }
               continue
             }
             const range = piece.range
