@@ -10,7 +10,11 @@ export interface UrlMigrationScope {
 /** Choose a bounded documentation ancestor from explicit indexes, then sidebar links. */
 export function inferUrlMigrationScope(capture: Pick<MigrationCapture, 'body' | 'contentType' | 'finalUrl'>): UrlMigrationScope {
   const source = capture.finalUrl
-  const parent = source.pathname.endsWith('/') ? source.pathname.replace(/\/+$/, '') || '/' : source.pathname.slice(0, source.pathname.lastIndexOf('/')) || '/'
+  // Scan the suffix once: a backtracking slash regex can repeatedly revisit
+  // earlier slash runs in an arbitrarily long caller-supplied pathname.
+  let end = source.pathname.length
+  while (end > 0 && source.pathname.charCodeAt(end - 1) === 47) end--
+  const parent = end < source.pathname.length ? source.pathname.slice(0, end) || '/' : source.pathname.slice(0, source.pathname.lastIndexOf('/')) || '/'
   if (!/html/i.test(capture.contentType) || Buffer.byteLength(capture.body) > 8_000_000) return { scopePath: parent, evidence: 'source-parent' }
   const $ = load(capture.body)
   const ancestor = (path: string): boolean => path === '/' || source.pathname === path || source.pathname.startsWith(`${path}/`)

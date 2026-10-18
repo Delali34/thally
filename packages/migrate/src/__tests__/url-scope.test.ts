@@ -7,6 +7,10 @@ describe('documentation scope inference', () => {
   it('uses an explicit mounted index from deep articles', () => {
     expect(inferUrlMigrationScope(capture('<link rel="alternate" href="/docs/sitemap.xml"><a href="/docs/llms.txt">LLMs</a>')).scopePath).toBe('/docs')
   })
+  it('normalizes long trailing slash runs without repeated matching', () => {
+    const path = '/manual' + '/'.repeat(20000)
+    expect(inferUrlMigrationScope(capture('', path)).scopePath).toBe('/manual')
+  })
   it('preserves dedicated origin index roots', () => {
     expect(inferUrlMigrationScope(capture('<a href="/llms.txt">LLMs</a>', '/introduction/start')).scopePath).toBe('/')
   })
