@@ -124,15 +124,22 @@ describe('URL import fidelity regressions', () => {
     expect(recaptured.validation.issues).toContainEqual(expect.objectContaining({ code: 'unsupported-component' }))
     expect(recaptured.bundle.assets.some(asset => asset.path.startsWith('openapi/'))).toBe(false)
   })
-  it('reports inherited broken anchors separately while blocking anchors lost during conversion', async () => {
+  it('falls back to the page for proven source defects while blocking anchors lost during conversion', async () => {
     const run = await runUrlMigration({ sourceUrl: 'https://docs.test/guide', captureProvider: { capture: async ({ url }) => {
       if (url.pathname !== '/guide') throw new Error('Missing source')
-      return response('/guide', html('Guide', '<h2 id="present">Present</h2><a href="#present">Valid</a><a href="#already-broken">Source defect</a>'))
+      return response('/guide', html('Guide', '<h2 id="present">Present</h2><a href="#present">Valid</a><a href="#pre%73ent">Encoded valid</a><a href="#already-broken">Source defect</a><a href="##present">Malformed source fragment</a><pre><code>link = &quot;#already-broken&quot;</code></pre>'))
     } } })
     expect(run.validation.status).toBe('passed')
     expect(run.validation.issues).toEqual([])
-    expect(run.validation.warnings).toEqual([expect.objectContaining({ code: 'source-link-warning', message: expect.stringContaining('#already-broken') })])
-    expect(run.bundle.warnings).toEqual([expect.objectContaining({ message: expect.stringContaining('#already-broken') })])
+    expect(run.validation.warnings).toEqual([expect.objectContaining({ code: 'source-link-warning', message: expect.stringContaining('#already-broken') }), expect.objectContaining({ code: 'source-link-warning', message: expect.stringContaining('##present') })])
+    expect(run.bundle.warnings).toEqual([expect.objectContaining({ message: expect.stringContaining('#already-broken') }), expect.objectContaining({ message: expect.stringContaining('##present') })])
+    expect(run.bundle.pages[0].body).toContain('[Valid](/guide#present)')
+    expect(run.bundle.pages[0].body).toContain('[Encoded valid](/guide#pre%73ent)')
+    expect(run.bundle.pages[0].body).toContain('[Source defect](/guide)')
+    expect(run.bundle.pages[0].body).toContain('[Malformed source fragment](/guide)')
+    expect(run.bundle.pages[0].body).toContain('link = "#already-broken"')
+    const replay = await runUrlMigration({ sourceUrl: 'https://docs.test/guide', checkpoint: structuredClone(run.checkpoint), captureProvider: { capture: async () => { throw new Error('No recapture') } } })
+    expect(replay).toEqual(run)
     const damaged = structuredClone(run.checkpoint)
     const page = damaged.records.find(record => record.page)!.page!
     page.body = page.body.replace('<a id="present" />', '').replace('## Present', '## Changed')
