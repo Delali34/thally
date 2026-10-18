@@ -17,7 +17,7 @@ import { unified } from 'unified'
 import { parseFrontmatter } from './frontmatter.js'
 import { functionDeclaredNames, isFunctionInitializer, mdxComment, normalizeHtmlComments, normalizeExplicitHeadingIds, replaceOutsideCodeAndComments } from './mdx.js'
 import { resolveWithin } from './path.js'
-import { planInlineExtraction, unboundTags } from './inline-extraction.js'
+import { hoistedVarNames, planInlineExtraction, scriptKindFor, unboundBuiltinTags, unboundTags } from './inline-extraction.js'
 import type { MigrationWarning, RenderedMigrationFile } from './types.js'
 
 interface MdxNode {
@@ -377,8 +377,7 @@ function sanitizeCssModuleSelectors(css: string): { css: string; omitted: number
 }
 
 function sourceFile(source: string, filename: string): ts.SourceFile {
-  return ts.createSourceFile(filename, source, ts.ScriptTarget.Latest, true,
-    /\.[cm]?ts$/.test(filename) ? ts.ScriptKind.TS : ts.ScriptKind.TSX)
+  return ts.createSourceFile(filename, source, ts.ScriptTarget.Latest, true, scriptKindFor(filename))
 }
 
 function walk(node: MdxNode, visitor: (node: MdxNode) => void): void {
@@ -423,7 +422,7 @@ function needsClientBoundary(source: ts.SourceFile): boolean {
   return needed
 }
 
-function implicitReactImports(source: ts.SourceFile): string {
+function implicitReactImports(source: ts.SourceFile, onShadowed?: (names: Array<string>) => void): string {
   const bindings = new Set<string>()
   const references = new Set<string>()
   function bind(name: ts.BindingName): void {
@@ -441,7 +440,11 @@ function implicitReactImports(source: ts.SourceFile): string {
     }
     if (ts.isVariableStatement(statement)) for (const declaration of statement.declarationList.declarations) bind(declaration.name)
     if ((ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement)) && statement.name) bindings.add(statement.name.text)
+    // TypeScript-only declarations bind a value name too: `enum`, `namespace`, `import A = B`.
+    if ((ts.isEnumDeclaration(statement) || ts.isModuleDeclaration(statement) || ts.isImportEqualsDeclaration(statement)) && ts.isIdentifier(statement.name)) bindings.add(statement.name.text)
   }
+  // A `var` in a block, loop, `try` or `switch` at module level is a module binding too.
+  hoistedVarNames(source, bindings)
   function visit(node: ts.Node): void {
     if (ts.isIdentifier(node) && !(ts.isPropertyAccessExpression(node.parent) && node.parent.name === node)
       && !(ts.isPropertyAssignment(node.parent) && node.parent.name === node)) references.add(node.text)
@@ -456,14 +459,27 @@ function implicitReactImports(source: ts.SourceFile): string {
   // Mintlify also makes built-ins available as bare JSX names inside snippet
   // modules. A copied module runs outside Mintlify's MDX scope, so explicitly
   // import every unbound name it uses before the destination build renders it.
+  const leafBound = new Set<string>()
   const implicitComponents = MINTLIFY_COMPONENT_MODULES.map(({ module, names }) => {
-    const needed = names.filter((name) => references.has(name) && !bindings.has(name))
+    // `Note` is bound from the registry below like the rest of the callout
+    // family: the bare leaf component lacks the preset `type` the built-in sets.
+    const needed = names.filter((name) => name !== 'Note' && references.has(name) && !bindings.has(name))
+    for (const name of needed) leafBound.add(name)
     return needed.length ? `import { ${needed.join(', ')} } from '${module}';` : ''
   }).filter(Boolean)
+  // Built-ins with no leaf module of their own (`Warning`, `Info`, ... render
+  // through Note with a preset `type`) resolve from the registry, which is
+  // scope-aware: a name the module declares, imports or takes as a parameter
+  // is never rebound. Read in the file's own mode: a `.ts` module has no JSX but
+  // can still pass a built-in as a value (`createElement(Note)`).
+  const { bind: builtinTags, shadowed } = unboundBuiltinTags(source.text, bindings, source.fileName)
+  const registryNames = builtinTags.filter((name) => !leafBound.has(name))
+  if (shadowed.length) onShadowed?.(shadowed)
   return [
     references.has('React') && !bindings.has('React') ? "import * as React from 'react';" : '',
     hooks.length ? `import { ${hooks.join(', ')} } from 'react';` : '',
     ...implicitComponents,
+    registryNames.length ? builtinRegistryBindings(registryNames, identifierNames(source)) : '',
     usesMintlifyComponents ? mintlifyComponentsShim() : '',
   ].filter(Boolean).join('\n')
 }
@@ -483,11 +499,40 @@ function implicitReactImports(source: ts.SourceFile): string {
 function resolveInlineBuiltinReferences(source: string, moduleNames: ReadonlySet<string>): string {
   const unresolved = unboundTags(source, moduleNames)
   if (unresolved.length === 0) return source
+  return [builtinRegistryBindings(unresolved, identifierNames(sourceFile(source, 'inline.jsx'))), source].join('\n')
+}
+
+/** Every identifier a module spells anywhere, so a name it declares, imports or reads as a global is among them. */
+function identifierNames(root: ts.Node): Set<string> {
+  const names = new Set<string>()
+  const visit = (node: ts.Node): void => {
+    if (ts.isIdentifier(node)) names.add(node.text)
+    ts.forEachChild(node, visit)
+  }
+  visit(root)
+  return names
+}
+
+/**
+ * Bind built-in components by name from the registry, the same way for every module the migration writes.
+ * The registry is imported as `builtinMdxComponents` unless the module (`used`) already spells that name,
+ * as its own declaration, an import or a global it reads: it then takes the first free numeric suffix, so
+ * the import can neither redeclare the module's name nor capture a global it reads.
+ */
+function builtinRegistryBindings(names: ReadonlyArray<string>, used: ReadonlySet<string>): string {
+  const registry = 'builtinMdxComponents'
+  let alias = registry
+  for (let suffix = 2; used.has(alias); suffix++) alias = `${registry}${suffix}`
   return [
-    "import { builtinMdxComponents } from '@/components/mdx/builtin-components';",
-    `const { ${unresolved.join(', ')} } = builtinMdxComponents;`,
-    source,
+    `import { ${alias === registry ? registry : `${registry} as ${alias}`} } from '@/components/mdx/builtin-components';`,
+    `const { ${names.join(', ')} } = ${alias};`,
   ].join('\n')
+}
+
+/** Warning for a built-in tag that cannot be bound without replacing a JS global the module also uses. */
+function shadowedBuiltinMessage(file: string, names: ReadonlyArray<string>): string {
+  const tags = names.map((name) => `<${name}>`).join(', ')
+  return `${file} renders ${tags} as a Thally built-in component but also uses the JavaScript global of the same name, so the tag was left unbound. Rename the component or the global use in the source.`
 }
 
 function imports(statement: ts.ImportDeclaration): Array<Binding> {
@@ -897,6 +942,7 @@ export function createComponentMigrator(siteRoot: string, confinementRoot: strin
     // registered component or consume the successful-copy budget.
     const staged = new Map<string, RenderedMigrationFile>()
     const stagedWarnings: Array<{ path: string; omitted: number }> = []
+    const stagedShadowed: Array<{ path: string; names: Array<string> }> = []
     /** Code modules awaiting their final prologue: client-ness is settled over the whole graph (see below). */
     const modules = new Map<string, { local: boolean; dependencies: Array<string>; render: (client: boolean) => string }>()
     let stagedBytes = 0
@@ -1033,9 +1079,10 @@ export function createComponentMigrator(siteRoot: string, confinementRoot: strin
         dependencies,
         render: (client) => {
           const prologue = `// @ts-nocheck\n${client ? "'use client';\n" : ''}\n`
+          const implicit = implicitReactImports(ast, (names) => stagedShadowed.push({ path, names }))
           return shebangMatch
-            ? shebangMatch[0] + prologue + implicitReactImports(ast) + '\n' + replaced.slice(shebangMatch[0].length)
-            : prologue + implicitReactImports(ast) + '\n' + replaced
+            ? shebangMatch[0] + prologue + implicit + '\n' + replaced.slice(shebangMatch[0].length)
+            : prologue + implicit + '\n' + replaced
         },
       })
     }
@@ -1058,6 +1105,7 @@ export function createComponentMigrator(siteRoot: string, confinementRoot: strin
     }
     for (const [path, module] of modules) staged.set(path, { path, content: module.render(clientModules.has(path)) })
     for (const [path, file] of staged) copied.set(path, file)
+    for (const { path, names } of stagedShadowed) warn(shadowedBuiltinMessage(relative(root, path).replace(/\\/g, '/'), names), path)
     for (const { path, omitted } of stagedWarnings) {
       warn(`Site-authored CSS module ${relative(root, path).replace(/\\/g, '/')} has ${omitted} global-only selector branch(es) that cannot be copied into Thally CSS Modules; those styles were omitted.`, path)
     }
@@ -1775,7 +1823,9 @@ export function createComponentMigrator(siteRoot: string, confinementRoot: strin
       ].join('\n')
       // A single leading directive: `inlineSource` no longer carries its own,
       // or Next rejects the file ("use client" must be the first statement).
-      copied.set(path, { path, content: `'use client';\n${implicitReactImports(sourceFile(inlineSource, 'inline.jsx'))}\n${inlineSource}` })
+      const implicit = implicitReactImports(sourceFile(inlineSource, 'inline.jsx'),
+        (names) => warn(shadowedBuiltinMessage(relative(root, currentFile).replace(/\\/g, '/'), names), currentFile))
+      copied.set(path, { path, content: `'use client';\n${implicit}\n${inlineSource}` })
       copiedBytes += Buffer.byteLength(inlineSource)
       for (const { node, name } of extracted) {
         edits.push({ start: node.position!.start.offset!, end: node.position!.end.offset!, value: `<${register(path, name)} />` })

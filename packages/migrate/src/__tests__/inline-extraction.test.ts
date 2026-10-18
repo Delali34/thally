@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 
 import ts from 'typescript'
 import { createComponentMigrator } from '../components.js'
-import { isSelfContainedFunction } from '../inline-extraction.js'
+import { isSelfContainedFunction, pageScopeNames } from '../inline-extraction.js'
 import type { MigrationWarning } from '../types.js'
 
 const roots: Array<string> = []
@@ -334,5 +334,20 @@ describe('isSelfContainedFunction destructuring', () => {
     ['for-of target', '() => { let C; for ({ constructor: C } of [String]) return C }'],
   ])('rejects %s', (_name, source) => {
     expect(check(source)).toBe(false)
+  })
+})
+
+describe('pageScopeNames', () => {
+  it('includes a `var` hoisted out of a block, loop, try or switch, and leaves out one inside a function or class', () => {
+    const names = pageScopeNames([[
+      'if (true) { var fromBlock = 1; var { a: [fromPattern] } = { a: [2] } }',
+      'for (var fromLoop of []) {}',
+      'try { var fromTry = 1 } finally { var fromFinally = 2 }',
+      'switch (1) { case 1: var fromCase = 1 }',
+      'const arrow = () => { var inArrow = 1 }',
+      'class A { m() { var inMethod = 1 } static { var inStatic = 1 } }',
+      'if (true) { let inLet = 1; function inFunction() {} }',
+    ].join('\n')])
+    expect([...names].sort()).toEqual(['A', 'arrow', 'fromBlock', 'fromCase', 'fromFinally', 'fromLoop', 'fromPattern', 'fromTry'])
   })
 })

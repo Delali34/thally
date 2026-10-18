@@ -317,8 +317,8 @@ interface DocsJsonConfig {
   navbar?: DocsJsonNavbar
   /** Page-menu entries (`copy`, `view`, `chatgpt`, `claude`, `perplexity`) in display order. */
   contextual?: { options?: Array<string> }
-  /** Hex brand colours per mode (six digits); `primary` fills buttons, `accent` links and highlights. */
-  colors?: Partial<Record<'light' | 'dark', { primary?: string; accent?: string }>>
+  /** Hex brand colours per mode (six digits); `primary` fills buttons, `accent` links and highlights, `background` is the canvas. */
+  colors?: Partial<Record<'light' | 'dark', { primary?: string; accent?: string; background?: string }>>
   /** Public favicon fallback when no managed or admin asset is configured. */
   favicon?: { light: string; dark?: string }
   footer?: DocsJsonFooter

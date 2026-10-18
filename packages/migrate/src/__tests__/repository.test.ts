@@ -1104,6 +1104,145 @@ describe('Mintlify repository migration', () => {
       expect(messages).toContain('javascript:alert(1)')
       expect(messages).toContain('api.mdx.auth')
     })
+
+    describe('spec named by file stem', () => {
+      const spec = (path: string) => `openapi: 3.1.0\ninfo: { title: T, version: "1" }\npaths:\n  ${path}:\n    post: { summary: S, responses: { '200': { description: ok } } }\n`
+      const build = (files: Record<string, string>, docs: Record<string, unknown>) => {
+        const root = mkdtempSync(join(tmpdir(), 'thally-migrate-stem-'))
+        writeFileSync(join(root, 'docs.json'), JSON.stringify(docs))
+        for (const [name, content] of Object.entries(files)) {
+          mkdirSync(dirname(join(root, name)), { recursive: true })
+          writeFileSync(join(root, name), content)
+        }
+        return migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/acme/docs', platform: 'mintlify' })
+      }
+      const apiPage = (ref: string) => `---\ntitle: P\nopenapi: "${ref}"\n---\n`
+      const openapiOf = (bundle: ReturnType<typeof build>, id: string) => bundle.pages.find((page) => page.id === id)?.openapi
+      const messages = (bundle: ReturnType<typeof build>) => bundle.warnings.map((warning) => warning.message)
+      const boundSources = (bundle: ReturnType<typeof build>) => bundle.docsConfig.tabs.flatMap((tab) => (tab.api ? [tab.api.source] : []))
+
+      it('rewrites a stem, in any letter case, to the migrated spec like a file name or path', () => {
+        const bundle = build({
+          'openapi-a.json': '{"openapi":"3.1.0","info":{"title":"A","version":"1"},"paths":{}}',
+          'specs/openapi-b.yaml': spec('/widgets'),
+          'by-stem.mdx': apiPage('openapi-b POST /widgets'),
+          'by-case.mdx': apiPage('OpenAPI-B post /widgets'),
+          'by-name.mdx': apiPage('openapi-b.yaml POST /widgets'),
+          'by-path.mdx': apiPage('specs/openapi-b.yaml POST /widgets'),
+          'other.mdx': apiPage('./openapi-a POST /things'),
+        }, { navigation: { tabs: [
+          { tab: 'Guides', pages: ['by-stem', 'by-case', 'by-name', 'by-path', 'other'] },
+          { tab: 'API A', openapi: 'openapi-a.json' },
+          { tab: 'API B', openapi: 'specs/openapi-b.yaml' },
+        ] } })
+        expect(['by-stem', 'by-case', 'by-name', 'by-path'].map((id) => openapiOf(bundle, id))).toEqual([
+          'openapi/openapi-b.yaml POST /widgets',
+          'openapi/openapi-b.yaml post /widgets',
+          'openapi/openapi-b.yaml POST /widgets',
+          'openapi/openapi-b.yaml POST /widgets',
+        ])
+        expect(openapiOf(bundle, 'other')).toBe('openapi/openapi-a.json POST /things')
+        expect(messages(bundle).filter((message) => /not migrated/.test(message))).toEqual([])
+      })
+
+      it('leaves a stem that names several specs as authored and lists the candidates', () => {
+        const bundle = build({
+          'a/openapi.yml': spec('/one'),
+          'b/openapi.json': JSON.stringify({ openapi: '3.1.0', info: { title: 'B', version: '1' }, paths: { '/two': { post: { responses: { 200: { description: 'ok' } } } } } }),
+          'both.mdx': apiPage('openapi POST /one'),
+          'exact.mdx': apiPage('a/openapi.yml POST /one'),
+        }, { navigation: { tabs: [
+          { tab: 'Guides', pages: ['both', 'exact'] },
+          { tab: 'API A', openapi: 'a/openapi.yml' },
+          { tab: 'API B', openapi: 'b/openapi.json' },
+        ] } })
+        expect(openapiOf(bundle, 'both')).toBe('openapi POST /one')
+        expect(openapiOf(bundle, 'exact')).toBe('openapi/openapi.yml POST /one')
+        const ambiguous = messages(bundle).filter((message) => message.includes('"both"'))
+        expect(ambiguous).toHaveLength(1)
+        expect(ambiguous[0]).toContain('a/openapi.yml')
+        expect(ambiguous[0]).toContain('b/openapi.json')
+        expect(ambiguous[0]).toMatch(/full path/)
+        expect(ambiguous[0]).not.toMatch(/not migrated/)
+      })
+
+      it('resolves a name against the source file names, not the names the specs were saved under', () => {
+        const json = (path: string) => JSON.stringify({ openapi: '3.1.0', info: { title: 'T', version: '1' }, paths: { [path]: { post: { responses: { 200: { description: 'ok' } } } } } })
+        const bundle = build({
+          'a/spec.json': json('/one'),
+          'b/spec.json': json('/two'),
+          'both.mdx': apiPage('spec POST /one'),
+          'exact.mdx': apiPage('b/spec.json POST /two'),
+          'renamed.mdx': apiPage('b-spec POST /two'),
+        }, { navigation: { tabs: [
+          { tab: 'Guides', pages: ['both', 'exact', 'renamed'] },
+          { tab: 'API A', openapi: 'a/spec.json' },
+          { tab: 'API B', openapi: 'b/spec.json' },
+        ] } })
+        // `b/spec.json` is saved as `b-spec.json` to avoid a collision; the name `spec` still fits both sources.
+        expect(boundSources(bundle).sort()).toEqual(['openapi/b-spec.json', 'openapi/spec.json'])
+        expect(openapiOf(bundle, 'both')).toBe('spec POST /one')
+        expect(openapiOf(bundle, 'exact')).toBe('openapi/b-spec.json POST /two')
+        // The saved name is not a name the source ever had.
+        expect(openapiOf(bundle, 'renamed')).toBe('b-spec POST /two')
+        const ambiguous = messages(bundle).filter((message) => message.includes('"both"'))
+        expect(ambiguous).toHaveLength(1)
+        expect(ambiguous[0]).toContain('a/spec.json')
+        expect(ambiguous[0]).toContain('b/spec.json')
+        expect(messages(bundle).some((message) => message.includes('"renamed"') && /not migrated/.test(message))).toBe(true)
+      })
+
+      it('says several files match, not that none exists, when no declared spec resolves the stem', () => {
+        const bundle = build({
+          'a/openapi.yml': spec('/one'),
+          'b/openapi.json': '{"openapi":"3.1.0","info":{"title":"B","version":"1"},"paths":{}}',
+          'declared.yaml': spec('/two'),
+          'both.mdx': apiPage('openapi POST /one'),
+        }, { api: { openapi: 'declared.yaml' }, navigation: { pages: ['both'] } })
+        expect(openapiOf(bundle, 'both')).toBe('openapi POST /one')
+        const warning = messages(bundle).find((message) => message.includes('"both"'))
+        expect(warning).toContain('a/openapi.yml')
+        expect(warning).toContain('b/openapi.json')
+        expect(warning).not.toContain('no file exists')
+      })
+
+      it('binds every spec of one API dropdown that pages name by stem (two specs, one tab)', () => {
+        const tasks = Array.from({ length: 3 }, (_, index) => `management/tasks/t${index}`)
+        const bundle = build({
+          'openapi.yml': spec('/api/v3/batches'),
+          'v3-openapi.yaml': spec('/api/v1/tasks/{taskIdentifier}/trigger'),
+          'management/batches/create.mdx': apiPage('openapi POST /api/v3/batches'),
+          'management/batches/create-again.mdx': apiPage('openapi POST /api/v3/batches'),
+          'management/tasks/by-path.mdx': apiPage('v3-openapi.yaml POST /api/v1/tasks/{taskIdentifier}/trigger'),
+          ...Object.fromEntries(tasks.map((id) => [`${id}.mdx`, apiPage('v3-openapi POST /api/v1/tasks/{taskIdentifier}/trigger')])),
+          'introduction.mdx': '---\ntitle: Intro\n---\n',
+        }, {
+          api: { openapi: ['openapi.yml', 'v3-openapi.yaml'] },
+          navigation: { dropdowns: [
+            { dropdown: 'Documentation', pages: ['introduction'] },
+            { dropdown: 'API reference', groups: [{ group: 'Management', pages: ['management/batches/create', 'management/batches/create-again', 'management/tasks/by-path', ...tasks] }] },
+          ] },
+        })
+        expect(boundSources(bundle).sort()).toEqual(['openapi/openapi.yml', 'openapi/v3-openapi.yaml'])
+        const hidden = bundle.docsConfig.tabs.filter((tab) => tab.api?.source === 'openapi/v3-openapi.yaml')
+        expect(hidden).toEqual([expect.objectContaining({ hidden: true })])
+        const visible = bundle.docsConfig.tabs.filter((tab) => tab.api && !tab.hidden)
+        expect(visible.map((tab) => tab.api?.source)).toEqual(['openapi/openapi.yml'])
+        expect(bundle.assets.map((asset) => asset.path)).toEqual(expect.arrayContaining(['openapi/openapi.yml', 'openapi/v3-openapi.yaml']))
+        const refs = bundle.pages.flatMap((page) => (page.openapi ? [page.openapi] : []))
+        expect(refs).toHaveLength(tasks.length + 3)
+        for (const ref of refs) expect(ref).toMatch(/^openapi\/(?:openapi\.yml|v3-openapi\.yaml) POST \//)
+        expect(openapiOf(bundle, 'management/batches/create')).toBe('openapi/openapi.yml POST /api/v3/batches')
+        expect(openapiOf(bundle, 'management/tasks/t1')).toBe('openapi/v3-openapi.yaml POST /api/v1/tasks/{taskIdentifier}/trigger')
+        expect(openapiOf(bundle, 'management/tasks/by-path')).toBe('openapi/v3-openapi.yaml POST /api/v1/tasks/{taskIdentifier}/trigger')
+        const all = messages(bundle)
+        expect(all.filter((message) => /not migrated|could not be loaded/.test(message))).toEqual([])
+        const perTab = all.filter((message) => message.includes('already uses another OpenAPI spec'))
+        expect(perTab).toHaveLength(1)
+        expect(perTab[0]).not.toMatch(/was not added/)
+        expect(perTab[0]).toContain('v3-openapi.yaml')
+      })
+    })
   })
 
   it('resolves an object-form `openapi: { source, directory }` group reference and warns that the directory scoping is lost', () => {

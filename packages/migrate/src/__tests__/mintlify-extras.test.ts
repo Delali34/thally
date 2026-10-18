@@ -281,6 +281,128 @@ describe('config mapping', () => {
     expect(site({ 'docs.json': JSON.stringify({ ...nav, colors: { primary: 'red' } }), ...intro }).docsConfig.colors).toBeUndefined()
   })
 
+  describe('brand logo, favicon and background', () => {
+    const png = Buffer.from('PNGDATA')
+    const brandWarning = (bundle: MigrationBundle) => bundle.warnings.filter((warning) => /Brand asset/.test(warning.message))
+
+    it('uses a dark-only imported logo for both modes and says so', () => {
+      const bundle = site({
+        'docs.json': JSON.stringify({ ...nav, logo: { light: '/logo/light.png', dark: '/logo/dark.png' } }),
+        'logo/dark.png': png,
+        ...intro,
+      })
+      expect(bundle.docsConfig.navbar?.logo).toEqual({ light: '/logo/dark.png', dark: '/logo/dark.png', showTitle: false })
+      const [warning] = brandWarning(bundle)
+      expect(warning.code).toBe('unsupported-config')
+      expect(warning.message).toContain('/logo/light.png')
+      expect(warning.message).not.toContain('/logo/dark.png.')
+      expect(warning.message).toMatch(/imported logo \(\/logo\/dark\.png\) is used for both light and dark mode/)
+    })
+
+    it('keeps a light-only imported logo for both modes and names the missing dark file', () => {
+      const bundle = site({
+        'docs.json': JSON.stringify({ ...nav, logo: { light: '/logo/light.png', dark: '/logo/dark.png' } }),
+        'logo/light.png': png,
+        ...intro,
+      })
+      expect(bundle.docsConfig.navbar?.logo).toEqual({ light: '/logo/light.png', showTitle: false })
+      expect(brandWarning(bundle)[0].message).toMatch(/not imported: \/logo\/dark\.png\..*imported logo \(\/logo\/light\.png\) is used for both/)
+    })
+
+    it('leaves a logo with both variants imported unchanged and silent', () => {
+      const bundle = site({
+        'docs.json': JSON.stringify({ ...nav, logo: { light: '/logo/light.png', dark: '/logo/dark.png' } }),
+        'logo/light.png': png,
+        'logo/dark.png': png,
+        ...intro,
+      })
+      expect(bundle.docsConfig.navbar?.logo).toEqual({ light: '/logo/light.png', dark: '/logo/dark.png', showTitle: false })
+      expect(brandWarning(bundle)).toEqual([])
+    })
+
+    it('never points the logo at a file that was not imported', () => {
+      const bundle = site({
+        'docs.json': JSON.stringify({ ...nav, logo: { light: '/logo/light.png', dark: '/logo/dark.png' } }),
+        ...intro,
+      })
+      expect(bundle.docsConfig.navbar?.logo).toBeUndefined()
+      expect(brandWarning(bundle)[0].message).not.toContain('used for both')
+    })
+
+    it('uses a dark-only logo from a legacy mint.json', () => {
+      const bundle = site({
+        'mint.json': JSON.stringify({ ...nav, logo: { light: '/logo/light.png', dark: '/logo/dark.png' } }),
+        'logo/dark.png': png,
+        ...intro,
+      })
+      expect(bundle.docsConfig.navbar?.logo).toMatchObject({ light: '/logo/dark.png', dark: '/logo/dark.png' })
+    })
+
+    it('uses a single imported favicon variant for both modes', () => {
+      const bundle = site({
+        'docs.json': JSON.stringify({ ...nav, favicon: { light: '/icons/light.png', dark: '/icons/dark.png' } }),
+        'icons/dark.png': png,
+        ...intro,
+      })
+      expect(bundle.docsConfig.favicon).toEqual({ light: '/icons/dark.png', dark: '/icons/dark.png' })
+      expect(brandWarning(bundle)[0].message).toMatch(/imported favicon \(\/icons\/dark\.png\) is used for both/)
+    })
+
+    it('warns that logo.href is dropped because the header logo always links home', () => {
+      const withHref = (href: string) => site({
+        'docs.json': JSON.stringify({ ...nav, logo: { light: '/logo/light.png', href } }),
+        'logo/light.png': png,
+        ...intro,
+      })
+      const warning = withHref('https://trigger.dev').warnings.find((entry) => /logo\.href/.test(entry.message))
+      expect(warning?.code).toBe('unsupported-config')
+      expect(warning?.message).toContain('https://trigger.dev')
+      expect(warning?.message).toMatch(/navbar link/)
+      expect(withHref('/').warnings.some((entry) => /logo\.href/.test(entry.message))).toBe(false)
+    })
+
+    it('maps background.color to per-mode canvas colours, expanding three-digit hex', () => {
+      const bundle = site({
+        'docs.json': JSON.stringify({ ...nav, background: { color: { light: '#fff', dark: '#121317' } } }),
+        ...intro,
+      })
+      expect(bundle.docsConfig.colors).toEqual({ light: { background: '#ffffff' }, dark: { background: '#121317' } })
+      expect(bundle.docsConfig.background).toBeUndefined()
+      expect(bundle.warnings.filter((warning) => /background/.test(warning.message))).toEqual([])
+    })
+
+    it('merges background colours into the brand colours instead of replacing them', () => {
+      const bundle = site({
+        'docs.json': JSON.stringify({ ...nav, colors: { primary: '#F60' }, background: { color: { dark: '#121317' } } }),
+        ...intro,
+      })
+      expect(bundle.docsConfig.colors).toEqual({
+        light: { accent: '#ff6600', primary: '#ff6600' },
+        dark: { accent: '#ff6600', primary: '#ff6600', background: '#121317' },
+      })
+    })
+
+    it('keeps the valid background colour and warns about the invalid one', () => {
+      const bundle = site({
+        'docs.json': JSON.stringify({ ...nav, background: { color: { light: 'hotpink', dark: '#121317' } } }),
+        ...intro,
+      })
+      expect(bundle.docsConfig.colors).toEqual({ dark: { background: '#121317' } })
+      const warning = bundle.warnings.find((entry) => /background\.color\.light/.test(entry.message))
+      expect(warning?.code).toBe('unsupported-config')
+      expect(warning?.message).toContain('hotpink')
+    })
+
+    it('does not emit an empty background object', () => {
+      for (const background of [{}, { color: {} }, { color: { light: 'nope' } }, { decoration: 'sparkles' }]) {
+        const bundle = site({ 'docs.json': JSON.stringify({ ...nav, background }), ...intro })
+        expect(bundle.docsConfig.background).toBeUndefined()
+        expect(bundle.docsConfig.colors).toBeUndefined()
+      }
+      expect(site({ 'docs.json': JSON.stringify({ ...nav, background: { decoration: 'grid' } }), ...intro }).docsConfig.background).toEqual({ decoration: 'grid' })
+    })
+  })
+
   it('hides the breadcrumb trail because Mintlify pages show only a group eyebrow', () => {
     expect(site({ 'docs.json': JSON.stringify(nav), ...intro }).docsConfig.breadcrumbs).toBe(false)
   })
@@ -1072,6 +1194,53 @@ describe('OpenAPI specs named only by page frontmatter', () => {
     expect(codes(bundle, 'unsupported-config').some((item) => /not referenced from docs.json/.test(item.message))).toBe(false)
   })
 
+  it('saves two specs that share a file name under distinct names even when docs.json binds both to one tab', () => {
+    const only = (path: string): string => JSON.stringify({ openapi: '3.0.0', info: { title: 'T', version: '1' }, paths: { [path]: { get: { summary: path } } } })
+    const bundle = site({
+      'docs.json': JSON.stringify({ api: { openapi: ['a/spec.json', 'b/spec.json'] }, navigation: { pages: ['pa', 'pb'] } }),
+      'a/spec.json': only('/a'),
+      'b/spec.json': only('/b'),
+      'pa.mdx': page('A', 'openapi: "a/spec.json GET /a"\n'),
+      'pb.mdx': page('B', 'openapi: "b/spec.json GET /b"\n'),
+    })
+    const paths = (path: string): Array<string> => Object.keys(JSON.parse(String(bundle.assets.find((asset) => asset.path === path)!.content)).paths)
+    expect(bundle.assets.map((asset) => asset.path).filter((path) => path.startsWith('openapi/')).sort()).toEqual(['openapi/b-spec.json', 'openapi/spec.json'])
+    expect(paths('openapi/spec.json')).toEqual(['/a'])
+    expect(paths('openapi/b-spec.json')).toEqual(['/b'])
+    expect(bundle.pages.find((entry) => entry.id === 'pa')?.openapi).toBe('openapi/spec.json GET /a')
+    expect(bundle.pages.find((entry) => entry.id === 'pb')?.openapi).toBe('openapi/b-spec.json GET /b')
+    expect(bundle.docsConfig.tabs.flatMap((tab) => tab.api ? [tab.api.source] : []).sort()).toEqual(['openapi/b-spec.json', 'openapi/spec.json'])
+  })
+
+  it('names the spec the repository scan picks and a page-only spec of the same file name from one allocator', () => {
+    const only = (title: string, scanned: boolean): string => scanned
+      ? JSON.stringify({ openapi: '3.0.0', info: { title, version: '1' }, paths: { '/x': { get: { summary: 'X' } } } })
+      : JSON.stringify({ info: { title, version: '1' }, paths: { '/x': { get: { summary: 'X' } } }, openapi: '3.0.0' })
+    const bundle = site({
+      'docs.json': JSON.stringify({ navigation: { pages: ['pub'] } }),
+      'a/openapi.json': only('DEFAULT-A', true),
+      'b/openapi.json': only('PAGE-B', false),
+      'pub.mdx': page('Pub', 'openapi: "./b/openapi.json GET /x"\n'),
+    })
+    const titleAt = (path: string): string => JSON.parse(String(bundle.assets.find((asset) => asset.path === path)!.content)).info.title
+    const bound = bundle.pages.find((entry) => entry.id === 'pub')!.openapi!.split(' ')[0]
+    expect(titleAt(bound)).toBe('PAGE-B')
+    expect(bundle.docsConfig.tabs.filter((tab) => tab.api).map((tab) => [tab.hidden === true, titleAt(tab.api!.source)])).toEqual([[false, 'DEFAULT-A'], [true, 'PAGE-B']])
+  })
+
+  it('treats names that differ only in letter case as one name when saving specs', () => {
+    const only = (path: string): string => JSON.stringify({ openapi: '3.0.0', info: { title: 'T', version: '1' }, paths: { [path]: { get: { summary: path } } } })
+    const bundle = site({
+      'docs.json': JSON.stringify({ api: { openapi: ['a/Spec.json', 'b/spec.json'] }, navigation: { pages: ['pa'] } }),
+      'a/Spec.json': only('/a'),
+      'b/spec.json': only('/b'),
+      'pa.mdx': page('A', 'openapi: "a/Spec.json GET /a"\n'),
+    })
+    const names = bundle.assets.map((asset) => asset.path).filter((path) => path.startsWith('openapi/'))
+    expect(new Set(names.map((path) => path.toLowerCase())).size).toBe(2)
+    expect(bundle.pages.find((entry) => entry.id === 'pa')?.openapi).toBe('openapi/Spec.json GET /a')
+  })
+
   it('keeps a spec out of the published output when only a withheld page names it', () => {
     const bundle = site(files({
       'pub.mdx': page('Pub'),
@@ -1126,6 +1295,171 @@ describe('operations documented only on access-restricted pages', () => {
     const out = specContent(bundle)
     expect(out.paths['/internal'].get['x-excluded']).toBe(true)
     expect(out.paths['/x'].get['x-excluded']).toBeUndefined()
+  })
+
+  it('withholds an operation a public page names without a spec when the site has several, and says so', () => {
+    const bundle = site({
+      'docs.json': JSON.stringify({ api: { openapi: ['first.json', 'second.json'] }, navigation: { pages: ['pub', 's'] } }),
+      'first.json': spec,
+      'second.json': spec,
+      'pub.mdx': page('Pub', 'openapi: "GET /internal"\n'),
+      's.mdx': page('S', 'groups: [admin]\nopenapi: "second.json GET /internal"\n'),
+    })
+    const out = JSON.parse(String(bundle.assets.find((asset) => asset.path === 'openapi/second.json')!.content))
+    expect(out.paths['/internal'].get['x-excluded']).toBe(true)
+    expect(codes(bundle, 'gated-page').some((item) => /GET \/internal\) are also named by a published page or navigation entry that does not say which spec/.test(item.message))).toBe(true)
+  })
+
+  describe('spec named by file stem', () => {
+    const excluded = (bundle: MigrationBundle, path: string, operation: string): unknown =>
+      JSON.parse(String(bundle.assets.find((asset) => asset.path === path)!.content)).paths[operation].get['x-excluded']
+    const twoSpecs = {
+      'a/spec.json': spec,
+      'b/spec.yaml': spec,
+    }
+
+    it('withholds an operation a restricted page names through the spec file stem', () => {
+      const bundle = site({
+        'docs.json': JSON.stringify({ api: { openapi: 'spec.json' }, navigation: { pages: ['pub', 's'] } }),
+        'spec.json': spec,
+        'pub.mdx': page('Pub', 'openapi: "/spec.json GET /x"\n'),
+        's.mdx': page('S', 'groups: [admin]\nopenapi: "spec GET /internal"\n'),
+      })
+      expect(excluded(bundle, 'openapi/spec.json', '/internal')).toBe(true)
+      expect(excluded(bundle, 'openapi/spec.json', '/x')).toBeUndefined()
+    })
+
+    it('withholds the operation from every spec a restricted stem could name', () => {
+      const bundle = site({
+        'docs.json': JSON.stringify({ api: { openapi: ['a/spec.json', 'b/spec.yaml'] }, navigation: { pages: ['pub', 's'] } }),
+        ...twoSpecs,
+        'pub.mdx': page('Pub', 'openapi: "a/spec.json GET /x"\n'),
+        's.mdx': page('S', 'groups: [admin]\nopenapi: "spec GET /internal"\n'),
+      })
+      for (const path of ['openapi/spec.json', 'openapi/spec.yaml']) {
+        expect(excluded(bundle, path, '/internal')).toBe(true)
+        expect(excluded(bundle, path, '/x')).toBeUndefined()
+      }
+    })
+
+    it('does not let a public page that names several specs keep a restricted operation public', () => {
+      const bundle = site({
+        'docs.json': JSON.stringify({ api: { openapi: ['a/spec.json', 'b/spec.yaml'] }, navigation: { pages: ['pub', 's'] } }),
+        ...twoSpecs,
+        'pub.mdx': page('Pub', 'openapi: "spec GET /internal"\n'),
+        's.mdx': page('S', 'groups: [admin]\nopenapi: "a/spec.json GET /internal"\n'),
+      })
+      expect(excluded(bundle, 'openapi/spec.json', '/internal')).toBe(true)
+      expect(excluded(bundle, 'openapi/spec.yaml', '/internal')).toBeUndefined()
+    })
+
+    it('keeps an operation a public page names through the spec file stem', () => {
+      const bundle = site({
+        'docs.json': JSON.stringify({ api: { openapi: 'spec.json' }, navigation: { pages: ['pub', 's'] } }),
+        'spec.json': spec,
+        'pub.mdx': page('Pub', 'openapi: "spec GET /internal"\n'),
+        's.mdx': page('S', 'groups: [admin]\nopenapi: "/spec.json GET /internal"\n'),
+      })
+      expect(excluded(bundle, 'openapi/spec.json', '/internal')).toBeUndefined()
+    })
+  })
+
+  describe('refs are compared by source identity and one canonical spelling', () => {
+    const published = (bundle: MigrationBundle, path: string): { paths: Record<string, { get: Record<string, unknown> }> } =>
+      JSON.parse(String(bundle.assets.find((asset) => asset.path === path)!.content))
+    const excluded = (bundle: MigrationBundle, path: string, operation: string): unknown => published(bundle, path).paths[operation].get['x-excluded']
+    const tabs = (specs: Array<string>) => JSON.stringify({ navigation: { tabs: [
+      { tab: 'Guides', pages: ['pub', 's'] },
+      ...specs.map((source, index) => ({ tab: `API ${index}`, openapi: source })),
+    ] } })
+
+    it('keeps a restricted operation out of a spec whose file was renamed to avoid a collision', () => {
+      // `b/spec.json` is published as `b-spec.json`, but pages name it by what they wrote in the source.
+      const bundle = site({
+        'docs.json': tabs(['a/spec.json', 'b/spec.json']),
+        'a/spec.json': spec,
+        'b/spec.json': spec,
+        'pub.mdx': page('Pub', 'openapi: "spec GET /internal"\n'),
+        's.mdx': page('S', 'groups: [admin]\nopenapi: "b/spec.json GET /internal"\n'),
+      })
+      expect(excluded(bundle, 'openapi/b-spec.json', '/internal')).toBe(true)
+      expect(excluded(bundle, 'openapi/b-spec.json', '/x')).toBeUndefined()
+      // A restricted page names only B, so the other spec still publishes its operation.
+      expect(excluded(bundle, 'openapi/spec.json', '/internal')).toBeUndefined()
+    })
+
+    it('keeps the operation public in the one spec a public page names by its full path', () => {
+      const bundle = site({
+        'docs.json': tabs(['a/spec.json', 'b/spec.json']),
+        'a/spec.json': spec,
+        'b/spec.json': spec,
+        'pub.mdx': page('Pub', 'openapi: "a/spec.json GET /internal"\n'),
+        's.mdx': page('S', 'groups: [admin]\nopenapi: "spec GET /internal"\n'),
+      })
+      expect(excluded(bundle, 'openapi/spec.json', '/internal')).toBeUndefined()
+      expect(excluded(bundle, 'openapi/b-spec.json', '/internal')).toBe(true)
+    })
+
+    it('does not let a public path that merely ends like another spec path keep that spec\'s operation public', () => {
+      const bundle = site({
+        'docs.json': tabs(['a/spec.json', 'x/a/spec.json']),
+        'a/spec.json': spec,
+        'x/a/spec.json': spec,
+        'pub.mdx': page('Pub', 'openapi: "a/spec.json GET /internal"\n'),
+        's.mdx': page('S', 'groups: [admin]\nopenapi: "x/a/spec.json GET /internal"\n'),
+      })
+      expect(excluded(bundle, 'openapi/spec.json', '/internal')).toBeUndefined()
+      expect(excluded(bundle, 'openapi/x-a-spec.json', '/internal')).toBe(true)
+    })
+
+    it('withholds from the spec a restricted page reaches through a folder that does not exist', () => {
+      const bundle = site({
+        'docs.json': JSON.stringify({ navigation: { pages: ['pub', 's'] } }),
+        'bar/spec.json': spec,
+        'pub.mdx': page('Pub', 'openapi: "bar/spec.json GET /x"\n'),
+        's.mdx': page('S', 'groups: [admin]\nopenapi: "foo/spec.json GET /internal"\n'),
+      })
+      expect(excluded(bundle, 'openapi/spec.json', '/internal')).toBe(true)
+      expect(excluded(bundle, 'openapi/spec.json', '/x')).toBeUndefined()
+    })
+
+    it('does not let a public page naming a spec whose path contains a space keep another spec\'s operation public', () => {
+      const bundle = site({
+        'docs.json': tabs(['my spec.json', 'other.json']),
+        'my spec.json': spec,
+        'other.json': spec,
+        'pub.mdx': page('Pub', 'openapi: "my spec.json GET /internal"\n'),
+        's.mdx': page('S', 'groups: [admin]\nopenapi: "other.json GET /internal"\n'),
+      })
+      expect(excluded(bundle, 'openapi/other.json', '/internal')).toBe(true)
+      expect(excluded(bundle, 'openapi/my spec.json', '/internal')).toBeUndefined()
+    })
+
+    const spellings = ['./spec', './/spec.json', '/./spec', 'spec#section', 'spec?version=3', '.\\spec.json', './SPEC', 'spec.json?v=1#top']
+    for (const config of ['docs.json', 'mint.json'] as const) {
+      for (const spelling of spellings) {
+        it(`withholds an operation a restricted page names as "${spelling}" in ${config}`, () => {
+          const bundle = site({
+            [config]: JSON.stringify(config === 'docs.json' ? { navigation: { pages: ['pub', 's'] } } : { navigation: [{ group: 'G', pages: ['pub', 's'] }] }),
+            'spec.json': spec,
+            'pub.mdx': page('Pub', 'openapi: "spec GET /x"\n'),
+            's.mdx': page('S', `groups: [admin]\nopenapi: "${spelling.replace(/\\/g, '\\\\')} GET /internal"\n`),
+          })
+          expect(excluded(bundle, 'openapi/spec.json', '/internal')).toBe(true)
+          expect(excluded(bundle, 'openapi/spec.json', '/x')).toBeUndefined()
+        })
+      }
+    }
+
+    it('keeps an operation public when a public page names it with the same non-canonical spelling', () => {
+      const bundle = site({
+        'docs.json': JSON.stringify({ navigation: { pages: ['pub', 's'] } }),
+        'spec.json': spec,
+        'pub.mdx': page('Pub', 'openapi: "./spec#section GET /internal"\n'),
+        's.mdx': page('S', 'groups: [admin]\nopenapi: "spec.json GET /internal"\n'),
+      })
+      expect(excluded(bundle, 'openapi/spec.json', '/internal')).toBeUndefined()
+    })
   })
 
   it('applies to a spec listed in docs.json and to YAML specs', () => {

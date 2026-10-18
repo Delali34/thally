@@ -94,7 +94,12 @@ disappearing.
 
 Page `openapi:` frontmatter with a spec prefix
 (`openapi: "specs/openapi-b.yaml GET /widgets/{id}"`) is rewritten to where the
-spec lands in the output (`/openapi-b.yaml GET /widgets/{id}`). A prefix naming
+spec lands in the output (`/openapi-b.yaml GET /widgets/{id}`). As in Mintlify,
+the prefix may name the spec by path, by file name, or by file name without its
+extension (`v3-openapi GET /tasks`); a name that fits more than one spec is kept
+and reported with its candidates. A declared spec that a published page names
+but that cannot be its tab's spec is bound through a hidden tab, so the page
+still renders its endpoint. A prefix naming
 a spec that was not migrated is kept and reported. Manual API pages keep their
 `api:` and `authMethod:` frontmatter, and `api.mdx.server` / `api.mdx.auth` map
 into `docs.json`; invalid values are dropped with a warning.

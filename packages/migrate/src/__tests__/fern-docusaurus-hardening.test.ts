@@ -620,6 +620,14 @@ describe('assets used by quarantined pages', () => {
     expect(bundle.docsConfig.navbar?.logo).toMatchObject({ light: '/assets/logo.png' })
   })
 
+  it('uses a dark-only imported Fern logo for both modes', () => {
+    const bundle = fernSite('logo:\n  light: assets/light.png\n  dark: assets/dark.png\nnavigation:\n  - page: Live\n    path: live.mdx\n', {
+      'live.mdx': '# Live\n\nPublic content.\n',
+      'assets/dark.png': 'dark logo',
+    })
+    expect(bundle.docsConfig.navbar?.logo).toMatchObject({ light: '/assets/dark.png', dark: '/assets/dark.png' })
+  })
+
   it.each([false, true])('ignores restricted Fern config asset references (public sharing: %s)', (shared) => {
     const bundle = fernSite(`logo: assets/open.png\nnavigation:\n  - page: Public\n    path: public.mdx\n  - section: Private\n    viewers: [admin]\n    icon: /assets/secret.png\n    contents:\n      - page: Secret\n        path: secret.mdx\n`, {
       'public.mdx': `# Public\n${shared ? '![s](/assets/secret.png)' : ''}\n`,
