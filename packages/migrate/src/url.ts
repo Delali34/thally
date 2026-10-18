@@ -16,6 +16,7 @@ import { parseMarkdownPage } from './mdx.js'
 import { addMintlifyDirectoryRedirects, buildNavigationFromPages, projectMintlifyNavigation } from './navigation.js'
 import { pageIdFromReference } from './path.js'
 import { migrationImageAttribute, migrationImageCandidates, migrationImageUrl, renderMigrationSrcset } from './url-images.js'
+import { projectMigrationMedia } from './url-media.js'
 import { dropConflictingRedirects, dropUnroutableRedirects } from './redirects.js'
 import type {
   MigrationBundle,
@@ -42,14 +43,14 @@ const PORTABLE_MDX_COMPONENTS = new Set([
   'RequestExample', 'ResponseExample', 'ResponseField', 'Step', 'Steps',
   'Tab', 'Tabs', 'Terminal', 'TerminalInput', 'TerminalOutput', 'Tile', 'TileGroup',
   'Tip', 'Tooltip', 'Tree', 'Update', 'Video', 'View', 'Visibility', 'Warning', 'YouTube',
-  'picture', 'source',
+  'picture', 'source', 'video',
 ])
 const LOCALE_CODES = new Set([
   'ar', 'cs', 'da', 'de', 'el', 'es', 'fi', 'fr', 'he', 'hi', 'hu', 'id',
   'it', 'ja', 'ko', 'ms', 'nl', 'no', 'pl', 'pt', 'ro', 'ru', 'sk', 'sv',
   'th', 'tr', 'uk', 'vi', 'zh', 'pt-br', 'zh-hans', 'zh-hant',
 ])
-const PORTABLE_URL_PROPS = 'href|src|img|primaryHref|secondaryHref'
+const PORTABLE_URL_PROPS = 'href|src|poster|img|primaryHref|secondaryHref'
 const PORTABLE_URL_PROP_NAMES = new Set(PORTABLE_URL_PROPS.split('|'))
 // Recognize observed theme controls by exact labels; unknown/local custom
 // controls remain available for explicit review instead of being guessed away.
@@ -605,6 +606,10 @@ function sanitizeMarkdownUrls(value: string): string | null {
         hasUnsafeMdxSyntax = true
         return
       }
+      if (node.name === 'video' && node.children?.length) {
+        hasUnsafeMdxSyntax = true
+        return
+      }
       for (const attribute of node.attributes ?? []) {
         if (attribute.type !== 'mdxJsxAttribute' || !attribute.name
           || /^on[A-Z]/.test(attribute.name)) {
@@ -640,6 +645,19 @@ function sanitizeMarkdownUrls(value: string): string | null {
             if (/^srcset$/i.test(attribute.name)) migrationImageCandidates(decodeHtmlAttribute(attribute.value), new URL('https://migration.invalid'))
             if (attribute.name === 'src') migrationImageUrl(decodeHtmlAttribute(attribute.value), new URL('https://migration.invalid'))
           } catch { hasUnsafeMdxSyntax = true; return }
+        }
+        if (node.name === 'video') {
+          const isBoolean = ['controls', 'muted', 'autoPlay', 'loop', 'playsInline'].includes(attribute.name)
+          const isText = ['src', 'poster', 'title'].includes(attribute.name)
+          if ((isBoolean && typeof staticValue !== 'boolean')
+            || (isText && typeof attribute.value !== 'string') || (!isBoolean && !isText)) {
+            hasUnsafeMdxSyntax = true
+            return
+          }
+          if (attribute.name === 'src' || attribute.name === 'poster') {
+            try { migrationImageUrl(decodeHtmlAttribute(attribute.value as string), new URL('https://migration.invalid')) }
+            catch { hasUnsafeMdxSyntax = true; return }
+          }
         }
       }
     }
@@ -785,7 +803,10 @@ export function sanitizeRemoteMarkdown(body: string): string | null {
     .replace(/\{\/\*[\s\S]*?\*\/\}/g, '')
     .replace(/<(?:https?:\/\/|mailto:)[^>]+>/gi, '')
     .replace(/(`+)[\s\S]*?\1/g, '')
-  if (/^\s*(?:import|export)\s/m.test(executable)) return null
+  // Match ESM-shaped lines without consuming paragraph separators. API paths
+  // can contain the standalone segment "import" or "export" as ordinary copy;
+  // actual ESM nodes have already been rejected by the parsed syntax gate.
+  if (/^[\t ]*(?:import|export)[\t ]/m.test(executable)) return null
   // A public Markdown endpoint is still attacker-controlled MDX. Preserve
   // known documentation primitives and JSON-literal props, but never compile
   // executable expressions, raw HTML, event handlers, or local components.
@@ -924,8 +945,8 @@ function stripMintlifyDocumentationIndex(body: string): string {
 
 /**
  * Extract one unambiguous publisher-declared operation from a bounded literal
- * code fence. Optional source filenames are metadata only: callers choose local
- * asset names and never fetch or write the publisher's filename.
+ * code fence. Optional source filenames and bounded spec aliases are metadata
+ * only: callers choose local asset names and never fetch or write these hints.
  */
 export function extractEmbeddedOpenApi(content: string): {
   content: string
@@ -937,7 +958,7 @@ export function extractEmbeddedOpenApi(content: string): {
     const root = embeddedOpenApiParser.parse(content) as RemoteMarkdownNode
     const candidates = (root.children ?? []).flatMap((node) => {
       if (node.type !== 'code' || !/^(?:yaml|yml|json)$/i.test(node.lang ?? '')) return []
-      const metadata = node.meta?.match(/^(?:(\S+\.(?:yaml|yml|json))\s+)?(delete|get|head|options|patch|post|put|trace)\s+(\/\S+)\s*$/i)
+      const metadata = node.meta?.match(/^(?:((?:\S+\.(?:yaml|yml|json)|[A-Za-z][A-Za-z0-9_-]{0,127}))\s+)?(delete|get|head|options|patch|post|put|trace)\s+(\/\S+)\s*$/i)
       return metadata ? [{ node, method: metadata[2].toUpperCase(), path: metadata[3] }] : []
     })
     if (candidates.length !== 1) return { content }
@@ -1112,6 +1133,13 @@ export function migrationHtmlArticle(body: string) {
     '.theme-doc-version-badge', '.theme-doc-breadcrumbs', '.theme-doc-toc-mobile', '.table-of-contents',
     '.chat-assistant-floating-input', '.chat-assistant-sheet', '#chat-assistant-sheet', '#chat-assistant-textarea',
   ].join(',')).remove()
+  root.find('div[data-component-part="code-group-tab-content"]').each((_index, element) => {
+    // API example pickers can render their literal payload in a div instead
+    // of a pre. Normalize only this explicit code marker, before both source
+    // evidence and conversion read it, so whitespace and executable-looking
+    // examples remain code. Existing pre blocks must never become nested.
+    if ($(element).parents('pre').length === 0 && $(element).find('pre').length === 0) element.name = 'pre'
+  })
   const permalinkSelectors = MINTLIFY_ARTICLE_LABELS.map((labels) => `a[aria-label="${labels.permalink}"]`)
   root.find([...permalinkSelectors, 'h1 .hash-link', 'h2 .hash-link', 'h3 .hash-link', 'h4 .hash-link', 'h5 .hash-link', 'h6 .hash-link'].join(',')).each((_index, link) => {
     const parent = $(link).parent()
@@ -1181,8 +1209,8 @@ export function htmlPage(
     || $('meta[property="og:description"]').attr('content')?.trim()
   let documentHeadingAnchor = ''
   const excludedElements = options.omitDocumentHeading
-    ? 'script,style,noscript,nav,footer,aside,form,button,svg,iframe,object,embed,link,meta'
-    : 'script,style,noscript,nav,header,footer,aside,form,button,svg,iframe,object,embed,link,meta'
+    ? 'script,style,noscript,nav,footer,aside,form,button,svg,object,embed,link,meta'
+    : 'script,style,noscript,nav,header,footer,aside,form,button,svg,object,embed,link,meta'
   root.find(excludedElements).remove()
   root.find('.theme-doc-version-badge,.theme-doc-breadcrumbs,.theme-doc-toc-mobile,.table-of-contents,.hash-link').remove()
   if (options.omitDocumentHeading) {
@@ -1243,6 +1271,14 @@ export function htmlPage(
     // Emit literal task-list syntax rather than escaping its brackets as copy.
     replacement: (_content, node) => (node as HTMLElement).getAttribute('data-thally-static-task-checkbox') === 'checked' ? '[x] ' : '[ ] ',
   })
+  turndown.addRule('migration-authored-paragraph', {
+    filter: (node) => node.nodeName === 'SPAN' && (node as HTMLElement).getAttribute('data-as') === 'p',
+    // Some publishers render authored paragraphs as spans. Their explicit
+    // semantic hint must retain a block boundary: otherwise following copy
+    // joins a picture's closing tag or an accordion's source anchor and can
+    // change the resulting MDX grammar. Ordinary spans remain inline.
+    replacement: (content) => `\n\n${content}\n\n`,
+  })
   const anchor = (element: HTMLElement): string => {
     const value = element.getAttribute('id')
     return options.preserveAnchors && value
@@ -1255,6 +1291,16 @@ export function htmlPage(
       const element = node as HTMLElement
       const heading = element.nodeName.match(/^H([1-6])$/)
       return `\n\n${anchor(element)}${heading ? `${'#'.repeat(Number(heading[1]))} ${content.trim()}` : content}\n\n`
+    },
+  })
+  turndown.addRule('migration-static-media', {
+    filter: (node) => node.nodeName === 'VIDEO' || node.nodeName === 'IFRAME',
+    replacement: (_content, node) => {
+      const element = node as HTMLElement
+      const projected = projectMigrationMedia(element.outerHTML, document.finalUrl)
+      // Capture validation retains an explicit unsupported-content issue for
+      // unknown media. Only a complete projection may become an inert embed.
+      return projected ? `\n\n${anchor(element)}${projected}\n\n` : ''
     },
   })
   if (options.preserveResponsiveImages) {

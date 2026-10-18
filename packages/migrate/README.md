@@ -15,6 +15,12 @@ SVG validator, or `@thallylabs/migrate/url-migration` for the URL runner, render
 and their types. These independent entries avoid tracing repository cloning and
 filesystem discovery into application routes. The root entry remains compatible.
 
+`inferUrlMigrationScope` identifies a documentation mount from same-origin declared
+indexes and sidebar evidence. New URL runs infer this boundary before discovery;
+an explicit `scopePath` remains authoritative. Deep article seeds do not widen a
+mounted documentation tree to its marketing origin. Mintlify configuration page
+IDs resolve against that mount, while ordinary HTML links keep URL semantics.
+
 The returned `checkpoint` is JSON-safe. `onRecord` lets a host persist a completed
 page before acknowledging it; `onCheckpoint` emits bounded deltas, including
 pending discoveries and checkpoint identity fields. Merge delta records by URL,
@@ -27,7 +33,7 @@ capture and returns committed progress. Failed pages retry on resume by default.
 Page limits support 1–10,000 pages (default 1,000). This interface limit does not
 establish that an arbitrary site can be imported completely. Every inventory
 entry has an explicit outcome; pending/failed pages, missing anchors, technical
-payload differences, unavailable assets and unsupported interactive components
+payload differences, failed asset acquisition and unsupported interactive components
 make validation partial. Raster/PDF assets require matching MIME and signatures;
 SVG must pass the exported `isPassiveSvg` policy: static drawing elements with
 only in-document references, no scripts, external resources, styles or animations.
@@ -36,7 +42,15 @@ Responsive `picture`/`source`/`img` choices retain their descriptors, media
 conditions, sizing and literal alt text. Every candidate is localized; shared
 asset URLs are fetched once and identical payloads count once toward the byte
 budget, including resumed journals. Complete static tab panels are preserved as
-alternatives; empty/lazy panels still require a capture provider.
+alternatives; empty/lazy panels still require a capture provider. Complete local
+OpenAPI operations can represent deferred API schemas. Supported native video
+and YouTube embeds retain their original public media URLs, recorded in source
+warnings; videos are not downloaded. A trusted host may report an original asset
+as already absent (HTTP 404/410): its absolute source URL and a warning are
+preserved. Timeouts, unsafe downloads and other acquisition errors still block
+validation. Observed external redirects remain navigation links; the engine does
+not capture their destination sites. External sidebar entries are preserved as
+portable sidebar shortcuts.
 Observed locale metadata and URL prefixes are projected onto the runtime layout:
 primary-language files are unprefixed and secondary-language files retain their
 locale prefix. A single-language localized site uses that language as primary.
@@ -44,7 +58,7 @@ Missing primary counterparts and projected path collisions require review; the
 engine does not invent translations. Fresh HTML captures also observe `html lang`; conflicting or unsupported
 language evidence requires review. Capture adapters can supply `locale` when
 no language is declared in HTML or identified by the scoped URL path.
-The `url-evidence-v2` converter rejects earlier journals: replay retained raw
+The `url-evidence-v5` converter rejects earlier journals: replay retained raw
 captures into a new journal rather than relabelling previously hashed pages.
 
 `stopReason` distinguishes a resumable `capture-limit` from hard `page-limit`

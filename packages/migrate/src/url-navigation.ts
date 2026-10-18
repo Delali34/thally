@@ -4,6 +4,7 @@
  * records, then merge observations without losing authored occurrence order.
  */
 import { load } from 'cheerio'
+import { inferUrlMigrationScope } from './url-scope.js'
 import type { MigrationCapture, MigrationNavigationOccurrence } from './url-run-types.js'
 
 interface SourceNode extends MigrationNavigationOccurrence {
@@ -85,8 +86,20 @@ function flightRecords(stream: string): Array<unknown> {
   return records
 }
 
-function mintlifyNavigation(body: string, base: URL, locale?: string): Array<SourceNode> {
+function mintlifyNavigation(body: string, base: URL, locale?: string, selectedScope?: string): Array<SourceNode> {
   const $ = load(body)
+  const scope = inferUrlMigrationScope({ body, contentType: 'text/html', finalUrl: base })
+  const mount = scope.evidence === 'source-parent' ? selectedScope ?? '/' : scope.scopePath
+  // Publisher navigation IDs and hrefs are documentation-relative. Actual DOM
+  // hrefs below retain ordinary browser URL semantics.
+  const configTarget = (value: unknown): string | undefined => {
+    const reference = text(value)
+    if (!reference) return undefined
+    if (/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(reference)) return target(reference, base)
+    const path = reference.replace(/^\/+/, '')
+    const prefix = mount.replace(/^\/|\/$/g, '')
+    return target(prefix && path !== prefix && !path.startsWith(`${prefix}/`) ? `${prefix}/${path}` : path, new URL('/', base))
+  }
   let stream = ''
   const records: Array<unknown> = []
   $('script').each((_index, script) => {
@@ -130,7 +143,7 @@ function mintlifyNavigation(body: string, base: URL, locale?: string): Array<Sou
       if (typeof value === 'string') {
         // docs.json page ids are rooted at the documentation site, while
         // captured DOM hrefs retain ordinary relative-URL semantics below.
-        const url = target(value, new URL('/', base))
+        const url = configTarget(value)
         return url ? [{ kind: 'page', label: value, url }] : []
       }
       if (Array.isArray(value)) return value.flatMap((child) => walk(child, depth + 1, activeLocale))
@@ -150,7 +163,7 @@ function mintlifyNavigation(body: string, base: URL, locale?: string): Array<Sou
             if (++visited > MAX_NODES || depth > MAX_DEPTH) return
             if (Array.isArray(node)) { for (const child of node) scan(child, depth + 1); return }
             if (!object(node)) return
-            const href = target(node.href, base)
+            const href = configTarget(node.href)
             if (href) {
               populated++
               const url = new URL(href); url.hash = ''
@@ -170,14 +183,15 @@ function mintlifyNavigation(body: string, base: URL, locale?: string): Array<Sou
           ?? languages.find((item) => text(item.language)?.toLowerCase() === 'en') ?? languages[0]
         return selected ? walk({ ...selected, languages: undefined }, depth + 1, text(selected.language)) : []
       }
-      const label = text(value.tab) ?? text(value.group) ?? text(value.title) ?? text(value.label)
-      const kind = text(value.tab) ? 'tab' : text(value.group) ? 'group' : 'page'
+      const label = text(value.tab) ?? text(value.dropdown) ?? text(value.group) ?? text(value.sidebarTitle) ?? text(value.title) ?? text(value.label)
+      const kind = text(value.tab) || text(value.dropdown) ? 'tab' : text(value.group) ? 'group' : 'page'
       const children = ['tabs', 'groups', 'pages', 'dropdowns', 'anchors', 'versions']
         .flatMap((key) => Array.isArray(value[key]) ? walk(value[key], depth + 1, activeLocale) : [])
-      const url = target(value.href, base)
+      const url = configTarget(value.href)
       if (!label) return children
       if (!url && !children.length) return []
       return [{ kind, label, ...(url ? { url } : {}), ...(children.length ? { children } : {}),
+        ...(text(value.dropdown) ? { presentation: 'dropdown' as const } : {}),
         ...(kind === 'tab' && activeLocale ? { locale: activeLocale } : {}) }]
     }
     try {
@@ -200,6 +214,7 @@ function resolveNavigation(nodes: Array<SourceNode>, base: URL): Array<SourceNod
       const children = node.children ? walk(node.children, depth + 1) : []
       return [{ label, ...(url ? { url } : {}), ...(children.length ? { children } : {}),
         ...(['tab', 'group', 'page'].includes(node.kind ?? '') ? { kind: node.kind } : {}),
+        ...(node.presentation === 'dropdown' ? { presentation: 'dropdown' as const } : {}),
         ...(text(node.locale) ? { locale: text(node.locale) } : {}) }]
     })
   }
@@ -207,10 +222,10 @@ function resolveNavigation(nodes: Array<SourceNode>, base: URL): Array<SourceNod
 }
 
 /** Extract explicit capture navigation, passive Mintlify data, or a DOM sidebar. */
-export function extractSourceNavigation(capture: MigrationCapture): Array<MigrationNavigationOccurrence> {
+export function extractSourceNavigation(capture: MigrationCapture, selectedScope?: string): Array<MigrationNavigationOccurrence> {
   if (capture.navigation) return resolveNavigation(capture.navigation, capture.finalUrl)
   if (!/html/i.test(capture.contentType) || Buffer.byteLength(capture.body) > MAX_CAPTURE_BYTES) return []
-  const mintlify = mintlifyNavigation(capture.body, capture.finalUrl, capture.locale)
+  const mintlify = mintlifyNavigation(capture.body, capture.finalUrl, capture.locale, selectedScope)
   if (mintlify.length) return mintlify
   const $ = load(capture.body)
   const candidates = ['.theme-doc-sidebar-menu,[aria-label*="sidebar" i]', 'aside', '[role="navigation"],nav']

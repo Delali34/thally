@@ -36,7 +36,7 @@ describe('published server entrypoints', () => {
         paths: entry.renderMigrationFiles(run.bundle).map(file => file.path) }));
     `], { cwd: packageDirectory, encoding: 'utf8' })
     expect(JSON.parse(result)).toMatchObject({
-      keys: ['classifyMigrationResponse', 'renderMigrationFiles', 'runUrlMigration', 'validateUrlMigration'],
+      keys: ['classifyMigrationResponse', 'inferUrlMigrationScope', 'renderMigrationFiles', 'runUrlMigration', 'validateUrlMigration'],
       status: 'passed', paths: expect.arrayContaining(['src/content/guide.mdx', 'docs.json']),
     })
     const source = emitted('url-migration.js')

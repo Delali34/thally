@@ -68,7 +68,7 @@ describe('evidence URL runner', () => {
     }
     const first = await runUrlMigration({ sourceUrl: 'https://docs.test/one', captureProvider: provider(pages), maxCaptures: 1, batchSize: 1, onCheckpoint: async (delta) => { deltas.push(JSON.parse(JSON.stringify(delta))) } })
     expect(first.validation.status).toBe('partial')
-    expect(deltas[0].converterVersion).toBe('url-evidence-v4')
+    expect(deltas[0].converterVersion).toBe('url-evidence-v5')
     expect(deltas.flatMap((delta) => delta.records).some((record) => record.url.endsWith('/two'))).toBe(true)
     const checkpoint = JSON.parse(JSON.stringify(first.checkpoint))
     checkpoint.records.find((record: { page?: unknown }) => record.page).page.body = 'corrupted'
@@ -268,7 +268,10 @@ describe('evidence URL runner', () => {
   it('bounds retained binary payloads across many aliases during capture and JSON resume', () => {
     // Buffers are external to V8's heap limit. Sample arrayBuffers under forced
     // GC inside the running migration, while its URL promise cache is live.
-    const result = execFileSync(process.execPath, ['--expose-gc', '--max-old-space-size=192', fileURLToPath(new URL('./fixtures/url-asset-memory.mjs', import.meta.url))], { encoding: 'utf8', timeout: 30_000 })
+    // Node 24 can sweep unreachable backing stores concurrently after gc()
+    // returns. Finish that sweep before sampling so suite CPU contention cannot
+    // count temporary checkpoint hash decodes as retained cache payloads.
+    const result = execFileSync(process.execPath, ['--expose-gc', '--no-concurrent-array-buffer-sweeping', '--max-old-space-size=192', fileURLToPath(new URL('./fixtures/url-asset-memory.mjs', import.meta.url))], { encoding: 'utf8', timeout: 30_000 })
     const memory = JSON.parse(result)
     expect(memory.freshRetainedBytes).toBeLessThan(2 * 1024 * 1024)
     expect(memory.resumedRetainedBytes).toBeLessThan(2 * 1024 * 1024)
