@@ -520,7 +520,7 @@ export function validateUrlMigration(checkpoint: UrlMigrationCheckpoint, cancell
         if (!destination.evidence?.anchors.includes(anchor)) {
           // This exact href was already broken in the captured source. Do not
           // invent anchors or mislabel it as lost conversion content.
-          warnings.push({ code: 'source-link-warning', source: record.url, message: `The original source link refers to an absent source anchor: ${link}` })
+          warnings.push({ code: 'source-link-warning', source: record.url, message: `The original source link refers to an absent source anchor; the imported link opens the page instead: ${link}` })
         } else if (destination.page) {
           const nodes = markdownNodes(destination.page.body)
           const explicit = nodes.flatMap(node => node.name === 'a' ? (node.attributes ?? []).flatMap(attribute => attribute.name === 'id' && typeof attribute.value === 'string' ? [attribute.value] : []) : [])
@@ -940,8 +940,19 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
   const pages = checkpoint.records.flatMap((record) => record.page ? [{ ...record.page, id: projection.pageId(record.page), navigationId: projection.navigationId(record.page), ...(projection.canonicalLocale(record.page) ? { locale: projection.canonicalLocale(record.page) } : {}), ...(navigationLabels.has(record.url) ? { navTitle: navigationLabels.get(record.url) } : {}), body: rewriteMarkdownDestinations(record.page.body, (value) => {
     let url: URL
     try { url = new URL(value, record.evidence!.finalUrl) } catch { return value }
-    const route = routeMap.get(canonical(url.toString(), sourceUrl)!)
-    return route ? `${route}${url.hash}` : value
+    const identity = canonical(url.toString(), sourceUrl)!
+    const route = routeMap.get(identity)
+    if (!route) return value
+    const destination = resolveMigrationRecord(records, records.get(identity))
+    let anchor = url.hash.slice(1)
+    try { anchor = decodeURIComponent(anchor) } catch { /* Match validation's literal invalid-encoding policy. */ }
+    // A captured absent anchor is a source defect, not a conversion failure.
+    // Keep its original href in the report, but make the imported link usable
+    // by opening the proven page. Valid source anchors must survive unchanged;
+    // validation still blocks any anchor that conversion itself lost.
+    const hasBrokenSourceAnchor = Boolean(url.hash && destination?.outcome === 'imported'
+      && destination.evidence && !destination.evidence.anchors.includes(anchor))
+    return `${route}${hasBrokenSourceAnchor ? '' : url.hash}`
   }) }] : [])
   const validation = validateUrlMigration(checkpoint, Boolean(options.signal?.aborted))
   validation.issues.push(...navigationIssues)
