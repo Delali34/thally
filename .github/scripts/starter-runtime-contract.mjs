@@ -76,7 +76,10 @@ const SOURCE_ONLY_PATHS = new Set([
   "src/lib/__tests__/frontmatter.test.ts",
   "src/lib/__tests__/frontmatter-parity.test.ts",
   "src/components/mdx/client-registry.test.ts",
+  "src/components/mdx/steps-toc.test.tsx",
+  "src/lib/__tests__/url-migration-runtime-fidelity.test.ts",
   "src/lib/openapi/__tests__/migrate-operation-slug-parity.test.ts",
+  "src/lib/openapi/__tests__/migrate-withheld-operations-parity.test.ts",
   "src/lib/openapi/__tests__/publication-check-parity.test.ts",
   // Drives /api/mcp with @modelcontextprotocol/sdk, a packages/mcp dependency.
   "src/app/api/mcp/sdk-client.test.ts",
