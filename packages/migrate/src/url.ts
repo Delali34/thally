@@ -1357,7 +1357,18 @@ export function htmlPage(
       const code = (tokenLines.length > 0
         ? tokenLines.map((line) => fragment(line).text()).join('\n')
         : fragment('pre').text()).replace(/\n$/, '')
-      const language = fragment('code').attr('class')?.match(/(?:language-|lang-)([A-Za-z0-9_+-]+)/)?.[1] ?? ''
+      // Publishers using Shiki can put the language on an attribute rather
+      // than a CSS class. Prefer the code element's explicit metadata, then
+      // its enclosing pre; never guess from the payload (including curl).
+      // A bounded single token keeps remote metadata out of fence syntax.
+      const language = ['code', 'pre'].flatMap((selector) => {
+        const block = fragment(selector).first()
+        return [
+          block.attr('language'),
+          block.attr('data-language'),
+          block.attr('class')?.match(/(?:^|\s)(?:language-|lang-)([A-Za-z0-9_+-]+)(?=\s|$)/)?.[1],
+        ]
+      }).find((value) => value !== undefined && /^[A-Za-z0-9_+-]{1,64}$/.test(value)) ?? ''
       const longestFence = Math.max(0, ...[...code.matchAll(/`+/g)].map((match) => match[0].length))
       const fence = '`'.repeat(Math.max(3, longestFence + 1))
       return `\n\n${anchor(element)}${fence}${language}\n${code}\n${fence}\n\n`

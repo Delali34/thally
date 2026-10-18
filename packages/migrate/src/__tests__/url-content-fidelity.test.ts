@@ -12,6 +12,52 @@ import { htmlPage, migrationHtmlArticle, sanitizeRemoteMarkdown } from '../url.j
 
 const fixture = readFileSync(new URL('./fixtures/mintlify-article-chrome.html', import.meta.url), 'utf8')
 
+describe('HTML code language fidelity', () => {
+  const blocks = (body: string) => {
+    const page = htmlPage({ body: `<article><h1>Examples</h1>${body}</article>`, finalUrl: new URL('https://docs.test/examples'), contentType: 'text/html' }, 'examples').page!
+    return unified().use(remarkParse).parse(page.body).children.filter((node) => node.type === 'code')
+  }
+
+  it('preserves Shiki language attributes and exact payloads across mixed examples', () => {
+    // Reduced observed publisher markup: Shiki supplies language attributes
+    // without language-* classes. Payload-based guessing would mislabel curl.
+    const result = blocks('<pre class="shiki shiki-themes" language="shellscript"><code language="shellscript">npm install @lifi/perps-sdk</code></pre><pre class="shiki" language="typescript"><code language="typescript">import { createPerpsClient } from \'@lifi/perps-sdk\'\nconst client = createPerpsClient({ apiKey: process.env.LIFI_API_KEY! })</code></pre><pre language="text"><code language="text">curl --header \'x-lifi-api-key: YOUR_CUSTOM_KEY\'</code></pre>')
+    expect(result.map(({ lang, value }) => ({ lang, value }))).toEqual([
+      { lang: 'shellscript', value: 'npm install @lifi/perps-sdk' },
+      { lang: 'typescript', value: "import { createPerpsClient } from '@lifi/perps-sdk'\nconst client = createPerpsClient({ apiKey: process.env.LIFI_API_KEY! })" },
+      { lang: 'text', value: "curl --header 'x-lifi-api-key: YOUR_CUSTOM_KEY'" },
+    ])
+  })
+
+  it.each([
+    ['<pre><code language="typescript">value</code></pre>', 'typescript'],
+    ['<pre language="javascript"><code>value</code></pre>', 'javascript'],
+    ['<pre language="json">value</pre>', 'json'],
+    ['<pre><code data-language="python">value</code></pre>', 'python'],
+    ['<pre data-language="ruby"><code>value</code></pre>', 'ruby'],
+    ['<pre><code class="highlight language-c++">value</code></pre>', 'c++'],
+    ['<pre class="lang-bash"><code>value</code></pre>', 'bash'],
+    ['<pre language="javascript"><code class="language-typescript">value</code></pre>', 'typescript'],
+    ['<pre language="javascript"><code language="text" class="language-typescript">value</code></pre>', 'text'],
+    ['<pre><code language="custom-language">value</code></pre>', 'custom-language'],
+    ['<pre><code>value</code></pre>', null],
+    ['<pre><code class="not-language-typescript">value</code></pre>', null],
+    ['<pre><code language="typescript&#10;```&#10;{execute()}">value</code></pre>', null],
+    ['<pre><code language="{execute()}">value</code></pre>', null],
+    [`<pre language="${'a'.repeat(65)}"><code>value</code></pre>`, null],
+  ])('reads only bounded explicit language metadata: %s', (html, language) => {
+    expect(blocks(html)).toEqual([expect.objectContaining({ lang: language, value: 'value' })])
+  })
+
+  it('keeps token-line whitespace and embedded fences literal with a language attribute', async () => {
+    const html = '<pre language="typescript"><code><span class="token-line">const value = ````literal````</span><span class="token-line">  &lt;script&gt;{inert}&lt;/script&gt;</span></code></pre>'
+    const [block] = blocks(html)
+    expect(block.lang).toBe('typescript')
+    expect(block.value).toBe('const value = ````literal````\n  <script>{inert}</script>')
+    await compile(`\n${'`'.repeat(5)}${block.lang}\n${block.value}\n${'`'.repeat(5)}\n`)
+  })
+})
+
 describe('rendered documentation content boundaries', () => {
   it('shares the article boundary across conversion and technical evidence', () => {
     const { $, root } = migrationHtmlArticle(fixture)
