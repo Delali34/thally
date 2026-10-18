@@ -56,6 +56,53 @@ describe('HTML code language fidelity', () => {
     expect(block.value).toBe('const value = ````literal````\n  <script>{inert}</script>')
     await compile(`\n${'`'.repeat(5)}${block.lang}\n${block.value}\n${'`'.repeat(5)}\n`)
   })
+
+  it('preserves explicit code-group payload divs in conversion and source evidence', async () => {
+    const code = 'import { client } from "example";\n\n// Literal MDX-looking payload\nconst value = "```` <script>{unsafe}</script>";\n  client.execute(value);'
+    const payload = code.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    const body = `<article><h1>Examples</h1><div data-component-part="code-group-tab-content" data-language="typescript">${payload}</div><pre><div data-component-part="code-group-tab-content">Existing block</div></pre><div>Ordinary prose remains prose.</div></article>`
+    const { $, root } = migrationHtmlArticle(body)
+    expect(root.find('pre').toArray().map((node) => $(node).text())).toEqual([code, 'Existing block'])
+    expect(root.find('pre pre').length).toBe(0)
+    const page = htmlPage({ body, finalUrl: new URL('https://docs.test/examples'), contentType: 'text/html' }, 'examples').page!
+    const tree = unified().use(remarkParse).use(remarkMdx).parse(page.body)
+    expect(tree.children.filter((node) => node.type === 'code').map(({ value, lang }) => ({ value, lang }))).toEqual([
+      { value: code, lang: 'typescript' }, { value: 'Existing block', lang: null },
+    ])
+    expect(page.body).toContain('Ordinary prose remains prose.')
+    expect(sanitizeRemoteMarkdown(page.body)).toBe(page.body)
+    await compile(page.body)
+  })
+})
+
+describe('authored paragraph semantics', () => {
+  it('keeps explicit paragraph spans separate from pictures and following copy', async () => {
+    const body = '<article><h1>Images</h1><span><picture><source srcset="/wide.png 2x"><img src="/small.png" alt="Literal {alt}"></picture></span><span data-as="p">Options after the picture:</span><span data-as="p">Keep <em>formatting</em> and <span>ordinary</span> inline spans.</span></article>'
+    const page = htmlPage({ body, finalUrl: new URL('https://docs.test/images'), contentType: 'text/html' }, 'images', {
+      preserveAnchors: true, preserveResponsiveImages: true, omitDocumentHeading: true,
+    }).page!
+    expect(page.body).toContain('</picture>\n\nOptions after the picture:\n\nKeep _formatting_ and ordinary inline spans.')
+    const tree = unified().use(remarkParse).use(remarkMdx).parse(page.body)
+    expect(tree.children.map((node) => node.type)).toEqual(['mdxJsxFlowElement', 'paragraph', 'paragraph'])
+    expect(sanitizeRemoteMarkdown(page.body)).not.toBeNull()
+    await compile(page.body)
+  })
+
+  it('keeps paragraph boundaries before anchored disclosures without changing fenced payloads', async () => {
+    const body = '<article><h1>Upgrade</h1><span data-as="p">Read the prompt below.</span><details><summary><div><p id="prompt-title">Migration prompt</p></div></summary><div id="prompt-content"><pre><code language="markdown">import { example } from "example";\n\n&lt;picture&gt;\n&lt;/picture&gt; Literal text\n</code></pre></div></details></article>'
+    const page = htmlPage({ body, finalUrl: new URL('https://docs.test/upgrade'), contentType: 'text/html' }, 'upgrade', {
+      preserveAnchors: true, preserveResponsiveImages: true, omitDocumentHeading: true,
+    }).page!
+    expect(page.body).toContain('Read the prompt below.\n\n<a id="prompt-title" />')
+    expect(page.body).toContain('<a id="prompt-content" />')
+    const clean = page.body.replace(/^<a id="[^"<]*" \/>$/gm, '')
+    expect(sanitizeRemoteMarkdown(clean)).toBe(clean)
+    const tree = unified().use(remarkParse).use(remarkMdx).parse(page.body)
+    expect(tree.children.filter((node) => node.type === 'code')).toEqual([
+      expect.objectContaining({ lang: 'markdown', value: 'import { example } from "example";\n\n<picture>\n</picture> Literal text' }),
+    ])
+    await compile(page.body)
+  })
 })
 
 describe('rendered documentation content boundaries', () => {
@@ -145,6 +192,21 @@ describe('rendered documentation content boundaries', () => {
 })
 
 describe('remote Markdown syntax classification', () => {
+  it.each(['import', 'export'])('keeps the standalone API route segment %s as inert paragraph copy', async (segment) => {
+    const body = `/\n\napi\n\n/\n\n${segment}\n\nNext paragraph.`
+    expect(sanitizeRemoteMarkdown(body)).toBe(body)
+    await compile(body)
+  })
+
+  it.each([
+    'import value from "module"',
+    'import {\nvalue\n} from "module"',
+    'export {\nvalue\n}',
+    'export default "value"',
+  ])('continues rejecting real ESM syntax: %s', (body) => {
+    expect(sanitizeRemoteMarkdown(body)).toBeNull()
+  })
+
   it('preserves escaped generic types and tag-shaped code as inert text', () => {
     const body = 'The response has type enum\\<string> and literal \\<Unknown />.\n\n`<script>alert(1)</script>`\n\n```html\n<script>alert(1)</script>\n```'
     expect(sanitizeRemoteMarkdown(body)).toBe(body)

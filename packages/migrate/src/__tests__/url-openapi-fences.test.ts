@@ -49,7 +49,7 @@ function publisherFence(metadata: string, document = schema): string {
 }
 
 describe('publisher OpenAPI metadata', () => {
-  it.each(['get /v1/chains/{chainId}', '/openapi.yaml GET /v1/chains/{chainId}'])('extracts a declared operation with metadata %s', (metadata) => {
+  it.each(['get /v1/chains/{chainId}', '/openapi.yaml GET /v1/chains/{chainId}', 'openapi GET /v1/chains/{chainId}', 'v3-openapi GET /v1/chains/{chainId}'])('extracts a declared operation with metadata %s', (metadata) => {
     const body = `Authored introduction.\n\n${publisherFence(metadata)}\nAuthored conclusion.`
     const result = extractEmbeddedOpenApi(body)
     expect(result.content).toBe('Authored introduction.\n\n\n\nAuthored conclusion.')
@@ -68,6 +68,14 @@ describe('publisher OpenAPI metadata', () => {
     expect(JSON.stringify(result.fragment)).not.toContain('../../outside.yaml')
   })
 
+  it('treats bounded publisher spec aliases as inert hints', () => {
+    const alias = `Spec_${'a'.repeat(123)}`
+    const result = extractEmbeddedOpenApi(publisherFence(`${alias} get /v1/chains/{chainId}`))
+    expect(result.fragment?.path).toBe('/v1/chains/{chainId}')
+    expect(JSON.stringify(result.fragment)).not.toContain(alias)
+    expect(result.openapi).toBe('GET /v1/chains/{chainId}')
+  })
+
   it('ignores quoted/nested/example fences and rejects ambiguous declared operations', () => {
     const fence = publisherFence('get /v1/chains/{chainId}')
     const literalExample = `\`\`\`\`\`markdown\n${fence}\`\`\`\`\`\n`
@@ -82,6 +90,12 @@ describe('publisher OpenAPI metadata', () => {
     ['mismatched method', publisherFence('post /v1/chains/{chainId}')],
     ['mismatched path', publisherFence('get /v1/other')],
     ['ambiguous metadata', publisherFence('get /v1/chains/{chainId} extra')],
+    ['oversized spec alias', publisherFence(`${'a'.repeat(129)} get /v1/chains/{chainId}`)],
+    ['path-shaped spec alias', publisherFence('../openapi get /v1/chains/{chainId}')],
+    ['URL-shaped spec alias', publisherFence('https://remote.test/spec get /v1/chains/{chainId}')],
+    ['expression-shaped spec alias', publisherFence('{execute()} get /v1/chains/{chainId}')],
+    ['mismatched alias operation method', publisherFence('v3-openapi post /v1/chains/{chainId}')],
+    ['mismatched alias operation path', publisherFence('v3-openapi get /v1/other')],
     ['operation array', publisherFence('get /v1/chains/{chainId}', schema.replace('    get:\n      operationId: getChain', '    get: []\n    other:\n      operationId: getChain'))],
     ['operation null', publisherFence('get /v1/chains/{chainId}', 'openapi: 3.0.2\npaths:\n  /v1/chains/{chainId}:\n    get: null\n')],
     ['duplicate mapping key', publisherFence('get /v1/chains/{chainId}', `${schema}\npaths: {}\n`)],

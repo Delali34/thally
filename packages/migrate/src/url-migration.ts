@@ -16,3 +16,6 @@ export type {
   MigrationNavigationTab, MigrationPage, MigrationPlatform, MigrationWarning,
   RenderedMigrationFile,
 } from './types.js'
+
+export { inferUrlMigrationScope } from './url-scope.js'
+export type { UrlMigrationScope } from './url-scope.js'
