@@ -83,6 +83,57 @@ describe('parseMdxContent', () => {
   })
 })
 
+describe('parseMdxContent step titles', () => {
+  const source = [
+    '## Deploy', '',
+    '<Steps titleSize="h3">',
+    '<Step title="Create a project">', 'Pick a name.', '</Step>',
+    '<Step title="Deploy">', 'Push the branch.', '</Step>',
+    '</Steps>', '',
+    '## Next steps', '',
+    'Read more.',
+  ].join('\n')
+
+  it('lists step titles that render as headings, numbered with the rest of the page', () => {
+    expect(parseMdxContent(source).headings).toEqual([
+      { depth: 2, text: 'Deploy', id: 'deploy' },
+      { depth: 3, text: 'Create a project', id: 'create-a-project' },
+      { depth: 3, text: 'Deploy', id: 'deploy-2' },
+      { depth: 2, text: 'Next steps', id: 'next-steps' },
+    ])
+  })
+
+  it('nests them in the table of contents and gives each its own section', () => {
+    const parsed = parseMdxContent(source)
+    expect(parsed.toc[0].children?.map((item) => item.id)).toEqual(['create-a-project', 'deploy-2'])
+    const deploy = parsed.sections.find((section) => section.id === 'deploy-2')
+    expect(deploy?.headingPath).toEqual(['Deploy', 'Deploy'])
+    expect(deploy?.text).toContain('Push the branch.')
+    expect(deploy?.text).not.toContain('Pick a name.')
+  })
+
+  it('takes the size from the Step over its Steps, and from any wrapper in between', () => {
+    const parsed = parseMdxContent([
+      '<Steps titleSize="p">', '<Step title="A" titleSize="h4">x</Step>', '<Step title="B">x</Step>', '</Steps>', '',
+      '<Steps titleSize="h2">', '<div>', '<Step title="C">x</Step>', '</div>', '</Steps>',
+    ].join('\n'))
+    expect(parsed.headings.map(({ depth, text }) => [depth, text])).toEqual([[4, 'A'], [2, 'C']])
+  })
+
+  it.each([
+    ['no titleSize', '<Steps>\n<Step title="One">x</Step>\n</Steps>'],
+    ['titleSize="p"', '<Steps titleSize="p">\n<Step title="One">x</Step>\n</Steps>'],
+    ['a titleSize expression', '<Steps titleSize={size}>\n<Step title="One">x</Step>\n</Steps>'],
+    ['a title expression', '<Steps titleSize="h3">\n<Step title={"One"}>x</Step>\n</Steps>'],
+  ])('lists nothing for steps with %s', (_name, body) => {
+    expect(parseMdxContent(body).headings).toEqual([])
+  })
+
+  it('keeps the step title in the page text', () => {
+    expect(parseMdxContent(source).text).toContain('Create a project')
+  })
+})
+
 describe('parseMdxContent JSX attribute prose', () => {
   it('lifts literal prose attributes into section text, in reader order', () => {
     const parsed = parseMdxContent(

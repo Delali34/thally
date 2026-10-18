@@ -227,6 +227,52 @@ describe('heading anchors', () => {
   })
 })
 
+describe('step title heading ids', () => {
+  /** Every `id` the compiled page carries, in document order. */
+  async function ids(source: string): Promise<Array<string>> {
+    const { compile } = await import('@mdx-js/mdx')
+    const compiled = String(await compile(source, { rehypePlugins: [rehypePlugins[2]] }))
+    return [...compiled.matchAll(/\bid: "([^"]+)"/g)].map((match) => match[1])
+  }
+
+  it('numbers step titles with the page headings in document order', async () => {
+    expect(await ids([
+      '## Deploy', '',
+      '<Steps titleSize="h3">', '<Step title="Create a project">', 'Body', '</Step>', '<Step title="Deploy">', 'Body', '</Step>', '</Steps>', '',
+      '## Deploy',
+    ].join('\n'))).toEqual(['deploy', 'create-a-project', 'deploy-2', 'deploy-3'])
+  })
+
+  it.each([
+    ['no titleSize', '<Steps>\n<Step title="One">x</Step>\n</Steps>'],
+    ['titleSize="p"', '<Steps titleSize="p">\n<Step title="One">x</Step>\n</Steps>'],
+    ['a Step with titleSize="p"', '<Steps titleSize="h3">\n<Step title="One" titleSize="p">x</Step>\n</Steps>'],
+    ['a titleSize expression', '<Steps titleSize={size}>\n<Step title="One">x</Step>\n</Steps>'],
+    ['a title expression', '<Steps titleSize="h3">\n<Step title={"One"}>x</Step>\n</Steps>'],
+    ['an empty title', '<Steps titleSize="h3">\n<Step title="">x</Step>\n</Steps>'],
+  ])('leaves a step title that is not a heading alone: %s', async (_name, source) => {
+    expect(await ids(source)).toEqual([])
+  })
+
+  it('lets a Step keep its own size over its Steps, including inside a wrapper', async () => {
+    expect(await ids([
+      '<Steps titleSize="p">', '<Step title="A" titleSize="h4">x</Step>', '<Step title="B">x</Step>', '</Steps>', '',
+      '<Steps titleSize="h2">', '<div>', '<Step title="C">x</Step>', '</div>', '</Steps>',
+    ].join('\n'))).toEqual(['a', 'c'])
+  })
+
+  it('numbers repeated step titles, such as one set per View, so each keeps its own id', async () => {
+    const steps = '<Steps titleSize="h3">\n<Step title="Create a key">x</Step>\n<Step title="Verify the key">x</Step>\n</Steps>'
+    expect(await ids(['curl', 'Go'].map((title) => `<View title="${title}">\n${steps}\n</View>`).join('\n\n')))
+      .toEqual(['create-a-key', 'verify-the-key', 'create-a-key-2', 'verify-the-key-2'])
+  })
+
+  it('does not let a generated step id take an id a heading reserves', async () => {
+    expect(await ids('<Steps titleSize="h3">\n<Step title="Deploy">x</Step>\n</Steps>\n\n## Other {/* #deploy */}'))
+      .toEqual(['deploy-2', 'deploy'])
+  })
+})
+
 describe('code-fence metadata tokenizer', () => {
   it('joins multi-word bare titles', () => {
     expect(parseCodeFenceMeta('Example title here')).toEqual({ title: 'Example title here' })

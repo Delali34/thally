@@ -36,7 +36,23 @@ describe('Step title element', () => {
     expect(html).toMatch(/<p [^>]*>Nested<\/p>/)
   })
 
-  it('has no data-heading marker, so no title reaches the table of contents', () => {
+  it('has no data-heading marker unless the page registered the title as a heading', () => {
     expect(renderToStaticMarkup(<Steps><Step title="One" /></Steps>)).not.toContain('data-heading')
+    expect(renderToStaticMarkup(<Steps titleSize="h3"><Step title="One" /></Steps>)).not.toContain('data-heading')
+  })
+
+  it('marks a registered heading title with its id and level for the table of contents', () => {
+    const html = renderToStaticMarkup(<Steps titleSize="h3"><Step title="Create a project" id="create-a-project" /></Steps>)
+    expect(html).toMatch(/<h3 [^>]*\bid="create-a-project"[^>]*>Create a project<\/h3>/)
+    expect(html).toContain('data-heading="Create a project"')
+    expect(html).toContain('data-level="3"')
+    const h2 = renderToStaticMarkup(<Steps><Step title="One" id="one" titleSize="h2" /></Steps>)
+    expect(h2).toContain('data-level="2"')
+  })
+
+  it('never marks a plain-text title, even when handed an id', () => {
+    const html = renderToStaticMarkup(<Steps titleSize="p"><Step title="One" id="one" /></Steps>)
+    expect(html).toMatch(/<p [^>]*>One<\/p>/)
+    expect(html).not.toMatch(/data-heading|\bid="one"/)
   })
 })

@@ -53,7 +53,7 @@ import {
 import type { FernApiSection } from './fern.js'
 import { projectFernNavigation, readFernConfig } from './fern.js'
 import { splitOpenApiRef, specRefBaseName, withSpecRef } from './openapi-ref.js'
-import { markExcluded, sharedSpecMessage, specRefMatches, withheldOperationKeys } from './spec-exclude.js'
+import { markExcluded, parseSpecDocument, sharedSpecMessage, specRefMatches, withheldOperationKeys, withoutByteOrderMark } from './spec-exclude.js'
 import { parseFrontmatter } from './frontmatter.js'
 import { mainSiteLinkTarget, prefixRootLinks, sourceRefMountCollides, stripControlCharacters, type RootLinkIndex, type SourceRefImport } from './source-refs.js'
 import { type BrandVars, brandColorsFromVars, cssBrandVars } from './css-colors.js'
@@ -96,6 +96,7 @@ import {
   trimTrailingSlashes,
   withinRealRoot,
 } from './path.js'
+import { dropConflictingRedirects, dropUnroutableRedirects, literalRoute, servedRoutes } from './redirects.js'
 import type {
   MigrationAsset,
   MigrationBundle,
@@ -1445,7 +1446,8 @@ function readSpecFile(absolutePath: string, relativePath: string, warnings: Arra
     })
     return undefined
   }
-  return readFileSync(absolutePath)
+  // Saved without a byte order mark, which the renderer's JSON reader rejects.
+  return withoutByteOrderMark(readFileSync(absolutePath))
 }
 
 function specAssetPath(filename: string): string {
@@ -1526,10 +1528,29 @@ function resolveMintlifyApiSpecs(
     references.push({ value: key, kind: 'openapi', tabLabel: `OpenAPI: ${key}`, hidden: true, pageOnly: true })
   }
   const seen = new Set<string>()
+  // Several tabs (one per product, say) can bind one remote spec to the same label, each under its own directory.
+  const remoteByKey = new Map<string, RemoteApiSpec>()
+  const mountDirectory = (remote: RemoteApiSpec | undefined, reference: MintlifyApiSpecReference): void => {
+    const directory = reference.directory?.replace(/^\/+|\/+$/g, '')
+    if (!remote || !directory) return
+    const mount = remote.directories?.find((existing) => existing.directory === directory)
+    if (!mount) {
+      remote.directories = [...(remote.directories ?? []), { directory, ...(reference.operations ? { operations: reference.operations } : {}) }]
+    } else if (mount.operations && reference.operations) {
+      // One directory served the operations of every container that mounted it.
+      mount.operations = [...new Set([...mount.operations, ...reference.operations])]
+    } else {
+      // A container that lists nothing had every operation generated under the directory.
+      delete mount.operations
+    }
+  }
   const specs: Array<ResolvedApiSpec> = []
   for (const reference of references) {
     const dedupeKey = `${reference.kind}:${reference.value}:${reference.tabLabel ?? ''}`
-    if (seen.has(dedupeKey)) continue
+    if (seen.has(dedupeKey)) {
+      mountDirectory(remoteByKey.get(dedupeKey), reference)
+      continue
+    }
     seen.add(dedupeKey)
     const tabSuffix = reference.tabLabel ? ` (tab "${reference.tabLabel}")` : ''
     if (reference.kind === 'asyncapi') {
@@ -1540,7 +1561,10 @@ function resolveMintlifyApiSpecs(
       continue
     }
     if (/^https:\/\//i.test(reference.value)) {
-      remoteSpecs.push({ url: reference.value, ...(reference.tabLabel ? { tabLabel: reference.tabLabel } : {}), ...(reference.parentTab ? { parentTab: reference.parentTab } : {}), ...(reference.icon ? { icon: reference.icon } : {}), ...(reference.hidden ? { hidden: true } : {}) })
+      const remote: RemoteApiSpec = { url: reference.value, ...(reference.tabLabel ? { tabLabel: reference.tabLabel } : {}), ...(reference.parentTab ? { parentTab: reference.parentTab } : {}), ...(reference.icon ? { icon: reference.icon } : {}), ...(reference.hidden ? { hidden: true } : {}) }
+      mountDirectory(remote, reference)
+      remoteSpecs.push(remote)
+      remoteByKey.set(dedupeKey, remote)
       warnings.push({
         code: 'unsupported-config',
         message: `The remote OpenAPI spec "${reference.value}"${tabSuffix} requires a network download before this import is complete.`,
@@ -1690,6 +1714,15 @@ function slugifyApiSpecId(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9/]+/g, '-').replace(/(^-|-$)+/g, '').replace(/\//g, '-') || value.toLowerCase()
 }
 
+/**
+ * Each visible API tab with the id the renderer serves its spec under: the
+ * first is `default`, every other one takes its tab's slug (a hidden tab's spec
+ * serves no endpoint pages of its own).
+ */
+export function apiTabSpecIds<T extends { tab: string; hidden?: boolean; api?: object }>(tabs: ReadonlyArray<T>): Array<{ tab: T; specId: string }> {
+  return tabs.filter((tab) => !tab.hidden && tab.api).map((tab, index) => ({ tab, specId: index === 0 ? 'default' : slugifyApiSpecId(tab.tab) }))
+}
+
 interface OpenApiOperationForLinking {
   method: string
   path: string
@@ -1698,11 +1731,22 @@ interface OpenApiOperationForLinking {
   operationId?: string
 }
 
-/** Read just enough of an OpenAPI document to match Mintlify's auto-generated operation pages. Malformed input yields no operations rather than throwing. */
+/** `x-hidden: true` and `x-excluded: true` (or the string `"true"`), as the renderer reads them. */
+const flagged = (value: unknown): boolean => value === true || value === 'true'
+
+/** Whether the renderer withholds a path item or an operation, so that it has no endpoint page to link or redirect to. */
+export const isWithheld = (node: Record<string, unknown>): boolean => flagged(node['x-hidden']) || flagged(node['x-excluded'])
+
+/**
+ * Read just enough of an OpenAPI document to match Mintlify's auto-generated
+ * operation pages. An operation the renderer withholds (`x-hidden`,
+ * `x-excluded`, on it or on its path item) has no endpoint page to link or
+ * redirect to. Malformed input yields no operations rather than throwing.
+ */
 function parseOpenApiOperationsForLinking(content: Buffer): Array<OpenApiOperationForLinking> {
   let document: unknown
   try {
-    document = parseYaml(content.toString('utf8'))
+    document = parseSpecDocument(content.toString('utf8')).document
   } catch {
     return []
   }
@@ -1711,10 +1755,13 @@ function parseOpenApiOperationsForLinking(content: Buffer): Array<OpenApiOperati
   const operations: Array<OpenApiOperationForLinking> = []
   for (const [path, pathItem] of Object.entries(paths as Record<string, unknown>)) {
     if (!pathItem || typeof pathItem !== 'object') continue
+    const item = pathItem as Record<string, unknown>
+    if (isWithheld(item)) continue
     for (const method of OPENAPI_HTTP_METHODS) {
-      const operation = (pathItem as Record<string, unknown>)[method]
+      const operation = item[method]
       if (!operation || typeof operation !== 'object') continue
       const op = operation as Record<string, unknown>
+      if (isWithheld(op)) continue
       const tags = Array.isArray(op.tags) ? op.tags.filter((tag): tag is string => typeof tag === 'string') : []
       operations.push({
         method,
@@ -1749,9 +1796,13 @@ interface ApiOperationLinkSource {
   content: Buffer
   /** Prefix path segment(s) the source platform served its auto-generated operation pages under (no leading/trailing slash); absent or empty means "no known auto-generated prefix for this spec" and it's skipped. */
   prefix?: string
+  /** `METHOD /path` operations the source served under this prefix, in navigation order (it served only these); every operation when absent. */
+  operations?: ReadonlyArray<string>
+  /** The one tab this prefix belongs to, when several tabs are bound to the spec; every tab bound to it when absent. */
+  tab?: string
 }
 
-interface ApiOperationLinkMaps {
+export interface ApiOperationLinkMaps {
   /** Exact source-platform operation-page path (lowercased) -> Thally operation route. */
   operationLinks: Map<string, string>
   /**
@@ -1768,22 +1819,55 @@ interface ApiOperationLinkMaps {
   duplicatePages: Array<string>
 }
 
-function apiOperationLinkMap(
+/** The operations a source served under its prefix: the listed ones in listed order, else every operation of the spec. */
+function servedOperations(source: ApiOperationLinkSource, parsed: Map<string, Array<OpenApiOperationForLinking>>): Array<OpenApiOperationForLinking> {
+  // A spec mounted under several directories is read once, not once per mount.
+  let operations = parsed.get(source.filename)
+  if (!operations) {
+    operations = parseOpenApiOperationsForLinking(source.content)
+    parsed.set(source.filename, operations)
+  }
+  if (!source.operations) return operations
+  const byKey = new Map(operations.map((operation) => [`${operation.method} ${operation.path}`, operation]))
+  return source.operations.flatMap((reference) => {
+    const [method, ...path] = reference.trim().split(/\s+/)
+    const operation = byKey.get(`${method.toLowerCase()} ${path.join(' ')}`)
+    return operation ? [operation] : []
+  })
+}
+
+/** A mount's directory as route prefixes compare it: lower-cased, without surrounding slashes. */
+export const mountPrefix = (directory: string): string => directory.replace(/^\/+|\/+$/g, '').toLowerCase()
+
+export function apiOperationLinkMap(
   sources: Array<ApiOperationLinkSource>,
   docsConfig: MigrationDocsConfig,
+  /** Directories of mounts these sources do not cover (a remote spec that could not be downloaded): an address under a deeper one is theirs. */
+  otherMounts: ReadonlyArray<string> = [],
 ): ApiOperationLinkMaps {
   const map = new Map<string, string>()
   const prefixLandings = new Map<string, string>()
   const mintlifyPages = new Map<string, string>()
   const duplicatePages: Array<string> = []
-  const apiTabs = docsConfig.tabs.filter((tab) => !tab.hidden && tab.api)
-  apiTabs.forEach((tab, index) => {
-    const source = sources.find((entry) => tab.api?.source === specAssetPath(entry.filename))
-    if (!source || !source.prefix) return
-    const specId = index === 0 ? 'default' : slugifyApiSpecId(tab.tab)
-    const prefix = source.prefix.replace(/^\/+|\/+$/g, '').toLowerCase()
+  const parsedByFile = new Map<string, Array<OpenApiOperationForLinking>>()
+  // A spec can be mounted under several prefixes (one per product), so a tab may match more than one source.
+  const bound = apiTabSpecIds(docsConfig.tabs).flatMap(({ tab, specId }) => sources
+    .filter((entry) => tab.api?.source === specAssetPath(entry.filename) && (!entry.tab || entry.tab === tab.tab))
+    .map((source) => ({ source, specId })))
+  // An address belongs to the most specific mount it lies under: one mounted at
+  // `reference` never claims what a mount at `reference/v2` serves.
+  const mounts = new Set([...bound.map(({ source }) => source.prefix ? mountPrefix(source.prefix) : ''), ...otherMounts.map(mountPrefix)].filter(Boolean))
+  const underDeeperMount = (route: string, own: string): boolean => {
+    const lower = route.toLowerCase()
+    return [...mounts].some((mount) => mount.length > own.length && (lower === mount || lower.startsWith(`${mount}/`)))
+  }
+  bound.forEach(({ source, specId }) => {
+    if (!source.prefix) return
+    // The directory as written minus surrounding slashes: `reference/` and `/reference` name the folder `reference`.
+    const base = source.prefix.replace(/^\/+|\/+$/g, '')
+    const prefix = mountPrefix(source.prefix)
     if (prefix) prefixLandings.set(prefix, specId === 'default' ? '/api' : `/api/${specId}`)
-    for (const operation of parseOpenApiOperationsForLinking(source.content)) {
+    for (const operation of servedOperations(source, parsedByFile)) {
       const thallyHref = `/api/${specId}/${thallyOperationSlugSegments(operation.path, operation.method).join('/')}`
       // Leaf candidates, tried in order of how likely a source generator is
       // to have used them: Mintlify slugs from the summary; Fern instead
@@ -1817,39 +1901,108 @@ function apiOperationLinkMap(
       const tagSegment = mintlifyOperationSlugSegment(operation.tag ?? 'default')
       const mintlifyTag = mintlifyUrlSlug(operation.tag ?? 'default')
       const mintlifyLeaf = mintlifyUrlSlug(operation.summary?.trim() || operation.operationId?.trim() || `${operation.method} ${operation.path}`)
-      const canonical = `${source.prefix}/${mintlifyTag}/${mintlifyLeaf}`.replace(/^\/+|\/+$/g, '')
-      if (mintlifyTag && mintlifyLeaf) {
+      const canonical = `${base}/${mintlifyTag}/${mintlifyLeaf}`.replace(/^\/+|\/+$/g, '')
+      if (mintlifyTag && mintlifyLeaf && !underDeeperMount(canonical, prefix)) {
         if (!mintlifyPages.has(canonical)) mintlifyPages.set(canonical, thallyHref)
         else if (mintlifyPages.get(canonical) !== thallyHref && !duplicatePages.includes(canonical)) duplicatePages.push(canonical)
+        if (!map.has(canonical.toLowerCase())) map.set(canonical.toLowerCase(), thallyHref)
       }
-      if (mintlifyTag && mintlifyLeaf && !map.has(canonical.toLowerCase())) map.set(canonical.toLowerCase(), thallyHref)
       // Mintlify redirects a bare tag URL to that tag's first operation.
-      const tagRoot = `${source.prefix}/${mintlifyTag}`.replace(/^\/+|\/+$/g, '')
-      if (mintlifyTag && !mintlifyPages.has(tagRoot)) mintlifyPages.set(tagRoot, thallyHref)
-      if (mintlifyTag && !map.has(tagRoot.toLowerCase())) map.set(tagRoot.toLowerCase(), thallyHref)
+      const tagRoot = `${base}/${mintlifyTag}`.replace(/^\/+|\/+$/g, '')
+      if (mintlifyTag && !underDeeperMount(tagRoot, prefix)) {
+        if (!mintlifyPages.has(tagRoot)) mintlifyPages.set(tagRoot, thallyHref)
+        if (!map.has(tagRoot.toLowerCase())) map.set(tagRoot.toLowerCase(), thallyHref)
+      }
       for (const leaf of leafCandidates) {
         if (!leaf) continue
-        const tagged = `${source.prefix}/${tagSegment}/${leaf}`.replace(/^\/+|\/+$/g, '').toLowerCase()
-        const flat = `${source.prefix}/${leaf}`.replace(/^\/+|\/+$/g, '').toLowerCase()
-        if (!map.has(tagged)) map.set(tagged, thallyHref)
-        if (!map.has(flat)) map.set(flat, thallyHref)
+        const tagged = `${base}/${tagSegment}/${leaf}`.replace(/^\/+|\/+$/g, '').toLowerCase()
+        const flat = `${base}/${leaf}`.replace(/^\/+|\/+$/g, '').toLowerCase()
+        if (!map.has(tagged) && !underDeeperMount(tagged, prefix)) map.set(tagged, thallyHref)
+        if (!map.has(flat) && !underDeeperMount(flat, prefix)) map.set(flat, thallyHref)
       }
     }
   })
   return { operationLinks: map, prefixLandings, mintlifyPages, duplicatePages }
 }
 
+/**
+ * Redirects from Mintlify's generated endpoint URLs to the matching Thally
+ * endpoint pages. A URL that already has a page, or a redirect of its own,
+ * keeps it: that URL still serves, so nothing is lost and nothing is said.
+ */
+export function mintlifyEndpointRedirects(
+  maps: Pick<ApiOperationLinkMaps, 'mintlifyPages' | 'duplicatePages'>,
+  pages: ReadonlyArray<Pick<MigrationPage, 'id'>>,
+  existing: ReadonlyArray<{ source: string }>,
+  warnings: Array<MigrationWarning>,
+): Array<{ source: string; destination: string }> {
+  const { mintlifyPages, duplicatePages } = maps
+  if (duplicatePages.length > 0) {
+    const listed = duplicatePages.slice(0, 10).map((url) => `/${url}`).join(', ')
+    warnings.push({
+      code: 'unsupported-config',
+      message: `${duplicatePages.length} Mintlify endpoint URL${duplicatePages.length === 1 ? ' is' : 's are'} shared by more than one operation (same tag and summary), so only the first operation is redirected from each: ${listed}${duplicatePages.length > 10 ? ', ...' : ''}.`,
+    })
+  }
+  const taken = servedRoutes(pages)
+  for (const redirect of existing) taken.add(literalRoute(redirect.source) ?? redirect.source)
+  const candidates = [...mintlifyPages].filter(([source]) => !taken.has(literalRoute(`/${source}`) ?? `/${source}`))
+  const redirects = candidates.slice(0, MAX_ENDPOINT_REDIRECTS)
+    .map(([source, destination]) => ({ source: `/${source}`, destination }))
+  const capped = candidates.length - redirects.length
+  if (capped > 0) {
+    warnings.push({
+      code: 'unsupported-config',
+      message: `Created ${redirects.length} of ${candidates.length} Mintlify endpoint redirects; skipped ${capped} because a site is limited to ${MAX_ENDPOINT_REDIRECTS} generated endpoint redirects. Old links to skipped endpoint URLs will not redirect.`,
+    })
+  }
+  return redirects
+}
+
+/**
+ * Link every API mount of a site in one pass: rewrite the body links under them
+ * and return the redirects from the endpoint URLs they served. Every spec must
+ * be bound in `docsConfig` first, because the id a spec is served under
+ * depends on the tabs ahead of it. `reservedMounts` are directories of mounts
+ * without a source here (a remote spec that could not be downloaded): the
+ * addresses under them are theirs and stay as authored.
+ */
+export function linkApiMounts(
+  sources: Array<ApiOperationLinkSource>,
+  docsConfig: MigrationDocsConfig,
+  pages: Array<MigrationPage>,
+  warnings: Array<MigrationWarning>,
+  reservedMounts: ReadonlyArray<string> = [],
+): Array<{ source: string; destination: string }> {
+  const maps = apiOperationLinkMap(sources, docsConfig, reservedMounts)
+  rewriteApiLinksInPages(pages, maps.operationLinks, maps.prefixLandings, warnings, { mounts: reservedMounts, redirects: docsConfig.redirects })
+  return mintlifyEndpointRedirects(maps, pages, docsConfig.redirects ?? [], warnings)
+}
+
 /** Rewrite API operation links in every page body, with one capped warning for links that matched no operation. */
-function rewriteApiLinksInPages(
+export function rewriteApiLinksInPages(
   pages: Array<MigrationPage>,
   operationLinks: Map<string, string>,
   prefixLandings: Map<string, string>,
   warnings: Array<MigrationWarning>,
+  /**
+   * What answers an address other than these maps. `mounts`: directories of
+   * mounts they do not cover; a link under one deeper than the mount it would
+   * map to is left for that mount's own pass. `redirects`: an address one of
+   * them redirects is answered by it.
+   */
+  answered: { mounts?: ReadonlyArray<string>; redirects?: ReadonlyArray<{ source: string }> } = {},
 ): void {
   if (operationLinks.size === 0 && prefixLandings.size === 0) return
   const unmatched = new Set<string>()
+  const served = servedRoutes(pages)
+  for (const { source } of answered.redirects ?? []) {
+    const route = literalRoute(source)
+    if (route) served.add(route)
+  }
+  const others = (answered.mounts ?? []).map(mountPrefix).filter(Boolean)
   for (const page of pages) {
-    page.body = rewriteApiOperationLinks(page.body, operationLinks, prefixLandings, unmatched)
+    page.body = rewriteApiOperationLinks(page.body, operationLinks, prefixLandings, served, unmatched, others)
   }
   if (unmatched.size === 0) return
   const sorted = [...unmatched].sort()
@@ -1871,13 +2024,17 @@ function rewriteApiLinksInPages(
  * original target is recorded into `unmatched` so the caller can emit one
  * aggregated warning instead of one per link. Links outside every known
  * prefix are left untouched — still broken, but no worse than before this
- * rewrite existed.
+ * rewrite existed. A link to an address the site answers itself (an authored
+ * guide inside an API directory, say, or a redirect from an old URL) is never
+ * rewritten: that page or redirect still serves the address.
  */
 function rewriteApiOperationLinks(
   body: string,
   linkMap: Map<string, string>,
   prefixLandings: Map<string, string>,
+  served: ReadonlySet<string>,
   unmatched: Set<string>,
+  otherMounts: ReadonlyArray<string>,
 ): string {
   if (linkMap.size === 0 && prefixLandings.size === 0) return body
   // Longest prefix first, so a more specific API section (e.g.
@@ -1895,8 +2052,16 @@ function rewriteApiOperationLinks(
     if (codeFence) return line
     const rewriteTarget = (target: string): string => {
       const suffixIndex = target.search(/[?#]/)
-      const path = (suffixIndex >= 0 ? target.slice(0, suffixIndex) : target).replace(/^\/+/, '').toLowerCase()
+      const literal = suffixIndex >= 0 ? target.slice(0, suffixIndex) : target
+      if (served.has(literalRoute(literal) ?? literal)) return target
+      // A trailing slash names the same address, as `literalRoute` reads it above and the endpoint maps are keyed.
+      const path = literal.replace(/^\/+|\/+$/g, '').toLowerCase()
       const suffix = suffixIndex >= 0 ? target.slice(suffixIndex) : ''
+      // The most specific mount the link lies under owns it: another pass handles it when that mount is not one of these.
+      const owner = [...prefixLandings.keys(), ...otherMounts]
+        .filter((mount) => path === mount || path.startsWith(`${mount}/`))
+        .reduce<string | null>((longest, mount) => (longest === null || mount.length > longest.length ? mount : longest), null)
+      if (owner !== null && !prefixLandings.has(owner)) return target
       const mapped = linkMap.get(path)
       if (mapped) return `${mapped}${suffix}`
       for (const [prefix, landing] of orderedPrefixes) {
@@ -3739,6 +3904,7 @@ export function migrateRepository(options: RepositoryMigrationOptions): Migratio
   const sourceRefPages: Array<MigrationPage> = []
   const sourceRefAssets: Array<MigrationAsset> = []
   const remoteApiSpecs: Array<RemoteApiSpec> = []
+  const localApiMounts: NonNullable<MigrationBundle['localApiMounts']> = []
   // Which pages reference which asset (by its normalized copy-destination
   // path), so the final asset-copy pass can prioritize referenced assets
   // over unreferenced ones when the budget is tight, and name the
@@ -5005,7 +5171,7 @@ export function migrateRepository(options: RepositoryMigrationOptions): Migratio
         resolvedSpecs.map((spec) => ({ filename: spec.filename, content: spec.content, prefix: spec.routeSegments.join('/') })),
         docsConfig,
       )
-      rewriteApiLinksInPages(pages, operationLinks, prefixLandings, warnings)
+      rewriteApiLinksInPages(pages, operationLinks, prefixLandings, warnings, { redirects: docsConfig.redirects })
     }
   } else if (platform === 'mintlify') {
     const warnSharedSpec = (path: string, excluded: Array<string> = []): void => {
@@ -5041,36 +5207,19 @@ export function migrateRepository(options: RepositoryMigrationOptions): Migratio
           && !publishedSpecRefs.some((ref) => specRefMatches(ref, spec.sourcePath, spec.filename, true))
       }
       docsConfig = injectOpenApiSpecs(docsConfig, resolvedSpecs, warnings)
-      const { operationLinks, prefixLandings, mintlifyPages, duplicatePages } = apiOperationLinkMap(
-        resolvedSpecs.map((spec) => ({ filename: spec.filename, content: spec.content, prefix: spec.directory })),
-        docsConfig,
-      )
-      rewriteApiLinksInPages(pages, operationLinks, prefixLandings, warnings)
-      if (duplicatePages.length > 0) {
-        const listed = duplicatePages.slice(0, 10).map((url) => `/${url}`).join(', ')
-        warnings.push({
-          code: 'unsupported-config',
-          message: `${duplicatePages.length} Mintlify endpoint URL${duplicatePages.length === 1 ? ' is' : 's are'} shared by more than one operation (same tag and summary), so only the first operation is redirected from each: ${listed}${duplicatePages.length > 10 ? ', ...' : ''}.`,
-        })
+      if (remoteApiSpecs.length > 0) {
+        // A remote tab that binds ahead of these shifts their ids, so hydration links every mount, local and remote, once the downloads have settled.
+        localApiMounts.push(...resolvedSpecs.flatMap((spec) => spec.directory ? [{ filename: spec.filename, directory: spec.directory, ...(spec.tabLabel ? { tab: spec.tabLabel } : {}) }] : []))
+      } else {
+        // Mintlify's own endpoint URLs keep working: they have no page of their own here.
+        const endpointRedirects = linkApiMounts(
+          resolvedSpecs.map((spec) => ({ filename: spec.filename, content: spec.content, prefix: spec.directory, ...(spec.tabLabel ? { tab: spec.tabLabel } : {}) })),
+          docsConfig,
+          pages,
+          warnings,
+        )
+        if (endpointRedirects.length > 0) docsConfig = { ...docsConfig, redirects: [...(docsConfig.redirects ?? []), ...endpointRedirects] }
       }
-      // Mintlify's own endpoint URLs keep working: they have no page of their own here.
-      const taken = new Set([...pages.map((page) => page.id), ...(docsConfig.redirects ?? []).map((redirect) => redirect.source.replace(/^\//, ''))])
-      const candidates = [...mintlifyPages].filter(([source]) => !taken.has(source))
-      const endpointRedirects = candidates.slice(0, MAX_ENDPOINT_REDIRECTS)
-        .map(([source, destination]) => ({ source: `/${source}`, destination }))
-      const alreadyTaken = mintlifyPages.size - candidates.length
-      const capped = candidates.length - endpointRedirects.length
-      if (alreadyTaken + capped > 0) {
-        const reasons = [
-          alreadyTaken > 0 ? `${alreadyTaken} because the URL already has a page or redirect` : '',
-          capped > 0 ? `${capped} because a site is limited to ${MAX_ENDPOINT_REDIRECTS} generated endpoint redirects` : '',
-        ].filter(Boolean).join(' and ')
-        warnings.push({
-          code: 'unsupported-config',
-          message: `Created ${endpointRedirects.length} of ${mintlifyPages.size} Mintlify endpoint redirects; skipped ${alreadyTaken + capped}: ${reasons}. Old links to skipped endpoint URLs will not redirect.`,
-        })
-      }
-      if (endpointRedirects.length > 0) docsConfig = { ...docsConfig, redirects: [...(docsConfig.redirects ?? []), ...endpointRedirects] }
     } else {
       // No docs.json-configured spec at all: fall back to a naive repo scan,
       // matching every other platform's baseline behavior.
@@ -5117,8 +5266,10 @@ export function migrateRepository(options: RepositoryMigrationOptions): Migratio
     if (docsConfig.tabs.some((tab) => tab.api)) docsConfig = { ...docsConfig, api: { ...docsConfig.api, specLink: false } }
   }
   if (platform === 'mintlify') {
-    const sources = new Set((docsConfig.redirects ?? []).map((redirect) => redirect.source))
-    const aliases = routeAliases.filter((redirect) => !sources.has(redirect.source))
+    const sources = new Set((docsConfig.redirects ?? []).map((redirect) => redirect.source.toLowerCase()))
+    // An alias for a path the site serves as a page of its own (the version-less form of a page under the default version, say) would hide that page.
+    const served = servedRoutes(pages)
+    const aliases = routeAliases.filter((redirect) => !sources.has(redirect.source.toLowerCase()) && !served.has(literalRoute(redirect.source) ?? redirect.source))
     if (aliases.length > 0) docsConfig = { ...docsConfig, redirects: [...(docsConfig.redirects ?? []), ...aliases] }
     docsConfig = addMintlifyHomepageRedirects(addMintlifyDirectoryRedirects(docsConfig, pages), pages)
     // `index.mdx` pages often publish at their parent route while source
@@ -5374,35 +5525,8 @@ export function migrateRepository(options: RepositoryMigrationOptions): Migratio
     }
   }
   if (docsConfig.redirects) {
-    docsConfig = {
-      ...docsConfig,
-      redirects: docsConfig.redirects.filter((redirect) => {
-        // A redirect back to the same literal route loops before the page can
-        // render. Treat a trailing slash as the same route, while retaining
-        // destinations with a query or fragment because they carry intent.
-        const literalRoute = (route: string): string | null =>
-          route.startsWith('/') && !/[?:*#()[\]{}]/.test(route)
-            ? route.replace(/\/+$/, '') || '/'
-            : null
-        const sourceRoute = literalRoute(redirect.source)
-        if (sourceRoute && sourceRoute === literalRoute(redirect.destination)) {
-          warnings.push({
-            code: 'unsupported-config',
-            message: `Self-redirect from ${redirect.source} to ${redirect.destination} was omitted.`,
-          })
-          return false
-        }
-        // Next's route-pattern parser treats these as operators. Source
-        // paths such as Mintlify's literal `/client/c++` must not make the
-        // entire generated project fail to build.
-        if (!/[+?()[\]{}]/.test(redirect.source)) return true
-        warnings.push({
-          code: 'unsupported-config',
-          message: `Redirect from ${redirect.source} contains route-pattern syntax Next.js cannot express literally and was omitted.`,
-        })
-        return false
-      }),
-    }
+    // Every platform's redirects meet here: none may fail the build, hide a page or loop.
+    docsConfig = dropConflictingRedirects(dropUnroutableRedirects(docsConfig, warnings), [...pages, ...sourceRefPages], warnings)
   }
 
   if (pages.length === 0) {
@@ -5666,6 +5790,7 @@ export function migrateRepository(options: RepositoryMigrationOptions): Migratio
     assets,
     ...(importedSourceRefs.length > 0 ? { sourceRefs: importedSourceRefs } : {}),
     ...(remoteApiSpecs.length > 0 ? { remoteApiSpecs } : {}),
+    ...(remoteApiSpecs.length > 0 && localApiMounts.length > 0 ? { localApiMounts } : {}),
     ...(componentMigrator ? { componentFiles: componentMigrator.files() } : {}),
     ...(quarantinedFiles.length > 0 ? { quarantinedFiles } : {}),
     ...(droppedGatedFiles.length > 0 ? { droppedGatedPages: droppedGatedFiles.length } : {}),

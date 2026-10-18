@@ -1,6 +1,6 @@
 {
   "name": "@thallylabs/core",
-  "version": "0.2.15",
+  "version": "0.2.16",
   "description": "Framework-agnostic content engine for publishing Thally docs to people, search engines, and AI tools.",
   "type": "module",
   "sideEffects": false,

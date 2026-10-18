@@ -37,14 +37,18 @@ export function Steps({ children, className, titleSize }: StepsProps) {
 interface StepProps {
   title: string
   titleSize?: StepTitleSize
+  /** Set by the page's heading pass for a title that is a heading, so the table of contents can list it and scroll to it. */
+  id?: string
   children?: ReactNode
 }
 
-function StepTitle({ as: Title, children }: { as: StepTitleSize; children: ReactNode }) {
-  return <Title className="font-heading text-[1.02rem] font-semibold tracking-[-0.012em] text-foreground">{children}</Title>
+function StepTitle({ as: Title, id, children }: { as: StepTitleSize; id?: string; children: string }) {
+  // A plain-text (`p`) title is never a heading, whatever id it was handed.
+  const heading = id && Title !== 'p' ? { id, 'data-heading': children, 'data-level': Number(Title[1]) } : undefined
+  return <Title {...heading} className="font-heading text-[1.02rem] font-semibold tracking-[-0.012em] text-foreground">{children}</Title>
 }
 
-export function Step({ title, titleSize, children }: StepProps) {
+export function Step({ title, titleSize, id, children }: StepProps) {
   const inherited = useContext(StepsTitleSizeContext)
   return (
     <div
@@ -59,7 +63,7 @@ export function Step({ title, titleSize, children }: StepProps) {
 
       {/* Step content */}
       <div className="min-w-0 pt-1">
-        <StepTitle as={titleSize ?? inherited ?? 'h3'}>{title}</StepTitle>
+        <StepTitle as={titleSize ?? inherited ?? 'h3'} id={id}>{title}</StepTitle>
         {children ? (
           <div className="prose prose-sm dark:prose-invert mt-2 max-w-none text-foreground/80">
             {children}

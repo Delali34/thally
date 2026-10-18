@@ -9,6 +9,9 @@ import { join, extname, relative } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { parseFrontmatter } from './frontmatter.js'
 import { parse as parseYaml } from 'yaml'
+import remarkMdx from 'remark-mdx'
+import remarkParse from 'remark-parse'
+import { unified } from 'unified'
 import { readDocsJson, writeDocsJson } from './docs-json.js'
 import { pageState, parseDocReference, type CheckSpec, type DocReference } from './openapi-publication.js'
 import { manualApiProblems } from './manual-api-check.js'
@@ -191,17 +194,73 @@ function renderedHeadingText(source: string): string {
   return visible
 }
 
+const mdxParser = unified().use(remarkParse).use(remarkMdx)
+
+/** A node of the MDX syntax tree, the one the renderer and the content parser read; JSX elements carry their tag name and attributes. */
+interface MdxNode {
+  type: string
+  name?: string | null
+  attributes?: Array<{ type: string; name?: string; value?: unknown }>
+  children?: Array<MdxNode>
+  position?: { start: { line: number } }
+}
+
+/** A literal string attribute, as MDX decodes it; `null` for an expression, `undefined` when the attribute is absent. */
+function stringAttribute(node: MdxNode, name: string): string | null | undefined {
+  const attribute = node.attributes?.find((item) => item.type === 'mdxJsxAttribute' && item.name === name)
+  if (!attribute) return undefined
+  return typeof attribute.value === 'string' ? attribute.value : null
+}
+
+/**
+ * Titles of the `<Step>`s that render as headings: `titleSize` h2, h3 or h4 on
+ * the step or, failing that, on the `<Steps>` around it. Only literal strings
+ * count, as in the runtime. Each carries the line its tag starts on. The steps
+ * are read from the MDX syntax tree, so a tag written inside inline code or a
+ * comment is not one; a page MDX cannot read has none, as for the content parser.
+ */
+function extractStepHeadings(content: string): Array<{ line: number; base: string; explicit: boolean }> {
+  // Parsing costs milliseconds per page; skip it on the many pages with no step.
+  if (!content.includes('<Step')) return []
+  let tree: MdxNode
+  try {
+    tree = mdxParser.parse(content) as unknown as MdxNode
+  } catch {
+    return []
+  }
+  const steps: Array<{ line: number; base: string; explicit: boolean }> = []
+  const visit = (node: MdxNode, stepSize: string | undefined): void => {
+    let childSize = stepSize
+    if (node.type === 'mdxJsxFlowElement' || node.type === 'mdxJsxTextElement') {
+      // `<Steps>` hands its size to every step below it, set or not (a React context).
+      if (node.name === 'Steps') childSize = stringAttribute(node, 'titleSize') ?? undefined
+      if (node.name === 'Step') {
+        const own = stringAttribute(node, 'titleSize')
+        const size = own === undefined ? stepSize : own
+        const title = stringAttribute(node, 'title')?.trim()
+        if (title && size && ['h2', 'h3', 'h4'].includes(size)) {
+          const id = stringAttribute(node, 'id')?.trim()
+          steps.push({ line: node.position?.start.line ?? 0, base: id || slugify(title), explicit: !!id })
+        }
+      }
+    }
+    for (const child of node.children ?? []) visit(child, childSize)
+  }
+  visit(tree, undefined)
+  return steps
+}
+
 function extractHeadingAnchors(content: string): Set<string> {
   const anchors = new Set<string>()
-  const headings: Array<{ base: string; explicit: boolean }> = []
-  forEachNonFencedLine(content, (line) => {
+  const headings: Array<{ base: string; explicit: boolean; line: number }> = []
+  forEachNonFencedLine(content, (line, lineNumber) => {
     const heading = /^ {0,3}#{1,6}\s+(.+?)\s*#*\s*$/.exec(line)
     if (heading) {
       // The runtime hashes rendered heading text. JSX badges and inline
       // anchors contribute their visible children, never their tag/props.
       // A trailing `{/* #id */}` is the id the runtime uses instead of the text's slug.
       const explicit = /\{\/\*\s*#(\S+?)\s*\*\/\}$/.exec(heading[1])
-      headings.push({ base: explicit?.[1] ?? slugify(renderedHeadingText(heading[1])), explicit: !!explicit })
+      headings.push({ base: explicit?.[1] ?? slugify(renderedHeadingText(heading[1])), explicit: !!explicit, line: lineNumber })
     }
     for (const idMatch of line.matchAll(EXPLICIT_ID_ATTRIBUTE)) {
       const id = idMatch[1] ?? idMatch[2] ?? idMatch[3]
@@ -216,6 +275,8 @@ function extractHeadingAnchors(content: string): Set<string> {
   })
   // Same numbering as the runtime and the content parser: `foo`, `foo-2`, `foo-3`;
   // an explicit id reserves its id, so generated ids skip it.
+  headings.push(...extractStepHeadings(content))
+  headings.sort((left, right) => left.line - right.line)
   const reserved = new Set(headings.filter((heading) => heading.explicit).map((heading) => heading.base))
   const used = new Set<string>()
   const occurrences = new Map<string, number>()

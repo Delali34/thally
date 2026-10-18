@@ -67,6 +67,13 @@ describe('Mintlify referenced directory landings', () => {
     }
   })
 
+  it('adds no landing for an address that differs from a page or an authored redirect only in letter case', () => {
+    const cased: MigrationDocsConfig['tabs'] = [{ tab: 'Guides', pages: ['Guides/Examples/webhook'] }]
+    const authored = { source: '/guides/examples', destination: '/chosen' }
+    const result = addMintlifyDirectoryRedirects({ tabs: cased, redirects: [authored] }, [page('Guides/Examples/webhook'), page('guides')])
+    expect(result.redirects).toEqual([authored])
+  })
+
   it('retains a conventional overview landing ahead of a first-descendant fallback', () => {
     const incoming = { source: '/examples', destination: '/guides/examples' }
     const result = addMintlifyDirectoryRedirects({ tabs, redirects: [incoming] }, [
@@ -670,6 +677,57 @@ describe('Mintlify openapi object-form reference', () => {
       tabLabel: 'Documentation',
       directory: 'qstash/api-reference',
     }])
+  })
+})
+
+describe('Mintlify directory reference with an explicit operation list', () => {
+  it('reports the operations listed under each directory, nested groups included, in authored order', () => {
+    const source = 'https://specs.example.com/openapi.json'
+    const references = mintlifyNavigationApiReferences({
+      navigation: {
+        products: [
+          {
+            product: 'Compute',
+            tabs: [{
+              tab: 'API reference',
+              openapi: { source, directory: 'compute/api-reference' },
+              groups: [{ group: 'Projects', pages: ['POST /v2/projects.createProject', 'POST /v2/projects.getProject'] }],
+            }],
+          },
+          {
+            product: 'Platform',
+            tabs: [{
+              tab: 'API reference',
+              openapi: { source, directory: 'platform/api-reference' },
+              groups: [{ group: 'Compute', pages: [{ group: 'Apps', pages: ['POST /v2/apps.getApp', 'POST /v2/apps.createApp'] }] }],
+            }],
+          },
+        ],
+      },
+    })
+    expect(references).toEqual([
+      { value: source, kind: 'openapi', tabLabel: 'API reference', directory: 'compute/api-reference', operations: ['POST /v2/projects.createProject', 'POST /v2/projects.getProject'] },
+      { value: source, kind: 'openapi', tabLabel: 'API reference', directory: 'platform/api-reference', operations: ['POST /v2/apps.getApp', 'POST /v2/apps.createApp'] },
+    ])
+  })
+
+  it('leaves a nested spec its own operations and reports none for a tab that lists no operation', () => {
+    const references = mintlifyNavigationApiReferences({
+      navigation: {
+        tabs: [{
+          tab: 'API',
+          openapi: { source: 'a.yaml', directory: 'api' },
+          groups: [
+            { group: 'Guides', pages: ['guide'] },
+            { group: 'Admin', openapi: 'admin.yaml', pages: ['GET /admin/users'] },
+          ],
+        }],
+      },
+    })
+    expect(references).toEqual([
+      { value: 'a.yaml', kind: 'openapi', tabLabel: 'API', directory: 'api' },
+      { value: 'admin.yaml', kind: 'openapi', tabLabel: 'API' },
+    ])
   })
 })
 

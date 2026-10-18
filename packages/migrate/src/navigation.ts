@@ -66,26 +66,28 @@ export function addMintlifyDirectoryRedirects(
   config: MigrationDocsConfig,
   pages: Array<MigrationPage>,
 ): MigrationDocsConfig {
-  const pageIds = new Set(pages.map((page) => page.id))
+  // Compared in lower case: a server that ignores letter case would send a visit to a page, or to an authored redirect, from an address that differs only in case.
+  const pageIds = new Set(pages.map((page) => page.id.toLowerCase()))
   const redirects = [...(config.redirects ?? [])]
-  const redirectSources = new Set(redirects.map((redirect) => redirect.source.replace(/\/$/, '') || '/'))
+  const redirectSources = new Set(redirects.map((redirect) => (redirect.source.replace(/\/$/, '') || '/').toLowerCase()))
   function hasAuthoredRedirect(source: string): boolean {
-    if (redirectSources.has(source)) return true
+    const route = source.toLowerCase()
+    if (redirectSources.has(route)) return true
     return (config.redirects ?? []).some((redirect) => {
       // A trailing catch-all also owns its empty suffix. Do not insert an
       // exact alias that competes with that authored directory behavior.
-      const match = redirect.source.match(/^(.*)\/:[A-Za-z_][A-Za-z0-9_]*\*\/?$/)
-      return match ? source === match[1] || source.startsWith(`${match[1]}/`) : false
+      const match = redirect.source.toLowerCase().match(/^(.*)\/:[a-z_][a-z0-9_]*\*\/?$/)
+      return match ? route === match[1] || route.startsWith(`${match[1]}/`) : false
     })
   }
   for (const page of pages) {
     if (!/\/(?:overview|introduction)$/.test(page.navigationId)) continue
     const parent = page.id.replace(/\/(?:overview|introduction)$/, '')
-    if (!parent || pageIds.has(parent)) continue
+    if (!parent || pageIds.has(parent.toLowerCase())) continue
     const source = `/${parent}`
     if (hasAuthoredRedirect(source)) continue
     redirects.push({ source, destination: `/${page.id}`, permanent: false })
-    redirectSources.add(source)
+    redirectSources.add(source.toLowerCase())
   }
 
   const navigationOrder: Array<string> = []
@@ -126,13 +128,13 @@ export function addMintlifyDirectoryRedirects(
   // introduction pass above, or the project's own `redirects:`, already
   // covers, and `pageIds.has(directory)` never overrides a real page.
   for (const [directory, landing] of firstDescendantByDirectory) {
-    if (pageIds.has(directory)) continue
+    if (pageIds.has(directory.toLowerCase())) continue
     const source = `/${directory}`
     if (hasAuthoredRedirect(source)) continue
     // Match full stored ids, not locale-independent navigation ids: a French
     // directory must never be redirected to an English descendant.
     redirects.push({ source, destination: `/${landing.id}`, permanent: false })
-    redirectSources.add(source)
+    redirectSources.add(source.toLowerCase())
   }
   return redirects.length > 0 ? { ...config, redirects } : config
 }
@@ -166,14 +168,14 @@ export function addMintlifyHomepageRedirects(
   // renderer's root alias for it is not served and links, canonicals and the sitemap agree on one URL.
   if (!homepage) return config
   const redirects = [...(config.redirects ?? [])]
-  const sources = new Set(redirects.map((redirect) => redirect.source.replace(/\/$/, '') || '/'))
+  const sources = new Set(redirects.map((redirect) => (redirect.source.replace(/\/$/, '') || '/').toLowerCase()))
   const roots = ['', ...(config.i18n?.locales ?? [])
     .filter((locale) => locale.code !== config.i18n?.defaultLocale)
     .filter((locale) => homepage !== 'introduction' || pages.some((page) => page.locale === locale.code && page.navigationId === homepage))
     .map((locale) => locale.code)]
   for (const locale of roots) {
     const source = locale ? `/${locale}` : '/'
-    if (sources.has(source)) continue
+    if (sources.has(source.toLowerCase())) continue
     redirects.push({ source, destination: `${locale ? `/${locale}` : ''}/${homepage}`, permanent: true })
   }
   return { ...config, redirects }
@@ -347,12 +349,36 @@ export interface MintlifyApiSpecReference {
   hidden?: boolean
   /** Mintlify's `{ source, directory }` output folder, which Thally does not use (endpoints live under `/api/`). */
   directory?: string
+  /** `METHOD /path` operations the navigation under this reference lists, in authored order; absent when it lists none. */
+  operations?: Array<string>
 }
 
 /** `openapi`/`asyncapi` is a path/URL string, or Mintlify's `{ source, directory }` object. */
 function specSource(value: unknown): string | undefined {
   const source = typeof value === 'string' ? value : objectValue(value)?.source
   return typeof source === 'string' && source.trim() ? source.trim() : undefined
+}
+
+/**
+ * The operations a navigation container lists by name ("POST /users"), in
+ * authored order. A nested container that binds a spec of its own lists that
+ * spec's operations, not this one's.
+ */
+function listedOperations(container: Record<string, unknown>): Array<string> {
+  const operations: Array<string> = []
+  const visit = (entry: unknown, root: boolean): void => {
+    if (typeof entry === 'string') {
+      if (OPENAPI_OPERATION_REF.test(entry)) operations.push(entry.trim())
+      return
+    }
+    const object = objectValue(entry)
+    if (!object || (!root && (specSource(object.openapi) || specSource(object.asyncapi)))) return
+    for (const key of ['groups', 'pages'] as const) {
+      if (Array.isArray(object[key])) (object[key] as Array<unknown>).forEach((child) => visit(child, false))
+    }
+  }
+  visit(container, true)
+  return operations
 }
 
 const hasNavigationChildren = (node: Record<string, unknown>): boolean =>
@@ -384,9 +410,11 @@ export function mintlifyNavigationApiReferences(config: Record<string, unknown>)
       const value = specSource(node[kind])
       const directory = objectValue(node[kind])?.directory
       if (value) {
+        const operations = typeof directory === 'string' && directory.trim() ? listedOperations(node) : []
         references.push({
           value, kind, tabLabel, ...sibling,
           ...(typeof directory === 'string' && directory.trim() ? { directory: directory.trim() } : {}),
+          ...(operations.length > 0 ? { operations } : {}),
         })
       }
     }

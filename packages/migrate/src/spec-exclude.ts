@@ -41,6 +41,32 @@ export function withheldOperationKeys(
   return { withheld: keysFor(spec, withheldRefs).filter((key) => !kept.includes(key)), kept }
 }
 
+/** A UTF-8 byte order mark ahead of the document: `JSON.parse` rejects it, so a spec saved with one would not load as JSON. */
+export function withoutByteOrderMark(content: Buffer): Buffer {
+  return content.length >= 3 && content[0] === 0xef && content[1] === 0xbb && content[2] === 0xbf ? content.subarray(3) : content
+}
+
+/**
+ * Reads a spec by what it is, not by its URL, file name or first character:
+ * JSON when it is strict JSON, YAML when the YAML parser accepts it (flow-style
+ * YAML such as `{openapi: 3.0.0}` opens with a brace too). A leading byte order
+ * mark is ignored. When neither accepts it, the error is the one of the format
+ * it looks like. Every place that picks a spec's saved extension, its parser or
+ * the format it is written back in asks this, so they cannot disagree.
+ */
+export function parseSpecDocument(text: string): { format: 'json' | 'yaml'; document: unknown } {
+  const source = text.replace(/^\uFEFF/, '')
+  try {
+    return { format: 'json', document: JSON.parse(source) as unknown }
+  } catch (jsonError) {
+    try {
+      return { format: 'yaml', document: parseYaml(source) as unknown }
+    } catch (yamlError) {
+      throw source.trimStart().startsWith('{') ? jsonError : yamlError
+    }
+  }
+}
+
 /**
  * Marks the given operations `x-excluded` (the renderer's sanitizer then drops
  * them from every published surface); returns the new bytes and the operations
@@ -52,8 +78,9 @@ export function markExcluded(content: Buffer, operationKeys: ReadonlyArray<strin
   if (operationKeys.length === 0) return untouched
   const text = content.toString('utf8')
   type Entries = Record<string, Record<string, unknown> | undefined>
-  let doc: { paths?: Entries; webhooks?: Entries; 'x-webhooks'?: Entries }
-  try { doc = parseYaml(text) } catch { return untouched }
+  let parsed: ReturnType<typeof parseSpecDocument>
+  try { parsed = parseSpecDocument(text) } catch { return untouched }
+  const doc = parsed.document as { paths?: Entries; webhooks?: Entries; 'x-webhooks'?: Entries } | null
   if (!doc || typeof doc !== 'object') return untouched
   const excluded: Array<string> = []
   for (const key of operationKeys) {
@@ -73,7 +100,7 @@ export function markExcluded(content: Buffer, operationKeys: ReadonlyArray<strin
     if (target && typeof target === 'object') { (target as Record<string, unknown>)['x-excluded'] = true; excluded.push(`${method.toUpperCase()} ${name}`) }
   }
   if (excluded.length === 0) return untouched
-  const out = text.trimStart().startsWith('{') ? `${JSON.stringify(doc, null, 2)}\n` : stringifyYaml(doc)
+  const out = parsed.format === 'json' ? `${JSON.stringify(doc, null, 2)}\n` : stringifyYaml(doc)
   return { content: Buffer.from(out), excluded }
 }
 

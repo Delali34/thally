@@ -16,6 +16,7 @@ import { parseMarkdownPage } from './mdx.js'
 import { addMintlifyDirectoryRedirects, buildNavigationFromPages, projectMintlifyNavigation } from './navigation.js'
 import { pageIdFromReference } from './path.js'
 import { migrationImageAttribute, migrationImageCandidates, migrationImageUrl, renderMigrationSrcset } from './url-images.js'
+import { dropConflictingRedirects, dropUnroutableRedirects } from './redirects.js'
 import type {
   MigrationBundle,
   MigrationFetcher,
@@ -2155,6 +2156,7 @@ export async function migrateUrl(options: UrlMigrationOptions): Promise<Migratio
     }
   }
   if (platform === 'mintlify') docsConfig = addMintlifyDirectoryRedirects(docsConfig, pages)
+  docsConfig = dropConflictingRedirects(dropUnroutableRedirects(docsConfig, warnings), pages, warnings)
   return {
     sourceUrl: source.toString(),
     sourceKind: 'url',

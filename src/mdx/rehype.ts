@@ -690,37 +690,95 @@ function takeHeadingIdMarker(node: Element): string | undefined {
   return values[index]
 }
 
+/** Step title sizes that render a heading (and so an id and a table-of-contents entry); `p` is plain text. */
+const STEP_HEADING_SIZES = new Set(['h2', 'h3', 'h4'])
+
+/** A JSX element as MDX leaves it in the hast tree. */
+interface JsxNode {
+  type: string
+  name?: string | null
+  attributes?: Array<{ type: string; name?: string; value?: unknown }>
+  children?: Array<JsxNode | Element>
+}
+
+/** A literal string attribute; `null` for an expression, `undefined` when the attribute is absent. */
+function jsxStringAttribute(node: JsxNode, name: string): string | null | undefined {
+  const attribute = node.attributes?.find((item) => item.type === 'mdxJsxAttribute' && item.name === name)
+  if (!attribute) return undefined
+  return typeof attribute.value === 'string' ? attribute.value : null
+}
+
+interface HeadingTarget {
+  text: string
+  /** An id the author fixed (`id` attribute or `{/* #id *\/}` comment). */
+  given?: string
+  assign: (id: string) => void
+}
+
 /**
  * Give repeated headings distinct, stable fragments in document order:
  * `foo`, `foo-2`, `foo-3`. An explicit id (`{/* #id *\/}` or an `id` attribute)
  * reserves it for the whole page, so a generated id never takes it. The same
  * numbering is used by the content parser (search anchors) and `thally check`.
+ *
+ * A `<Step>` whose title renders as a heading (`titleSize` h2, h3 or h4, on the
+ * step or its `<Steps>`) is numbered with the rest and given the `id` its title
+ * is rendered with, so the table of contents scrolls to it.
  */
 function rehypeUniqueHeadingIds() {
   return (tree: Root) => {
     const occurrences = new Map<string, number>()
     const usedIds = new Set<string>()
-    const headings: Array<Element> = []
-    const explicit = new Map<Element, string>()
+    const targets: Array<HeadingTarget> = []
     const text = (node: Element): string => node.children.map((child) =>
       child.type === 'text' ? child.value
         : child.type === 'element' ? text(child)
           : '').join('')
-    visit(tree, 'element', (node: Element) => {
-      if (!/^h[2-6]$/.test(node.tagName)) return
-      headings.push(node)
-      const given = typeof node.properties?.id === 'string' && node.properties.id
-        ? node.properties.id : takeHeadingIdMarker(node)
-      if (given) explicit.set(node, given)
-    })
-    const reserved = new Set(explicit.values())
-    for (const node of headings) {
-      const given = explicit.get(node)
-      const base = given ?? slugify(text(node))
+    const collect = (node: Element | JsxNode | Root, stepSize: string | undefined): void => {
+      let childSize = stepSize
+      if (node.type === 'element') {
+        const element = node as Element
+        if (/^h[2-6]$/.test(element.tagName)) {
+          const given = typeof element.properties?.id === 'string' && element.properties.id
+            ? element.properties.id : takeHeadingIdMarker(element)
+          targets.push({
+            text: text(element),
+            given: given || undefined,
+            assign: (id) => { element.properties = { ...element.properties, id } },
+          })
+        }
+      } else if (node.type === 'mdxJsxFlowElement' || node.type === 'mdxJsxTextElement') {
+        const jsx = node as JsxNode
+        // `<Steps>` hands its size to every step below it, set or not (a React context).
+        if (jsx.name === 'Steps') childSize = jsxStringAttribute(jsx, 'titleSize') ?? undefined
+        if (jsx.name === 'Step') {
+          const own = jsxStringAttribute(jsx, 'titleSize')
+          const size = own === undefined ? stepSize : own
+          const title = jsxStringAttribute(jsx, 'title')?.trim()
+          if (title && size && STEP_HEADING_SIZES.has(size)) {
+            targets.push({
+              text: title,
+              given: jsxStringAttribute(jsx, 'id')?.trim() || undefined,
+              assign: (id) => {
+                const attributes = (jsx.attributes ??= [])
+                const existing = attributes.find((attribute) => attribute.type === 'mdxJsxAttribute' && attribute.name === 'id')
+                if (existing) existing.value = id
+                else attributes.push({ type: 'mdxJsxAttribute', name: 'id', value: id })
+              },
+            })
+          }
+        }
+      }
+      for (const child of (node as JsxNode).children ?? []) collect(child, childSize)
+    }
+    collect(tree, undefined)
+    const reserved = new Set(targets.flatMap((target) => target.given ? [target.given] : []))
+    for (const target of targets) {
+      const base = target.given ?? slugify(target.text)
       if (!base) continue
       let id = base
       let occurrence = 1
-      if (given) {
+      if (target.given) {
         while (usedIds.has(id)) id = `${base}-${++occurrence}`
       } else {
         occurrence = occurrences.get(base) ?? 0
@@ -729,7 +787,7 @@ function rehypeUniqueHeadingIds() {
         occurrences.set(base, occurrence)
       }
       usedIds.add(id)
-      node.properties = { ...node.properties, id }
+      target.assign(id)
     }
   }
 }

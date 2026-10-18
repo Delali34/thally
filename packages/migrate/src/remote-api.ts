@@ -8,12 +8,13 @@ import { lookup } from 'node:dns/promises'
 import { request } from 'node:https'
 import { isIP } from 'node:net'
 
-import { parse as parseYaml } from 'yaml'
 
 import { splitOpenApiRef, withSpecRef } from './openapi-ref.js'
 import { insertApiTab } from './navigation.js'
-import { markExcluded, sharedSpecMessage } from './spec-exclude.js'
-import type { MigrationBundle, MigrationFetcher } from './types.js'
+import { dropConflictingRedirects, dropUnroutableRedirects, literalRoute, servedRoutes } from './redirects.js'
+import { apiTabSpecIds, isWithheld, linkApiMounts, mountPrefix, thallyOperationSlugSegments } from './repository.js'
+import { markExcluded, parseSpecDocument, sharedSpecMessage, withoutByteOrderMark } from './spec-exclude.js'
+import type { MigrationBundle, MigrationFetcher, RemoteApiSpec } from './types.js'
 
 const MAX_SPEC_BYTES = 25_000_000
 const MAX_REDIRECTS = 3
@@ -137,12 +138,7 @@ interface OpenApiOperation {
   summary: string
 }
 
-function parseOpenApi(content: Buffer, extension: string): Array<OpenApiOperation> {
-  const text = content.toString('utf8')
-  // A remote endpoint may serve YAML from a path without a .yaml suffix.
-  const parsed = extension === 'yaml' || !text.trimStart().startsWith('{')
-    ? parseYaml(text) as unknown
-    : JSON.parse(text) as unknown
+function parseOpenApi(parsed: unknown): Array<OpenApiOperation> {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('OpenAPI spec is not an object.')
   const document = parsed as Record<string, unknown>
   if (typeof document.openapi !== 'string' || !/^3\./.test(document.openapi)) {
@@ -155,11 +151,13 @@ function parseOpenApi(content: Buffer, extension: string): Array<OpenApiOperatio
   if (paths.length > 5_000) throw new Error('Remote OpenAPI spec has too many paths to import.')
   const operations: Array<OpenApiOperation> = []
   for (const [path, value] of paths) {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) continue
+    if (!value || typeof value !== 'object' || Array.isArray(value) || isWithheld(value as Record<string, unknown>)) continue
     for (const [method, raw] of Object.entries(value as Record<string, unknown>)) {
       if (!/^(get|post|put|patch|delete|head|options|trace)$/i.test(method)
         || !raw || typeof raw !== 'object' || Array.isArray(raw)) continue
       const operation = raw as Record<string, unknown>
+      // The published spec does not carry a withheld operation, so no endpoint page exists to redirect to.
+      if (isWithheld(operation)) continue
       const tags = Array.isArray(operation.tags) ? operation.tags : []
       operations.push({
         method: method.toLowerCase(),
@@ -176,16 +174,32 @@ function slug(value: string): string {
   return value.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
 }
 
-function operationTarget(operation: OpenApiOperation): string {
-  const path = operation.path.split('/').filter(Boolean)
-    .map((part) => part.replace(/[{}]/g, '').replace(/[^a-zA-Z0-9-]/g, '-').replace(/-+/g, '-').toLowerCase())
-  return `/api/default/${[...path, operation.method].join('/')}`
+/** The endpoint page of an operation of the spec the renderer serves under `specId`. */
+function operationTarget(specId: string, operation: OpenApiOperation): string {
+  return `/api/${specId}/${thallyOperationSlugSegments(operation.path, operation.method).join('/')}`
+}
+
+/** A downloaded spec bound to its tab: what the link and redirect passes read once every spec is bound. */
+interface BoundSpec {
+  reference: RemoteApiSpec
+  filename: string
+  content: Buffer
+  operations: Array<OpenApiOperation>
+  tabName: string
 }
 
 /**
- * Attach safely downloaded specs to the exact authored API tabs. Source links
- * to Mintlify's tag/summary routes receive redirects only when an operation
- * can be identified uniquely; guessing would silently route to wrong APIs.
+ * Attach safely downloaded specs to the exact authored API tabs. A spec
+ * mounted under Mintlify `directory` folders gets a redirect from each
+ * endpoint URL those folders served, and a link under a mount (this bundle's
+ * or any other's) reaches nothing else. A link no mount covers is redirected by
+ * its tag and summary only when exactly one published operation across every
+ * spec carries them, to the id its spec is served under: guessing would
+ * silently route to the wrong API. A redirect never takes the place of a page
+ * the site serves. Every spec is bound before any link is read, so mounts
+ * nested in one another (`reference` and `reference/v2`) are told apart by
+ * their longest prefix, and the repository's own mounts are linked here too:
+ * a tab's position decides the id its spec is served under.
  */
 export async function hydrateRemoteApiSpecs(bundle: MigrationBundle, fetcher?: MigrationFetcher): Promise<MigrationBundle> {
   if (!bundle.remoteApiSpecs?.length) return bundle
@@ -195,6 +209,9 @@ export async function hydrateRemoteApiSpecs(bundle: MigrationBundle, fetcher?: M
   const warnings = [...bundle.warnings]
   const pages = bundle.pages.map((page) => ({ ...page }))
   const authoredLinks = new Set<string>()
+  const served = servedRoutes(pages)
+  // Mintlify endpoint URL -> Thally endpoint page, for every redirect generated below.
+  const endpointUrls = new Map<string, string>()
   for (const page of bundle.pages) {
     // Scan path-shaped tokens once, then inspect segments without nested
     // regex quantifiers. Authored pages may be arbitrarily long or hostile.
@@ -202,24 +219,30 @@ export async function hydrateRemoteApiSpecs(bundle: MigrationBundle, fetcher?: M
       const segments = match[0].split('/').filter(Boolean)
       if (segments.length < 3) continue
       const section = segments[0].toLowerCase()
-      if (section.includes('api') || section.includes('reference')) authoredLinks.add(match[0])
+      // `/x/y/` and `/x/y` are one URL.
+      if (section.includes('api') || section.includes('reference')) authoredLinks.add(match[0].replace(/\/+$/, ''))
     }
   }
+  const bound: Array<BoundSpec> = []
   for (const reference of bundle.remoteApiSpecs) {
     for (let index = warnings.length - 1; index >= 0; index--) {
       if (warnings[index].source === reference.url && warnings[index].message.includes('requires a network download')) warnings.splice(index, 1)
     }
     try {
-      const url = validatedSpecUrl(reference.url)
-      const extension = /\.ya?ml$/i.test(url.pathname) ? 'yaml' : 'json'
-      const downloaded = await downloadSpec(reference.url, fetcher)
+      const downloaded = withoutByteOrderMark(await downloadSpec(reference.url, fetcher))
       // Fail closed: operations only access-restricted pages document are not published.
       const pruned = markExcluded(downloaded, reference.withheldOperations ?? [], reference.keptOperations)
       const body = pruned.content
-      if (reference.withheldOperations?.length) warnings.push({ code: 'gated-page', message: sharedSpecMessage(reference.url, pruned.excluded), source: reference.url })
-      const operations = parseOpenApi(body, extension)
+      // A spec bound to several tabs is pruned the same way for each: say so once.
+      if (reference.withheldOperations?.length && !warnings.some((warning) => warning.code === 'gated-page' && warning.source === reference.url)) {
+        warnings.push({ code: 'gated-page', message: sharedSpecMessage(reference.url, pruned.excluded), source: reference.url })
+      }
+      // The format the body is in, not what its URL says: the saved extension must match it, or the install step drops a YAML spec saved as `.json` as invalid JSON.
+      const { format: extension, document } = parseSpecDocument(body.toString('utf8'))
+      const operations = parseOpenApi(document)
       const filename = `openapi-${createHash('sha256').update(reference.url).digest('hex').slice(0, 12)}.${extension}`
-      assets.push({ path: `openapi/${filename}`, content: body, projectRelative: true })
+      // Several tabs may bind one spec: it is saved once.
+      if (!assets.some((asset) => asset.path === `openapi/${filename}`)) assets.push({ path: `openapi/${filename}`, content: body, projectRelative: true })
       // Pages that name this spec by URL now resolve to the downloaded copy.
       for (const page of pages) {
         const ref = page.openapi ? splitOpenApiRef(page.openapi) : null
@@ -230,22 +253,7 @@ export async function hydrateRemoteApiSpecs(bundle: MigrationBundle, fetcher?: M
         : tabs.find((candidate) => candidate.tab.toLowerCase().includes('api'))
       if (tab) tab.api = { source: `openapi/${filename}` }
       else insertApiTab(tabs, { tab: reference.tabLabel ?? 'API Reference', ...(reference.icon ? { icon: reference.icon } : {}), ...(reference.hidden ? { hidden: true } : {}), api: { source: `openapi/${filename}` } }, reference.parentTab)
-
-      const routes = new Map<string, string | null>()
-      for (const operation of operations) {
-        const key = `${slug(operation.tag)}/${slug(operation.summary)}`
-        if (routes.has(key)) routes.set(key, null)
-        else routes.set(key, operationTarget(operation))
-      }
-      const existingSources = new Set(redirects.map((redirect) => redirect.source))
-      for (const source of authoredLinks) {
-        const parts = source.split('/').filter(Boolean)
-        const key = parts.slice(-2).join('/')
-        const destination = routes.get(key)
-        if (!destination || existingSources.has(source)) continue
-        redirects.push({ source, destination, permanent: false })
-        existingSources.add(source)
-      }
+      bound.push({ reference, filename, content: body, operations, tabName: tab?.tab ?? reference.tabLabel ?? 'API Reference' })
     } catch (error) {
       warnings.push({
         code: 'fetch-failed',
@@ -254,11 +262,72 @@ export async function hydrateRemoteApiSpecs(bundle: MigrationBundle, fetcher?: M
       })
     }
   }
+
+  // Every spec is bound, so every mount is linked once, local and remote together: each target carries the id its spec is served under,
+  // and the redirects below exist before any guess from a link's last two segments.
+  // A mount whose download failed is reserved all the same: it still owns the addresses under it, which stay as authored.
+  const directories = [
+    ...(bundle.localApiMounts ?? []).map(({ directory }) => directory),
+    ...bundle.remoteApiSpecs.flatMap((reference) => (reference.directories ?? []).map(({ directory }) => directory)),
+  ]
+  const endpointRedirects = linkApiMounts(
+    [
+      ...(bundle.localApiMounts ?? []).map(({ filename, directory, tab }) => ({
+        filename,
+        content: Buffer.from(assets.find((asset) => asset.path === `openapi/${filename}`)?.content ?? []),
+        prefix: directory,
+        ...(tab ? { tab } : {}),
+      })),
+      ...bound.flatMap(({ reference, filename, content, tabName }) => (reference.directories ?? [])
+        .map(({ directory, operations: listed }) => ({ filename, content, prefix: directory, tab: tabName, ...(listed ? { operations: listed } : {}) }))),
+    ],
+    { ...bundle.docsConfig, tabs, redirects },
+    pages,
+    warnings,
+    directories,
+  )
+  for (const redirect of endpointRedirects) {
+    redirects.push(redirect)
+    endpointUrls.set(literalRoute(redirect.source) ?? redirect.source, redirect.destination)
+  }
+
+  // Lower case, and without a trailing slash: a redirect that differs from a guessed one only in letter case or a trailing slash wins on a server that ignores them, so none is guessed for that address.
+  const existingSources = new Set(redirects.map((redirect) => literalRoute(redirect.source) ?? redirect.source.toLowerCase()))
+  const mounts = directories.map(mountPrefix).filter(Boolean)
+  const underMount = (source: string): boolean => mounts.some((prefix) => source.toLowerCase() === `/${prefix}` || source.toLowerCase().startsWith(`/${prefix}/`))
+  // Label of an operation -> its endpoint page; null when more than one carries it, or its spec serves no endpoint pages.
+  const guesses = new Map<string, string | null>()
+  const specIds = apiTabSpecIds(tabs)
+  for (const { reference, filename, operations, tabName } of bound) {
+    const specId = specIds.find(({ tab }) => tab.tab === tabName && tab.api?.source === `openapi/${filename}`)?.specId
+    // A spec whose every mount lists operations published only those; any other spec published them all.
+    const listed = reference.directories?.length && reference.directories.every((directory) => directory.operations)
+      ? new Set(reference.directories.flatMap((directory) => directory.operations ?? []).map((name) => name.trim().split(/\s+/)).map(([method, ...path]) => `${method.toLowerCase()} ${path.join(' ')}`))
+      : null
+    for (const operation of operations) {
+      if (listed && !listed.has(`${operation.method} ${operation.path}`)) continue
+      const key = `${slug(operation.tag)}/${slug(operation.summary)}`
+      guesses.set(key, guesses.has(key) || !specId ? null : operationTarget(specId, operation))
+    }
+  }
+  for (const source of authoredLinks) {
+    const destination = guesses.get(source.split('/').filter(Boolean).slice(-2).join('/'))
+    // Under a mount only the mount's own endpoint URLs (the redirects above) are known: anything else there is not a guess to make.
+    if (!destination || existingSources.has(literalRoute(source) ?? source.toLowerCase()) || served.has(literalRoute(source) ?? source) || underMount(source)) continue
+    redirects.push({ source, destination, permanent: false })
+    existingSources.add(literalRoute(source) ?? source.toLowerCase())
+  }
+  // A redirect that targets an endpoint URL goes straight to the endpoint page, not through a second redirect.
+  const direct = redirects.map((redirect) => {
+    const endpoint = endpointUrls.get(literalRoute(redirect.destination) ?? '')
+    return endpoint ? { ...redirect, destination: endpoint } : redirect
+  })
   return {
     ...bundle,
     pages,
     assets,
-    docsConfig: { ...bundle.docsConfig, tabs, ...(redirects.length > 0 ? { redirects } : {}) },
+    // Redirects added above meet the same checks as any other: none may fail the build, hide a page that exists, or loop.
+    docsConfig: dropConflictingRedirects(dropUnroutableRedirects({ ...bundle.docsConfig, tabs, ...(direct.length > 0 ? { redirects: direct } : {}) }, warnings), pages, warnings),
     warnings,
   }
 }
