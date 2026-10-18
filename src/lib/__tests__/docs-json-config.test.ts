@@ -18,6 +18,7 @@ import {
   getSidebarCollections,
   getStructuralTheme,
   getBreadcrumbsEnabled,
+  getEyebrowMode,
   getStylesheetsConfig,
 } from '@/data/docs'
 
@@ -85,6 +86,14 @@ describe('release-bound docs.json', () => {
     vi.stubEnv('THALLY_DOCS_CONFIG', JSON.stringify({ tabs: [], breadcrumbs: false }))
     resetDocsJsonConfigForTests()
     expect(getBreadcrumbsEnabled()).toBe(false)
+  })
+
+  it('shows the nearest group as the eyebrow unless docs.json sets eyebrow to path', () => {
+    for (const [eyebrow, expected] of [[undefined, 'group'], ['group', 'group'], ['path', 'path'], ['breadcrumbs', 'group'], [true, 'group']] as const) {
+      vi.stubEnv('THALLY_DOCS_CONFIG', JSON.stringify({ tabs: [], ...(eyebrow === undefined ? {} : { eyebrow }) }))
+      resetDocsJsonConfigForTests()
+      expect(getEyebrowMode(), String(eyebrow)).toBe(expected)
+    }
   })
 
   it('uses accent content icons unless a site explicitly selects neutral icons', () => {

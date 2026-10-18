@@ -16,11 +16,14 @@ export interface DocsJsonTab {
 
 export interface DocsJsonConfig {
   tabs: Array<DocsJsonTab>
+  navigation?: { versions?: Array<{ label?: string }> }
   redirects?: Array<{ source: string; destination: string; permanent?: boolean }>
   ai?: { chat?: boolean }
   i18n?: {
     defaultLocale: string
     locales: Array<{ code: string; label: string }>
+    /** Per-locale tab trees, used instead of the root `tabs` for that locale. */
+    navigation?: Record<string, Array<DocsJsonTab>>
   }
   /** Admin-dashboard team roster — git-committed, no database. */
   team?: {

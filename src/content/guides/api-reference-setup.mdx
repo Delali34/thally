@@ -48,6 +48,7 @@ The API Reference tab will auto-generate a page for every operation in your spec
 | --- | --- | --- |
 | `source` | Yes | Path to your OpenAPI spec file, relative to the project root. |
 | `navigation` | No | Set to `false` when authored MDX pages provide API navigation. Defaults to `true`. |
+| `groups` | No | Lists the sidebar groups of this tab's operations yourself, replacing the tag groups (see [Authored navigation groups](#authored-navigation-groups)). |
 | `tagsOrder` | No | Controls the order tags appear in the sidebar. Unlisted tags appear after. |
 | `defaultGroup` | No | Group name for operations without tags. Defaults to `"Endpoints"`. |
 | `webhookGroup` | No | Group name for OpenAPI webhook operations. Defaults to `"Webhooks"`. |
@@ -108,6 +109,39 @@ By default, operations are grouped by their OpenAPI `tags`. The `tagsOrder` arra
 ```
 
 Tags not listed in `tagsOrder` appear after the listed ones, in the order they first appear in the spec.
+
+## Authored navigation groups
+
+To choose the groups, their order and the operations the sidebar lists, set `groups` on the tab's `api`. It replaces the tag groups of that tab:
+
+```json
+{
+  "tab": "API reference",
+  "api": {
+    "source": "openapi.yaml",
+    "groups": [
+      {
+        "group": "Compute",
+        "pages": [
+          {
+            "group": "Projects",
+            "pages": ["POST /v2/projects.createProject", "POST /v2/projects.getProject"]
+          }
+        ]
+      },
+      { "group": "Keys", "pages": ["POST /v2/keys.createKey", "WEBHOOK POST keyRotated"] }
+    ]
+  }
+}
+```
+
+A group has `group`, an optional `icon` (an icon name or an image path; any other value is dropped and the group stays) and `pages`, like a group of a page tab. Every string in `pages` is an operation key, in the same format as `overrides`: `METHOD /path`, or `WEBHOOK METHOD name` for a webhook. The method is case-insensitive and extra spaces are ignored. The path or webhook name must match the spec exactly.
+
+- **Order.** Operations and groups appear in the order you write them, with no alphabetical sort. Top-level groups become sidebar sections and nested groups become collapsible groups. `tagsOrder`, `defaultGroup`, `webhookGroup` and the `group` override no longer affect that tab's sidebar.
+- **Operations you do not list** are not in the sidebar. Their pages and URLs still work, and they stay in search, the sitemap and `llms.txt`.
+- **Unknown keys.** A key that matches no published operation (a typo, or a hidden or excluded operation) is skipped, and a group left empty disappears. `thally check` warns about each such key. A key listed twice in one tab appears once, at its first position.
+- **Entries that are not valid.** An entry that is not a group with a `pages` list, a `pages` item that is neither an operation key nor such a group, and a group nested more than 32 levels deep are all skipped. `thally check` warns once per tab for each of the two cases, and once per tab when a group `icon` is not text. If `groups` is not a list, the tab shows the generated navigation instead, and `thally check` says so. `thally check` also covers the tabs of each language under `i18n.navigation`, naming the language.
+- **`navigation: false` wins.** With it, Thally generates no API navigation at all and `groups` is not used.
 
 ## Try It panel
 

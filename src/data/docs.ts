@@ -167,10 +167,19 @@ interface DocsJsonNavigationGroup {
   pages: Array<string | DocsJsonNavigationGroup>
 }
 
+/** A sidebar group of an API tab; strings in `pages` are operation keys (`METHOD /path`, `WEBHOOK METHOD name`). */
+export interface DocsJsonApiGroup {
+  group: string
+  icon?: string
+  pages: Array<string | DocsJsonApiGroup>
+}
+
 export interface DocsJsonApiConfig {
   source: string
   /** Set false when authored MDX groups already provide API navigation. */
   navigation?: boolean
+  /** Authored sidebar of this tab's operations, replacing the tag groups. Unlisted operations keep their pages. */
+  groups?: Array<DocsJsonApiGroup>
   tagsOrder?: Array<string>
   defaultGroup?: string
   webhookGroup?: string
@@ -296,6 +305,8 @@ interface DocsJsonConfig {
   stylesheets?: Array<string>
   /** Page breadcrumb trail above each title. Defaults to true; `false` hides it. */
   breadcrumbs?: boolean
+  /** Text above each page title: its nearest group (default) or its full group path. */
+  eyebrow?: 'group' | 'path'
   /** Manual API pages (`api:` frontmatter): default server(s) and auth for the playground. */
   api?: {
     mdx?: {
@@ -1321,16 +1332,18 @@ export function getBreadcrumbs(currentHref: string, reader: ReaderContext = ANON
  * that sit outside any navigation group (e.g. direct-link tabs).
  */
 export function getNavCategory(currentHref: string, reader: ReaderContext = ANONYMOUS_READER): string | null {
+  return getNavGroupPath(currentHref, reader).at(-1) || null
+}
+
+/** Every authored group above the page, outermost first; empty outside any group. */
+export function getNavGroupPath(currentHref: string, reader: ReaderContext = ANONYMOUS_READER): Array<string> {
   for (const collection of getSidebarCollections(navigationLocaleForHref(currentHref), reader)) {
     for (const section of collection.sections) {
       const item = section.items.find((candidate) => candidate.href === currentHref)
-      if (item) {
-        const parts = navigationGroupParts(section, item)
-        return parts[parts.length - 1] || null
-      }
+      if (item) return [...navigationGroupParts(section, item)]
     }
   }
-  return null
+  return []
 }
 
 // ---------------------------------------------------------------------------
@@ -1339,7 +1352,9 @@ export function getNavCategory(currentHref: string, reader: ReaderContext = ANON
 
 export interface NavContext {
   tab: string
+  /** The nearest group: the last of `groupPath`. */
   group: string
+  groupPath: Array<string>
   prev: PrevNextLink | null
   next: PrevNextLink | null
   breadcrumb: Array<BreadcrumbItem>
@@ -1357,21 +1372,20 @@ export function getNavContext(pageId: string, locale?: string, reader: ReaderCon
   // Find which tab and group this page belongs to
   const collections = getSidebarCollections(locale, reader)
   let tabName = ''
-  let groupName = ''
+  let groupPath: Array<string> = []
 
   outer: for (const collection of collections) {
     for (const section of collection.sections) {
       const item = section.items.find((candidate) => candidate.href === href)
       if (item) {
         tabName = collection.label
-        const parts = navigationGroupParts(section, item)
-        groupName = parts[parts.length - 1] ?? ''
+        groupPath = [...navigationGroupParts(section, item)]
         break outer
       }
     }
   }
 
-  return { tab: tabName, group: groupName, prev, next, breadcrumb }
+  return { tab: tabName, group: groupPath.at(-1) ?? '', groupPath, prev, next, breadcrumb }
 }
 
 /** Async managed-release twin of {@link getNavContext}. */
@@ -1538,6 +1552,11 @@ export function getCustomScriptsConfig(): Array<DocsJsonScript> {
 /** Breadcrumbs stay on unless docs.json sets `breadcrumbs: false`. */
 export function getBreadcrumbsEnabled(): boolean {
   return docsConfig().breadcrumbs !== false
+}
+
+/** The eyebrow above a page title: its nearest group unless docs.json sets `eyebrow: "path"`. */
+export function getEyebrowMode(): 'group' | 'path' {
+  return docsConfig().eyebrow === 'path' ? 'path' : 'group'
 }
 
 /** Only local CSS files may be injected into the document head. */

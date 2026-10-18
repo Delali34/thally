@@ -9,7 +9,7 @@ vi.mock('@/lib/i18n/translation-source', () => ({ hasDocTranslation: mocks.hasDo
 import { localizeDocNavigation } from '../navigation'
 
 const navigation: NavContext = {
-  tab: 'Guides', group: 'Integration tips',
+  tab: 'Guides', group: 'Integration tips', groupPath: ['Integration tips'],
   prev: { title: 'Slippage', href: '/guides/slippage' },
   next: { title: 'Routing', href: '/guides/routing' },
   breadcrumb: [{ label: 'Guides', href: '/guides/fees' }, { label: 'Integration tips' }, { label: 'FAQ' }],

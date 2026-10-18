@@ -8,7 +8,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { getNavCategory, getSidebarCollections } from '@/data/docs'
+import { getNavCategory, getNavContext, getNavGroupPath, getSidebarCollections, loadNavContext } from '@/data/docs'
 
 // Customer-owned navigation may have no groups, use a different home page, or
 // contain direct links. Exercise the runtime contract with explicit fixtures.
@@ -58,6 +58,33 @@ describe('getNavCategory', () => {
         }
       }
     }
+  })
+})
+
+describe('group path (the path eyebrow)', () => {
+  it('lists every group above a page, outermost first, and stays empty outside any group', () => {
+    expect(getNavGroupPath('/guides/advanced')).toEqual(['Guides', 'Advanced'])
+    expect(getNavGroupPath('/')).toEqual(['Guides'])
+    expect(getNavGroupPath('/definitely-not-a-nav-page')).toEqual([])
+  })
+
+  it('ends in the category the group eyebrow shows', () => {
+    expect(getNavCategory('/guides/advanced')).toBe('Advanced')
+    expect(getNavGroupPath('/guides/advanced').at(-1)).toBe('Advanced')
+  })
+
+  it('is on the nav context beside the nearest group, sync and for managed releases', async () => {
+    expect(getNavContext('guides/advanced')).toMatchObject({ group: 'Advanced', groupPath: ['Guides', 'Advanced'] })
+    expect(await loadNavContext('guides/advanced')).toMatchObject({ group: 'Advanced', groupPath: ['Guides', 'Advanced'] })
+    expect(getNavContext('not-in-navigation')).toMatchObject({ group: '', groupPath: [] })
+  })
+
+  it('is empty for root pages that sit outside any group', () => {
+    vi.stubEnv('THALLY_DOCS_CONFIG', JSON.stringify({
+      tabs: [{ tab: 'Documentation', pages: ['introduction', { group: 'Guides', pages: ['guides/advanced'] }] }],
+    }))
+    expect(getNavContext('introduction')).toMatchObject({ group: '', groupPath: [] })
+    expect(getNavContext('guides/advanced').groupPath).toEqual(['Guides'])
   })
 })
 

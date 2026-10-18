@@ -10,8 +10,15 @@ export interface DocsJsonNavigationGroup {
   pages: Array<string | DocsJsonNavigationGroup>
 }
 
+export interface DocsJsonApiGroup {
+  group: string
+  icon?: string
+  pages: Array<string | DocsJsonApiGroup>
+}
+
 export interface DocsJsonApiConfig {
   source: string
+  groups?: Array<DocsJsonApiGroup>
   tagsOrder?: Array<string>
   defaultGroup?: string
   webhookGroup?: string

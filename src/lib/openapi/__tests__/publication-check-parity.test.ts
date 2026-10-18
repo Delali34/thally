@@ -2,11 +2,15 @@ import { describe, expect, it } from 'vitest'
 // Monorepo-only: `thally check` ships in packages/create-thally-docs, which the
 // standalone starter does not have (see SOURCE_ONLY_PATHS in
 // .github/scripts/starter-runtime-contract.mjs).
-import { operationState, pageState, parseDocReference } from '../../../../packages/create-thally-docs/src/openapi-publication'
+import { API_GROUPS_MAX_DEPTH as CHECK_GROUPS_MAX_DEPTH, groupKeyState, listedOperationKeys, operationState, pageState, parseDocReference } from '../../../../packages/create-thally-docs/src/openapi-publication'
+import { API_GROUPS_MAX_DEPTH as MIGRATE_GROUPS_MAX_DEPTH } from '../../../../packages/migrate/src/navigation'
 import { mdxServers, paramFieldPathNames, parseManualApi } from '../../../../packages/create-thally-docs/src/manual-api-check'
 import { extractParamFields, parseApiFrontmatter, sanitizeApiMdxConfig } from '../manual-operation'
+import { normalizeSpec } from '../normalize'
+import { API_GROUPS_MAX_DEPTH, operationKeyFromRef } from '../operation-keys'
 import { parseOpenApiFrontmatter } from '../page-frontmatter'
 import { operationPublicationState, pageReferenceState, type RoutedSpec } from '../publication'
+import type { ResolvedSpec } from '../types'
 
 const ok = { responses: { 200: { description: 'ok' } } }
 const doc = (paths: Record<string, unknown>, extra: Record<string, unknown> = {}) => ({
@@ -182,5 +186,60 @@ describe('thally check manual api parity', () => {
     for (const api of [undefined, {}, { mdx: {} }, { mdx: { server: 'https://a.test/' } }, { mdx: { server: ['https://a.test', 'nope', 'https://a.test', 'https://u@h.test'] } }, { mdx: 5 }]) {
       expect(mdxServers(api), JSON.stringify(api)).toEqual(sanitizeApiMdxConfig((api as { mdx?: unknown } | undefined)?.mdx).servers)
     }
+  })
+})
+
+describe('thally check api.groups parity', () => {
+  const document = doc({
+    '/a': { get: { 'x-hidden': true, ...ok }, post: { 'x-excluded': 'true', ...ok }, put: ok, delete: ok },
+    '/entry': { 'x-excluded': true, get: ok },
+    '/ref': { $ref: '#/components/pathItems/Flagged' },
+    '/plain': { get: ok },
+  }, {
+    webhooks: {
+      shown: { post: ok, put: { 'x-hidden': true, ...ok } },
+      hidden: { 'x-hidden': true, post: ok },
+      mixed: { post: { 'x-excluded': true, ...ok }, get: ok },
+    },
+    components: { pathItems: { Flagged: { 'x-hidden': true, get: ok } } },
+  })
+  const overrides = { 'DELETE /a': { hidden: true }, 'GET /a': { hidden: false }, 'WEBHOOK PUT shown': { hidden: false }, 'WEBHOOK POST hidden': { hidden: false } }
+  const keys = [
+    'GET /a', 'POST /a', 'PUT /a', 'DELETE /a', 'get   /a', ' put /a ', 'GET /entry', 'GET /ref', 'GET /plain', 'GET /plain/', 'GET /Plain', 'FETCH /plain', 'GET', 'plain', '',
+    'WEBHOOK POST shown', 'WEBHOOK PUT shown', 'webhook put shown', 'WEBHOOK POST hidden', 'WEBHOOK POST mixed', 'WEBHOOK GET mixed', 'WEBHOOK PUT mixed',
+    'WEBHOOK GET shown', 'WEBHOOK POST nope', 'POST shown', 'WEBHOOK shown',
+  ]
+
+  it('lists the same operations in the sidebar as `thally check` calls published', () => {
+    for (const withOverrides of [undefined, overrides]) {
+      const config = { id: 'default', label: '', source: { type: 'file' as const, path: 'openapi.yaml' }, operationOverrides: withOverrides }
+      const listed = new Set(normalizeSpec({ config, document } as ResolvedSpec).operations
+        .filter((operation) => !operation.hidden)
+        .map((operation) => operation.key))
+      for (const key of keys) {
+        const siteKey = operationKeyFromRef(key)
+        expect(groupKeyState(document, key, withOverrides) === 'published', `${key} ${withOverrides ? 'with' : 'without'} overrides`)
+          .toBe(siteKey !== null && listed.has(siteKey))
+      }
+    }
+  })
+
+  it('walks nested groups and ignores anything that is not an authored string', () => {
+    expect(listedOperationKeys([
+      { group: 'A', pages: ['GET /a', { group: 'B', pages: ['POST /a', { group: 'C', pages: ['PUT /a'] }] }, 'DELETE /a'] },
+      { group: 'D', pages: [] },
+      { group: 'E', pages: [7, null, ['GET /x']] },
+      { group: 'F' },
+      'GET /stray',
+    ])).toEqual(['GET /a', 'POST /a', 'PUT /a', 'DELETE /a'])
+    expect(listedOperationKeys(undefined)).toEqual([])
+    expect(listedOperationKeys({ group: 'A', pages: ['GET /a'] })).toEqual([])
+  })
+
+  it('stops at the same group depth as the site', () => {
+    expect(CHECK_GROUPS_MAX_DEPTH).toBe(API_GROUPS_MAX_DEPTH)
+    // Renderer parity belongs to the public application, since the migration
+    // package also runs in hosts that do not ship this renderer.
+    expect(MIGRATE_GROUPS_MAX_DEPTH).toBe(API_GROUPS_MAX_DEPTH)
   })
 })

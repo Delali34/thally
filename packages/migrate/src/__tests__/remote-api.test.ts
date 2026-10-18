@@ -174,6 +174,122 @@ function mountedBundle(): MigrationBundle {
   }
 }
 
+describe('remote OpenAPI hydration of authored API groups', () => {
+  const fetcher: MigrationFetcher = async (url) => ({ finalUrl: url, body: spec, contentType: 'application/json' })
+  const groups = [{ group: 'Users', icon: 'users', pages: [{ group: 'SCIM', pages: ['GET /api/v1/scim/v2/Users'] }] }]
+
+  it('puts the groups on the tab the spec binds to, next to its source', async () => {
+    const input = bundle()
+    input.remoteApiSpecs = [{ url: SPEC_URL, tabLabel: 'API', groups }]
+    const result = await hydrateRemoteApiSpecs(input, fetcher)
+    expect(result.docsConfig.tabs[0].api).toEqual({ source: result.assets[0].path, groups })
+  })
+
+  it('puts the groups on an API tab created for the spec', async () => {
+    const input = bundle()
+    input.remoteApiSpecs = [{ url: SPEC_URL, tabLabel: 'REST', groups }]
+    const result = await hydrateRemoteApiSpecs(input, fetcher)
+    expect(result.docsConfig.tabs.find((tab) => tab.tab === 'REST')?.api).toEqual({ source: result.assets[0].path, groups })
+    expect(result.docsConfig.tabs.find((tab) => tab.tab === 'API')?.api).toBeUndefined()
+  })
+
+  it('leaves the binding as it was for a spec whose references list no operation', async () => {
+    const result = await hydrateRemoteApiSpecs(bundle(), fetcher)
+    expect(result.docsConfig.tabs[0].api).toEqual({ source: result.assets[0].path })
+  })
+})
+
+describe('remote OpenAPI spec shared by references that do and do not list operations', () => {
+  const fetcher: MigrationFetcher = async (url) => ({ finalUrl: url, body: spec, contentType: 'application/json' })
+  const listed = [{ group: 'Users', pages: ['GET /api/v1/scim/v2/Users'] }]
+
+  it('binds the tab without api.groups, so the generated navigation lists every operation', async () => {
+    for (const references of [[{ groups: listed }, {}], [{}, { groups: listed }]]) {
+      const root = mkdtempSync(join(tmpdir(), 'thally-remote-groups-'))
+      writeFileSync(join(root, 'docs.json'), JSON.stringify({
+        navigation: { products: references.map((reference, index) => ({
+          product: `P${index}`,
+          tabs: [
+            ...(index === 0 ? [{ tab: 'Guides', groups: [{ group: 'Start', pages: ['guide'] }] }] : []),
+            { tab: 'API reference', openapi: { source: SPEC_URL, directory: `p${index}/api` }, ...reference },
+          ],
+        })) },
+      }))
+      writeFileSync(join(root, 'guide.mdx'), '---\ntitle: Guide\n---\n\nGuide content.')
+      const migrated = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/example/docs' })
+      expect(migrated.remoteApiSpecs).toHaveLength(1)
+      expect(migrated.remoteApiSpecs?.[0]).not.toHaveProperty('groups')
+
+      const result = await hydrateRemoteApiSpecs(migrated, fetcher)
+      const tab = result.docsConfig.tabs.find((entry) => entry.api)
+      expect(tab?.tab).toBe('API reference')
+      expect(tab?.api).toEqual({ source: result.assets[0].path })
+    }
+  })
+})
+
+describe('remote OpenAPI spec with hidden, restricted or localized operation lists', () => {
+  const fetcher: MigrationFetcher = async (url) => ({ finalUrl: url, body: spec, contentType: 'application/json' })
+  const visible = [{ group: 'Visible', pages: ['GET /api/v1/scim/v2/Users'] }]
+  const other = (group: string) => [{ group, pages: ['GET /api/v1/scim/v2/Groups'] }]
+
+  async function hydrated(navigation: Record<string, unknown>) {
+    const root = mkdtempSync(join(tmpdir(), 'thally-remote-lists-'))
+    writeFileSync(join(root, 'docs.json'), JSON.stringify({ navigation }))
+    writeFileSync(join(root, 'guide.mdx'), '---\ntitle: Guide\n---\n\nGuide content.')
+    const migrated = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/example/docs' })
+    expect(migrated.remoteApiSpecs).toHaveLength(1)
+    const result = await hydrateRemoteApiSpecs(migrated, fetcher)
+    return { migrated, api: result.docsConfig.tabs.find((tab) => tab.api)?.api, assetPath: result.assets[0].path }
+  }
+
+  it('turns generated navigation off when every operation the references list is hidden or restricted', async () => {
+    const hidden = [{ group: 'Hidden', hidden: true, pages: ['GET /api/v1/scim/v2/Groups'] }]
+    const restricted = [{ group: 'Internal', public: false, pages: ['GET /api/v1/scim/v2/Groups'] }]
+    const withheld = [[{ groups: hidden }], [{ groups: restricted }], [{ groups: hidden }, { groups: restricted }]]
+    for (const references of withheld) {
+      const { migrated, api, assetPath } = await hydrated({
+        products: references.map((reference, index) => ({ product: `P${index}`, tabs: [{ tab: 'API reference', openapi: { source: SPEC_URL, directory: `p${index}/api` }, ...reference }] })),
+      })
+      expect(migrated.remoteApiSpecs?.[0]).toMatchObject({ navigation: false })
+      expect(migrated.remoteApiSpecs?.[0]).not.toHaveProperty('groups')
+      expect(api).toEqual({ source: assetPath, navigation: false })
+    }
+    // A reference that lists nothing leaves the generated navigation on.
+    const { migrated, api, assetPath } = await hydrated({
+      products: [{ groups: hidden }, {}].map((reference, index) => ({ product: `P${index}`, tabs: [{ tab: 'API reference', openapi: { source: SPEC_URL, directory: `p${index}/api` }, ...reference }] })),
+    })
+    expect(migrated.remoteApiSpecs?.[0]).not.toHaveProperty('navigation')
+    expect(api).toEqual({ source: assetPath })
+  })
+
+  it('keeps the groups of the products that list operations when another lists its own only in hidden or restricted groups', async () => {
+    const hidden = [{ group: 'Hidden', hidden: true, pages: ['GET /api/v1/scim/v2/Groups'] }]
+    const restricted = [{ group: 'Internal', public: false, pages: ['GET /api/v1/scim/v2/Groups'] }]
+    for (const second of [{ groups: hidden }, { groups: restricted }, { public: false, groups: other('Internal') }]) {
+      for (const order of [[0, 1], [1, 0]]) {
+        const products = [{ groups: visible }, second]
+        const { migrated, api, assetPath } = await hydrated({
+          products: order.map((index) => ({ product: `P${index}`, tabs: [{ tab: 'API reference', openapi: { source: SPEC_URL, directory: `p${index}/api` }, ...products[index] }] })),
+        })
+        expect(migrated.remoteApiSpecs?.[0].groups).toEqual(visible)
+        expect(api).toEqual({ source: assetPath, groups: visible })
+      }
+    }
+  })
+
+  it('binds only the default language\'s groups, whatever order the languages are authored in', async () => {
+    const english = { language: 'en', default: true, tabs: [{ tab: 'API', openapi: SPEC_URL, groups: visible }] }
+    const french = { language: 'fr', tabs: [{ tab: 'API', openapi: SPEC_URL, groups: other('French') }] }
+    const frenchUnlisted = { language: 'fr', tabs: [{ tab: 'API', openapi: SPEC_URL, groups: [{ group: 'Francais', pages: ['guide'] }] }] }
+    for (const languages of [[english, french], [french, english], [english, frenchUnlisted], [frenchUnlisted, english]]) {
+      const { migrated, api, assetPath } = await hydrated({ languages })
+      expect(migrated.remoteApiSpecs?.[0].groups).toEqual(visible)
+      expect(api).toEqual({ source: assetPath, groups: visible })
+    }
+  })
+})
+
 describe('remote OpenAPI spec mounted under Mintlify directories', () => {
   const fetcher: MigrationFetcher = async (url) => ({ finalUrl: url, body: mountedSpec, contentType: 'application/json' })
 

@@ -1,10 +1,11 @@
+import { ChevronRight } from 'lucide-react'
 import { getContextualOptions, type DocEntry } from '@/data/docs'
 import { CopyPageButton } from '@/components/docs/copy-page-button'
 
 interface DocHeaderProps {
   doc: DocEntry
-  /** Category eyebrow above the title — the page's nearest navigation group. */
-  eyebrow?: string | null
+  /** Eyebrow above the title: the page's nearest group, or (an array) its whole group path. */
+  eyebrow?: string | Array<string> | null
   showCopyPage?: boolean
 }
 
@@ -13,7 +14,20 @@ export function DocHeader({ doc, eyebrow, showCopyPage = true }: DocHeaderProps)
     <header className="thally-docs-header">
       <div className="flex flex-col items-start gap-4 sm:flex-row sm:justify-between">
         <div className="min-w-0 flex-1">
-          {eyebrow ? (
+          {Array.isArray(eyebrow) ? (
+            eyebrow.length > 0 ? (
+              <div className="thally-docs-eyebrow mb-2.5">
+                <ol aria-label="Section path" className="flex flex-wrap items-center gap-1 text-sm leading-5 text-foreground/50">
+                  {eyebrow.map((part, index) => (
+                    <li key={index} className="flex items-center gap-1">
+                      {index > 0 ? <ChevronRight aria-hidden="true" className="h-3 w-3 shrink-0" /> : null}
+                      {part}
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            ) : null
+          ) : eyebrow ? (
             <p className="thally-docs-eyebrow mb-2.5 text-sm font-semibold leading-5 text-accent">
               {eyebrow}
             </p>

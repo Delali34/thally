@@ -10,7 +10,9 @@ vi.mock('next/navigation', () => ({ usePathname: () => '/changelog' }))
 vi.mock('@/data/docs', () => ({
   getBreadcrumbs: () => [],
   getBreadcrumbsEnabled: () => false,
+  getEyebrowMode: () => 'group',
   getNavCategory: () => '',
+  getNavGroupPath: () => [],
   getPrevNextLinks: () => ({ prev: null, next: null }),
   getFeedbackConfig: () => ({}),
 }))

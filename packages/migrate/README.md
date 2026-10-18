@@ -92,6 +92,40 @@ instead of silently dropping that API tab's reference. AsyncAPI has no Thally
 renderer, so it always produces a clear warning naming the spec instead of
 disappearing.
 
+`METHOD /path` entries (`"POST /v2/keys.createKey"`) under a container that
+binds an `openapi` spec become `api.groups` on the tab that spec binds to:
+nested groups, icons and authored order are kept, and page entries stay in the
+tab's own groups (a group that mixes pages and operations is split, so the
+sidebar lists the API groups after the page groups). Operations written
+straight under a tab form a group named after the tab, at their place among the
+tab's own groups (each uninterrupted run is its own group, so authored order is
+kept). Hidden groups (and containers under one), groups under access-restricted
+containers, and groups left empty are left out. Groups nest at most 32 levels
+deep, as the renderer follows no deeper: operations below that are not migrated,
+and one warning says so. With `navigation.languages`, only the default language's
+containers contribute groups; operation entries under another language are
+reported, since its API tab is the default language's.
+When several containers bind one spec to the same tab (one API tab per product,
+say), their groups are concatenated in order and an operation already listed
+earlier in that tab is dropped (the method is compared without case, the path
+exactly), unless one of those containers lists no operation (Mintlify generated
+every operation there), in which case the tab gets no `api.groups` and keeps the
+generated, tag-grouped navigation. A container whose operations are all hidden or
+access-restricted adds no groups but still counts as listing operations; when
+every container bound to a tab is like that, the tab gets `navigation: false`
+(the source sidebar showed none of those operations, so no generated list is
+added). Operations dropped only for nesting too deep are Thally's limit, not the
+author's choice: such a container counts as listing nothing, so the tab keeps
+the generated navigation. Groups with the same title are not folded together. With `api.groups`
+the authored list is the tab's navigation, so `navigation: false` is not
+written. Operation entries with no `openapi` container above them, and every one in a
+site imported by URL, cannot be placed: one warning says they were not added to the API navigation, and the
+operations still have their pages. This is separate from a `directory`'s flat
+operation list, which still only drives the endpoint redirects.
+
+Mintlify `styling.eyebrows: "breadcrumbs"` becomes `eyebrow: "path"` (the full
+group path above the page title); `"section"` or no setting writes nothing.
+
 Page `openapi:` frontmatter with a spec prefix
 (`openapi: "specs/openapi-b.yaml GET /widgets/{id}"`) is rewritten to where the
 spec lands in the output (`/openapi-b.yaml GET /widgets/{id}`). As in Mintlify,

@@ -175,6 +175,24 @@ Available icon names:
 | `x-twitter` | X / Twitter |
 | `message` | Chat / message |
 
+## Page eyebrow
+
+The small line above a page title shows where the page sits in the sidebar. By default it is the name of the page's nearest group. Set `eyebrow` at the top level of `docs.json` to show the whole group path instead:
+
+```json
+{
+  "eyebrow": "path",
+  "tabs": [...]
+}
+```
+
+| Value | Result for a page in `Errors`, then `Frontline errors`, then `Capacity` |
+| --- | --- |
+| `"group"` (default) | `Capacity` |
+| `"path"` | `Errors › Frontline errors › Capacity` |
+
+The path leaves out the tab and the page title, and its items are plain text, not links. A page outside any group has no eyebrow. Generated endpoint pages have none either. `eyebrow` is independent of `breadcrumbs`, the trail of tab, groups and page title: `"breadcrumbs": false` hides only the trail.
+
 ## Hiding groups and tabs
 
 Set `hidden: true` on a group or tab to exclude it from the sidebar while keeping its pages accessible by URL:

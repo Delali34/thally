@@ -1,7 +1,7 @@
 /** Documentation page shell and its configurable reader feedback surfaces. */
 
 import type { DocEntry, NavContext } from '@/data/docs'
-import { getBreadcrumbs, getBreadcrumbsEnabled, getNavCategory, getPrevNextLinks, getFeedbackConfig } from '@/data/docs'
+import { getBreadcrumbs, getBreadcrumbsEnabled, getEyebrowMode, getNavCategory, getNavGroupPath, getPrevNextLinks, getFeedbackConfig } from '@/data/docs'
 import { DocBreadcrumbs } from '@/components/docs/doc-breadcrumbs'
 import { DocHeader } from '@/components/docs/doc-header'
 import { DocPagination } from '@/components/docs/doc-pagination'
@@ -20,7 +20,7 @@ import { InlineUpdateFilters, PagePanelSlot, PageSlotsProvider } from '@/compone
 interface DocLayoutProps {
   doc: DocEntry
   locale?: string
-  navigation?: Pick<NavContext, 'prev' | 'next' | 'breadcrumb' | 'group'>
+  navigation?: Pick<NavContext, 'prev' | 'next' | 'breadcrumb' | 'group' | 'groupPath'>
   children: React.ReactNode
 }
 
@@ -29,7 +29,9 @@ function DocLayoutContent({ doc, locale = 'en', navigation, children }: DocLayou
     ...getPrevNextLinks(doc.href),
     breadcrumb: getBreadcrumbs(doc.href),
   }
-  const eyebrow = navigation ? navigation.group : getNavCategory(doc.href)
+  const eyebrow = getEyebrowMode() === 'path'
+    ? (navigation ? navigation.groupPath : getNavGroupPath(doc.href))
+    : (navigation ? navigation.group : getNavCategory(doc.href))
   const mode = doc.mode ?? 'default'
   const feedbackConfig = getFeedbackConfig()
   // Managed releases already carry an immutable, release-scoped settings

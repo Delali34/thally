@@ -140,14 +140,64 @@ export function operationState(
   return result === 'visible' ? 'published' : result
 }
 
-/** A webhook page renders when any method of the `webhooks` entry is visible; `x-webhooks` never renders one. */
-export function webhookState(document: unknown, name: string, overrides?: unknown): State {
+/**
+ * A webhook page renders when any method of the `webhooks` entry is visible; `x-webhooks` never renders one.
+ * With `method`, only that method is judged (a sidebar key names one).
+ */
+export function webhookState(document: unknown, name: string, overrides?: unknown, method?: string): State {
   if (!isObj(document) || !isObj(document.webhooks) || !Object.hasOwn(document.webhooks, name)) return 'unknown'
   const entry = document.webhooks[name]
   if (!isObj(entry)) return 'unknown'
   const { chain, item } = viewEntry(document, entry)
-  const states = METHODS.filter((verb) => isObj(item[verb])).map((verb) =>
+  const states = METHODS.filter((verb) => isObj(item[verb]) && (!method || verb === method.toLowerCase())).map((verb) =>
     visibility(chain, item[verb] as Obj, isObj(overrides) ? overrides[`WEBHOOK ${verb.toUpperCase()} ${name}`] : undefined))
   if (states.length === 0) return 'unknown'
   return states.includes('visible') ? 'published' : states[0] as 'hidden' | 'excluded'
+}
+
+/**
+ * How many levels of nested groups an API tab's `api.groups` may have; a group deeper than
+ * this is skipped. Mirrors `API_GROUPS_MAX_DEPTH` in src/lib/openapi/operation-keys.ts (a
+ * parity test keeps them equal): this package cannot import from src/.
+ */
+export const API_GROUPS_MAX_DEPTH = 32
+
+/** What `listedOperationKeys` skipped: entries that are not a group or a key, whether any group was too deep, and how many groups carry an `icon` that is not text (dropped, the group stays). */
+export interface ApiGroupsSkipped {
+  malformed: number
+  tooDeep: boolean
+  badIcon: number
+}
+
+/**
+ * Every string of an API tab's `groups`, in authored order, down to `API_GROUPS_MAX_DEPTH` levels.
+ * Mirrors the sidebar (`buildAuthoredSections`): a group is an object with a `pages` list and a text
+ * or absent `group`; anything else, and any group deeper than the limit, is left out and counted in `skipped`.
+ */
+export function listedOperationKeys(groups: unknown, skipped?: ApiGroupsSkipped, depth = 1): Array<string> {
+  if (!Array.isArray(groups)) return []
+  return groups.flatMap((group) => {
+    if (!isObj(group) || !Array.isArray(group.pages) || (group.group !== undefined && typeof group.group !== 'string')) {
+      if (skipped) skipped.malformed++
+      return []
+    }
+    if (depth > API_GROUPS_MAX_DEPTH) {
+      if (skipped) skipped.tooDeep = true
+      return []
+    }
+    if (skipped && group.icon !== undefined && typeof group.icon !== 'string') skipped.badIcon++
+    return group.pages.flatMap((page) => typeof page === 'string' ? [page] : listedOperationKeys([page], skipped, depth + 1))
+  })
+}
+
+/**
+ * Whether the sidebar lists the operation an `api.groups` key names (`METHOD /path` or
+ * `WEBHOOK METHOD name`; method case and inner whitespace forgiven, path exact).
+ * Mirrors `operationKeyFromRef` in src/lib/openapi/operation-keys.ts.
+ */
+export function groupKeyState(document: unknown, key: string, overrides?: unknown): State {
+  const match = /^(WEBHOOK )?(\S+) (.+)$/i.exec(key.trim().replace(/\s+/g, ' '))
+  if (!match) return 'unknown'
+  const [, webhook, method, path] = match
+  return webhook ? webhookState(document, path, overrides, method) : operationState(document, method, path, overrides)
 }

@@ -251,8 +251,9 @@ export async function hydrateRemoteApiSpecs(bundle: MigrationBundle, fetcher?: M
       const tab = reference.tabLabel
         ? tabs.find((candidate) => candidate.tab === reference.tabLabel)
         : tabs.find((candidate) => candidate.tab.toLowerCase().includes('api'))
-      if (tab) tab.api = { source: `openapi/${filename}` }
-      else insertApiTab(tabs, { tab: reference.tabLabel ?? 'API Reference', ...(reference.icon ? { icon: reference.icon } : {}), ...(reference.hidden ? { hidden: true } : {}), api: { source: `openapi/${filename}` } }, reference.parentTab)
+      const api = { source: `openapi/${filename}`, ...(reference.navigation === false ? { navigation: false } : {}), ...(reference.groups ? { groups: reference.groups } : {}) }
+      if (tab) tab.api = api
+      else insertApiTab(tabs, { tab: reference.tabLabel ?? 'API Reference', ...(reference.icon ? { icon: reference.icon } : {}), ...(reference.hidden ? { hidden: true } : {}), api }, reference.parentTab)
       bound.push({ reference, filename, content: body, operations, tabName: tab?.tab ?? reference.tabLabel ?? 'API Reference' })
     } catch (error) {
       warnings.push({

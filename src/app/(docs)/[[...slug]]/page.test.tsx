@@ -2,7 +2,7 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const fixtures = vi.hoisted(() => ({ lookup: { node: null, reason: 'unresolved' } as unknown, missing: false, privateIntro: false, privateDefault: false, root: vi.fn() }))
+const fixtures = vi.hoisted(() => ({ eyebrowMode: 'group', lookup: { node: null, reason: 'unresolved' } as unknown, missing: false, privateIntro: false, privateDefault: false, root: vi.fn() }))
 
 vi.mock('next/navigation', () => ({
   redirect: (path: string) => { throw new Error(`NEXT_REDIRECT:${path}`) },
@@ -31,13 +31,14 @@ vi.mock('@/data/docs', () => ({
   ensureDocPublication: async () => undefined,
   getApiPlaygroundDisplay: () => undefined,
   getDocEntries: async () => [],
+  getEyebrowMode: () => fixtures.eyebrowMode,
   isDocPublished: () => true,
   canReaderViewPage: async () => true,
-  loadNavContext: async () => ({ breadcrumb: [], prev: { title: 'Previous page', href: '/prev' }, next: null }),
+  loadNavContext: async () => ({ group: 'Capacity', groupPath: ['Errors', 'Capacity'], breadcrumb: [], prev: { title: 'Previous page', href: '/prev' }, next: null }),
 }))
 vi.mock('@/components/docs/doc-layout', () => ({ DocLayout: ({ children }: { children: React.ReactNode }) => <main>{children}</main> }))
 vi.mock('@/components/docs/doc-pagination', () => ({ DocPagination: ({ prev }: { prev: { title: string } | null }) => <nav>{prev?.title}</nav> }))
-vi.mock('@/components/docs/doc-header', () => ({ DocHeader: () => null }))
+vi.mock('@/components/docs/doc-header', () => ({ DocHeader: ({ eyebrow }: { eyebrow?: unknown }) => <i data-eyebrow={JSON.stringify(eyebrow)} /> }))
 vi.mock('@/components/api/api-layout', () => ({ ApiLayout: ({ children }: { children: React.ReactNode }) => <div>{children}</div> }))
 vi.mock('@/components/api/operation-panel', () => ({ OperationPanel: ({ children }: { children: React.ReactNode }) => <section>{children}</section> }))
 vi.mock('@/components/api/manual-api-endpoint', () => ({ ManualApiEndpoint: () => null }))
@@ -60,7 +61,7 @@ vi.mock('@/lib/json-ld', () => ({ buildDocPageJsonLd: () => ({}) }))
 
 import DocsPage from './page'
 
-beforeEach(() => { fixtures.missing = false; fixtures.privateIntro = false; fixtures.privateDefault = false; fixtures.lookup = { node: null, reason: 'unresolved' }; fixtures.root.mockReset().mockResolvedValue('/docs') })
+beforeEach(() => { fixtures.eyebrowMode = 'group'; fixtures.missing = false; fixtures.privateIntro = false; fixtures.privateDefault = false; fixtures.lookup = { node: null, reason: 'unresolved' }; fixtures.root.mockReset().mockResolvedValue('/docs') })
 
 const render = async () => renderToStaticMarkup(await DocsPage({ params: Promise.resolve({ slug: ['api-reference', 'endpoint', 'scrape'] }) }))
 
@@ -78,6 +79,13 @@ describe('docs page with an unresolved openapi spec', () => {
     expect(html).toContain('<section><p>Authored scrape body</p></section>')
     expect(html).not.toContain('role="note"')
     expect(html).toContain('Previous page')
+  })
+
+  it('gives the header the nearest group, or the whole group path when docs.json sets eyebrow to path', async () => {
+    fixtures.lookup = { node: { operation: {} } }
+    expect(await render()).toContain('data-eyebrow="&quot;Capacity&quot;"')
+    fixtures.eyebrowMode = 'path'
+    expect(await render()).toContain('data-eyebrow="[&quot;Errors&quot;,&quot;Capacity&quot;]"')
   })
 
   it('404s a hidden or excluded operation even when the page is listed as published', async () => {

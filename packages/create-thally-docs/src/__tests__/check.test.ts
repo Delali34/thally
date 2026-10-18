@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 
 import { runCheck } from '../check.js'
+import { API_GROUPS_MAX_DEPTH } from '../openapi-publication.js'
 
 describe('thally check OpenAPI migrations', () => {
   it('accepts authored API groups and operation-only MDX pages', async () => {
@@ -417,6 +418,163 @@ describe('thally check pages bound to unpublished operations', () => {
   it('honours docs.json overrides and does not judge a remote spec', async () => {
     expect(await run({ 'hidden-endpoint': 'GET /hidden' }, { 'GET /hidden': { hidden: false } })).not.toContain('is not published')
     expect(await run({ 'hidden-endpoint': 'GET /hidden' }, undefined, 'https://example.com/spec.json')).not.toContain('is not published')
+  })
+})
+
+describe('thally check api.groups keys', () => {
+  const ok = { responses: { 200: { description: 'ok' } } }
+  // `groups` may be raw JSON text: JSON.stringify cannot serialise thousands of nested levels.
+  async function run(groups: unknown, extraTabs: Array<unknown> = [], source = 'openapi/api.json', overrides?: Record<string, unknown>, docsExtra: Record<string, unknown> = {}) {
+    const projectDir = mkdtempSync(join(tmpdir(), 'thally-check-groups-'))
+    mkdirSync(join(projectDir, 'openapi'), { recursive: true })
+    mkdirSync(join(projectDir, 'src/content'), { recursive: true })
+    writeFileSync(join(projectDir, 'docs.json'), typeof groups === 'string'
+      ? `{"tabs":[{"tab":"API reference","api":{"source":"${source}","groups":${groups}}}]}`
+      : JSON.stringify({ ...docsExtra, tabs: [{ tab: 'API reference', api: { source, ...(groups ? { groups } : {}), ...(overrides ? { overrides } : {}) } }, ...extraTabs] }))
+    writeFileSync(join(projectDir, 'openapi/api.json'), JSON.stringify({
+      openapi: '3.1.0', info: { title: 'T', version: '1' },
+      paths: {
+        '/hidden': { get: { 'x-hidden': true, ...ok } },
+        '/excluded': { get: { 'x-excluded': true, ...ok } },
+        '/visible': { get: ok, post: ok },
+      },
+      webhooks: { orderUpdated: { post: { 'x-hidden': true, ...ok } }, shipped: { post: ok } },
+    }))
+    const output: Array<string> = []
+    const log = vi.spyOn(console, 'log').mockImplementation((value) => output.push(String(value)))
+    try {
+      await runCheck(projectDir, { fix: false, ci: true })
+    } finally {
+      log.mockRestore()
+    }
+    return output.join('\n')
+  }
+  const warning = (key: string, state = '') =>
+    `API tab "API reference": api.groups lists "${key}", which matches no published operation in openapi/api.json${state}. It is left out of the sidebar.`
+
+  it('warns for each key that matches no published operation, naming the tab and the key', async () => {
+    const output = await run([
+      { group: 'A', pages: ['GET /visible', 'GET /typo', { group: 'Nested', pages: ['GET /hidden', 'GET /excluded', 'DELETE /visible'] }] },
+      { group: 'B', pages: ['WEBHOOK POST orderUpdated', 'WEBHOOK POST nope', 'WEBHOOK GET shipped', 'FETCH /visible', 'visible'] },
+    ])
+    expect(output).toContain(warning('GET /typo'))
+    expect(output).toContain(warning('GET /hidden', ' (it is hidden)'))
+    expect(output).toContain(warning('GET /excluded', ' (it is excluded)'))
+    expect(output).toContain(warning('DELETE /visible'))
+    expect(output).toContain(warning('WEBHOOK POST orderUpdated', ' (it is hidden)'))
+    expect(output).toContain(warning('WEBHOOK POST nope'))
+    expect(output).toContain(warning('WEBHOOK GET shipped'))
+    expect(output).toContain(warning('FETCH /visible'))
+    expect(output).toContain(warning('visible'))
+    expect(output).toContain('0 error(s), 9 warning(s)')
+  })
+
+  it('accepts published operations and webhooks, whatever the method case and spacing', async () => {
+    const output = await run([{ group: 'A', pages: ['GET /visible', ' post   /visible ', 'WEBHOOK POST shipped', 'webhook post shipped', { group: 'Nested', pages: ['get /visible'] }] }])
+    expect(output).not.toContain('api.groups')
+    expect(output).toContain('0 error(s), 0 warning(s)')
+  })
+
+  it('honours overrides, and judges nothing for a remote spec, no groups or a hidden tab', async () => {
+    expect(await run([{ group: 'A', pages: ['GET /hidden'] }], [], 'openapi/api.json', { 'GET /hidden': { hidden: false } })).not.toContain('api.groups')
+    expect(await run([{ group: 'A', pages: ['GET /typo'] }], [], 'https://example.com/spec.json')).not.toContain('api.groups')
+    expect(await run(undefined)).not.toContain('api.groups')
+    const hiddenTab = { tab: 'Spec only', hidden: true, api: { source: 'openapi/api.json', groups: [{ group: 'A', pages: ['GET /typo'] }] } }
+    expect(await run(undefined, [hiddenTab])).not.toContain('api.groups')
+  })
+
+  it('warns once per tab when entries are malformed and skipped, and still judges the valid ones', async () => {
+    const output = await run([null, { group: 'NoPages' }, { group: 'Text', pages: 'GET /visible' }, { group: 'Mixed', pages: ['GET /visible', 7, ['GET /typo']] }, 'GET /visible'])
+    expect(output).toContain('API tab "API reference": api.groups has 6 entries that are not a group with a "pages" list or an operation key. They are left out of the sidebar.')
+    expect(output.split('api.groups has').length - 1).toBe(1)
+    expect(output).toContain('0 error(s), 1 warning(s)')
+    expect(await run([{ group: 'A', pages: ['GET /visible', 7] }])).toContain('api.groups has 1 entry that is not a group')
+  })
+
+  it('bounds the nesting: warns once per tab that deeper groups are skipped, without overflowing the stack', async () => {
+    const nest = (levels: number, key: string) => '{"group":"G","pages":['.repeat(levels) + `"${key}"` + ']}'.repeat(levels)
+    const deep = await run(`[${nest(3001, 'GET /visible')}]`)
+    expect(deep).toContain(`API tab "API reference": api.groups nests groups deeper than ${API_GROUPS_MAX_DEPTH} levels. Groups beyond that level are left out of the sidebar`)
+    expect(deep.split('deeper than').length - 1).toBe(1)
+    expect(deep).toContain('0 error(s), 1 warning(s)')
+    const atLimit = await run(`[${nest(API_GROUPS_MAX_DEPTH, 'GET /typo')}]`)
+    expect(atLimit).toContain(warning('GET /typo'))
+    expect(atLimit).not.toContain('deeper than')
+    const beyond = await run(`[${nest(API_GROUPS_MAX_DEPTH + 1, 'GET /typo')}]`)
+    expect(beyond).toContain('deeper than')
+    expect(beyond).not.toContain(warning('GET /typo'))
+  })
+
+  it('judges a hidden tab that the site renders for a navigation.versions label, and no other hidden tab', async () => {
+    const versions = { navigation: { versions: [{ label: 'v1' }, { label: 'v2' }] } }
+    const hiddenTab = (version?: string) => ({ tab: 'API v1', hidden: true, ...(version ? { version } : {}), api: { source: 'openapi/api.json', groups: [{ group: 'A', pages: ['GET /typo'] }] } })
+    const rendered = await run(undefined, [hiddenTab('v1')], 'openapi/api.json', undefined, versions)
+    expect(rendered).toContain('API tab "API v1": api.groups lists "GET /typo", which matches no published operation')
+    expect(await run(undefined, [hiddenTab('v3')], 'openapi/api.json', undefined, versions)).not.toContain('api.groups')
+    expect(await run(undefined, [hiddenTab()], 'openapi/api.json', undefined, versions)).not.toContain('api.groups')
+    expect(await run(undefined, [hiddenTab('v1')])).not.toContain('api.groups')
+  })
+
+  it('does not crash on malformed navigation.versions: a malformed list registers no version', async () => {
+    const hiddenTab = { tab: 'API v1', hidden: true, version: 'v1', api: { source: 'openapi/api.json', groups: [{ group: 'A', pages: ['GET /typo'] }] } }
+    for (const versions of [[null], {}, 'v1', [null, { label: 'v1' }]]) {
+      const output = await run(undefined, [hiddenTab], 'openapi/api.json', undefined, { navigation: { versions } })
+      expect(output).toContain('thally check:')
+      expect(output.includes('API tab "API v1"')).toBe(Array.isArray(versions) && versions.length === 2)
+    }
+  })
+
+  it('reports nothing about api.groups on a tab with navigation: false, which leaves the groups unused', async () => {
+    const off = { tab: 'Off', api: { source: 'openapi/api.json', navigation: false, groups: [{ group: 'A', icon: { bad: true }, pages: ['GET /typo', null] }] } }
+    expect(await run(undefined, [off])).not.toContain('API tab "Off"')
+  })
+
+  it('warns once per tab when a group icon is not text: the group stays, only the icon is dropped', async () => {
+    const output = await run([{ group: 'A', icon: { bad: true }, pages: ['GET /visible', { group: 'Nested', icon: 5, pages: ['POST /visible'] }] }, { group: 'B', icon: 'paw', pages: ['WEBHOOK POST shipped'] }])
+    expect(output).toContain('API tab "API reference": api.groups has 2 groups whose "icon" is not text. The icon is dropped and the group is still listed.')
+    expect(output.split('whose "icon"').length - 1).toBe(1)
+    expect(output).toContain('0 error(s), 1 warning(s)')
+    expect(await run([{ group: 'A', icon: null, pages: ['GET /visible'] }])).toContain('api.groups has 1 group whose "icon" is not text')
+    expect(await run([{ group: 'A', icon: '', pages: ['GET /visible'] }, { group: 'B', icon: 'paw', pages: ['POST /visible'] }])).not.toContain('"icon"')
+  })
+
+  it('judges the tabs of every i18n.navigation locale, naming the locale, with the same hidden-tab rule', async () => {
+    const apiTab = (name: string, extra: Record<string, unknown> = {}) => ({ tab: name, ...extra, api: { source: 'openapi/api.json', groups: [{ group: 'A', pages: ['GET /typo', 7] }] } })
+    const i18n = (navigation: Record<string, Array<unknown>>) => ({
+      navigation: { versions: [{ label: 'v1' }] },
+      i18n: { defaultLocale: 'en', locales: [{ code: 'en', label: 'English' }, { code: 'fr', label: 'French' }, { code: 'de', label: 'German' }], navigation },
+    })
+    const output = await run(undefined, [], 'openapi/api.json', undefined, i18n({
+      fr: [apiTab('API fr', { hidden: true, version: 'v1' }), apiTab('Spec only', { hidden: true })],
+      de: [apiTab('API de')],
+    }))
+    expect(output).toContain('API tab "API fr" (locale fr): api.groups lists "GET /typo", which matches no published operation in openapi/api.json. It is left out of the sidebar.')
+    expect(output).toContain('API tab "API fr" (locale fr): api.groups has 1 entry that is not a group')
+    expect(output).toContain('API tab "API de" (locale de): api.groups lists "GET /typo"')
+    expect(output).not.toContain('Spec only')
+    expect(output).not.toContain('API tab "API reference"')
+    expect(await run(undefined, [], 'openapi/api.json', undefined, i18n({ fr: [{ tab: 'Docs', href: 'https://example.com' }] }))).not.toContain('api.groups')
+  })
+
+  it('does not repeat a warning for the same tab shared by two locales', async () => {
+    const { checkApiGroupKeys } = await import('../check.js')
+    const shared = { tab: 'API', api: { source: 'openapi/api.json', groups: [{ group: 'A', pages: ['GET /typo'] }] } }
+    const projectDir = mkdtempSync(join(tmpdir(), 'thally-check-shared-'))
+    mkdirSync(join(projectDir, 'openapi'), { recursive: true })
+    writeFileSync(join(projectDir, 'openapi/api.json'), JSON.stringify({ openapi: '3.1.0', info: { title: 'T', version: '1' }, paths: { '/visible': { get: ok } } }))
+    const issues: Array<unknown> = []
+    checkApiGroupKeys(projectDir, { tabs: [shared], i18n: { defaultLocale: 'en', locales: [], navigation: { fr: [shared], de: [shared] } } }, issues as never)
+    expect(issues).toHaveLength(1)
+  })
+
+  it('warns when api.groups is not a list: the renderer then shows the generated navigation', async () => {
+    const message = 'API tab "API reference": api.groups must be a list of groups, so the tab shows the generated navigation.'
+    expect(await run({ group: 'A', pages: ['GET /visible'] })).toContain(message)
+    for (const raw of ['null', '5', '"GET /visible"', 'true', '{}']) expect(await run(raw)).toContain(message)
+    expect(await run([])).not.toContain('api.groups')
+    expect(await run(undefined)).not.toContain('api.groups')
+    const off = { tab: 'Off', api: { source: 'openapi/api.json', navigation: false, groups: { group: 'A', pages: [] } } }
+    expect(await run(undefined, [off])).not.toContain('must be a list')
   })
 })
 
