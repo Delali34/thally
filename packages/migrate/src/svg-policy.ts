@@ -38,6 +38,9 @@ const ALLOWED_ATTRIBUTES = new Set([
   "x", "y", "x1", "y1", "x2", "y2", "cx", "cy", "r", "rx", "ry",
   "d", "points", "pathlength", "transform", "transform-origin",
   "fill", "fill-opacity", "fill-rule", "stroke", "stroke-width",
+  // Some SVG exporters persist React spellings. These remain fixed static
+  // drawing attributes; accepting them never grants arbitrary JSX execution.
+  "fillrule", "cliprule",
   "stroke-opacity", "stroke-linecap", "stroke-linejoin",
   "stroke-miterlimit", "stroke-dasharray", "stroke-dashoffset",
   "opacity", "color", "display", "visibility", "overflow",
@@ -64,7 +67,7 @@ const ALLOWED_ATTRIBUTES = new Set([
   "specularexponent", "kernelmatrix", "kernelunitlength", "order",
   "divisor", "bias", "targetx", "targety", "edgemode", "preservealpha",
   "azimuth", "elevation", "z", "pointsatx", "pointsaty", "pointsatz",
-  "limitingconeangle", "aria-hidden", "aria-label", "role", "focusable",
+  "limitingconeangle", "aria-hidden", "aria-label", "aria-labelledby", "aria-describedby", "role", "focusable",
   // Validated below: only in-document fragment references.
   "href", "xlink:href",
 ]);

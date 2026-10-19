@@ -8,6 +8,10 @@ const svg = (body: string, attributes = 'xmlns="http://www.w3.org/2000/svg"') =>
   Buffer.from(`<svg ${attributes} viewBox="0 0 24 24">${body}</svg>`);
 
 describe("isPassiveSvg", () => {
+  it("allows static exported rule spellings and accessible label references", () => {
+    expect(isPassiveSvg(svg('<title id="title">Diagram</title><path fillRule="evenodd" clipRule="evenodd" d="M0 0h10"/>', 'xmlns="http://www.w3.org/2000/svg" aria-labelledby="title"'))).toBe(true);
+    expect(isPassiveSvg(svg('<path fillRule="evenodd" onClick="execute()" d="M0 0"/>'))).toBe(false);
+  });
   it("allows static drawing with in-document references", () => {
     expect(
       isPassiveSvg(

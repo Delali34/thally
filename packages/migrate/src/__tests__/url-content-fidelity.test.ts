@@ -76,6 +76,23 @@ describe('HTML code language fidelity', () => {
 })
 
 describe('authored paragraph semantics', () => {
+  it('keeps block card links as inert links instead of literal Markdown brackets', async () => {
+    const body = '<article><h1>Home</h1><a href="/guide?section=first&amp;view=full" onclick="unsafe()"><div><strong>Guide</strong><p>Read the complete guide.</p></div></a><a href="https://example.test/sponsor"><div><img src="/logo.png" alt="Sponsor"></div></a></article>'
+    const page = htmlPage({ body, finalUrl: new URL('https://docs.test/'), contentType: 'text/html' }, 'introduction', {
+      preserveAnchors: true, preserveResponsiveImages: true, omitDocumentHeading: true,
+    }).page!
+    const tree = unified().use(remarkParse).use(remarkMdx).parse(page.body)
+    const anchors = tree.children.filter(node => node.type === 'mdxJsxFlowElement' && node.name === 'Card')
+    expect(anchors).toHaveLength(2)
+    expect(anchors[0]).toMatchObject({ attributes: [{ type: 'mdxJsxAttribute', name: 'href', value: 'https://docs.test/guide?section=first&view=full' }] })
+    expect(page.body).toContain('**Guide**')
+    expect(page.body).toContain('Read the complete guide.')
+    expect(page.body).not.toContain('onclick')
+    expect(page.body).not.toMatch(/\]\(https:/)
+    expect(sanitizeRemoteMarkdown(page.body)).not.toBeNull()
+    await compile(page.body)
+  })
+
   it('keeps explicit paragraph spans separate from pictures and following copy', async () => {
     const body = '<article><h1>Images</h1><span><picture><source srcset="/wide.png 2x"><img src="/small.png" alt="Literal {alt}"></picture></span><span data-as="p">Options after the picture:</span><span data-as="p">Keep <em>formatting</em> and <span>ordinary</span> inline spans.</span></article>'
     const page = htmlPage({ body, finalUrl: new URL('https://docs.test/images'), contentType: 'text/html' }, 'images', {
@@ -160,11 +177,12 @@ describe('rendered documentation content boundaries', () => {
     expect(ordinary.body.match(/^# /gm)).toHaveLength(3)
   })
 
-  it('projects known API server options once and keeps unknown controls and diagrams reviewable', () => {
+  it('projects known API server options and passive diagrams while keeping unknown controls reviewable', () => {
     const body = '<article><h1>API</h1><select id="servers" aria-label="Select base URL"><option value="0" selected>https://li.quest</option><option value="1">https://staging.li.quest</option></select><svg class="lucide lucide-chevrons-up-down"></svg><div id="parameter-key"><a href="#parameter-key" aria-label="Navigate to header">​<svg></svg></a>API key</div><details><summary data-component-part="expandable-button"><svg data-component-part="icon-svg"></svg>Show attributes</summary><p>Nested fields.</p></details><svg id="architecture-diagram"><text>Architecture</text></svg><select aria-label="Format"><option>JSON</option></select></article>'
     const { $, root } = migrationHtmlArticle(body)
     expect(root.find('select').toArray().map((node) => $(node).attr('aria-label'))).toEqual(['Format'])
-    expect(root.find('svg').toArray().map((node) => $(node).attr('id'))).toEqual(['architecture-diagram'])
+    expect(root.find('svg').length).toBe(0)
+    expect(root.find('img[id="architecture-diagram"]').attr('alt')).toBe('Architecture')
     expect(root.find('[id="parameter-key"]').text()).toBe('API key')
     expect(root.find('a[href]').toArray().map((node) => $(node).attr('href'))).toEqual(['https://li.quest/', 'https://staging.li.quest/'])
     const page = htmlPage({ body, finalUrl: new URL('https://docs.li.fi/'), contentType: 'text/html' }, 'api', { omitDocumentHeading: true }).page!

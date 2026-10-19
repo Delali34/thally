@@ -21,6 +21,36 @@ an explicit `scopePath` remains authoritative. Deep article seeds do not widen a
 mounted documentation tree to its marketing origin. Mintlify configuration page
 IDs resolve against that mount, while ordinary HTML links keep URL semantics.
 
+Query strings remain part of page identity. A query URL becomes an article alias
+only after independent captures prove identical article, metadata, deferred source
+and alternative-state content. A section query must name an observed anchor;
+query-selected versions, locales and different articles remain separate pages.
+The alias keeps its own capture evidence and checked section destination.
+
+Self-contained inline SVGs become passive, hash-addressed assets. An optional
+trusted `rasterizeSvg` host callback can replace rejected SVG with bounded PNG;
+the engine still checks PNG MIME/signature and records the original SVG digest.
+It never relaxes the SVG allowlist or supplies a browser. Hosts must enforce an
+isolated, credential-free renderer with no network or page JavaScript.
+
+Complete ARIA-linked tab panels preserve labels and source order, including
+surrounding authored content. For known embedded article-source contracts, literal
+missing code panels and explicit languages may be recovered only when the source
+is referenced by the article and matches its headings, prose, visible examples
+and tab labels. Embedded imports and expressions never execute. Unreferenced,
+conflicting, incomplete or unsupported alternatives remain review blockers.
+
+The Fumadocs adapter reads bounded JSON-only React Flight frames reachable from
+the response's root record. It supports article-owned copy-source references and
+literal `Tabs`/`Tab`/`Accordion` children, including loaded disclosure prose,
+examples, tables and theme-specific images. It renders a fixed set of static
+elements; unknown components, executable markup and unresolved references keep
+their review requirement. Languages come only from explicit source declarations;
+examples without that metadata remain unlabeled. Source heading IDs and known
+Shiki display annotations are recognized for matching while captured code stays
+unchanged. A capture provider can supply complete rendered alternatives when a
+publisher does not expose a supported inert data contract.
+
 The returned `checkpoint` is JSON-safe. `onRecord` lets a host persist a completed
 page before acknowledging it; `onCheckpoint` emits bounded deltas, including
 pending discoveries and checkpoint identity fields. Merge delta records by URL,
@@ -42,8 +72,19 @@ Responsive `picture`/`source`/`img` choices retain their descriptors, media
 conditions, sizing and literal alt text. Every candidate is localized; shared
 asset URLs are fetched once and identical payloads count once toward the byte
 budget, including resumed journals. Complete static tab panels are preserved as
-alternatives; empty/lazy panels still require a capture provider. Complete local
-OpenAPI operations can represent deferred API schemas. Supported native video
+alternatives; empty/lazy panels without verified embedded source still require a capture provider. Complete local
+OpenAPI operations can represent only their exact deferred API fields. A known
+client-rendered request-example contract may use that registered operation to
+regenerate standard language examples; the inline and sidebar slots must be uniquely owned and
+captured panels must be complete. For the supported legacy selected-example
+component, the selected source, title and language must agree with the exact
+root-owned provider inventory. Every authored alternative, including inactive
+same-language examples, is retained byte for byte in the registered specification
+and rendered by the runtime generator. An unmatched or missing inventory remains
+a review blocker. Ordinary language
+pickers and ambiguous or unknown slots still require review. Every captured
+response, including alternative states, receives the same completeness checks;
+the presence of an unrelated state does not excuse a missing panel. Supported native video
 and YouTube embeds retain their original public media URLs, recorded in source
 warnings; videos are not downloaded. A trusted host may report an original asset
 as already absent (HTTP 404/410): its absolute source URL and a warning are
@@ -58,7 +99,7 @@ Missing primary counterparts and projected path collisions require review; the
 engine does not invent translations. Fresh HTML captures also observe `html lang`; conflicting or unsupported
 language evidence requires review. Capture adapters can supply `locale` when
 no language is declared in HTML or identified by the scoped URL path.
-The `url-evidence-v5` converter rejects earlier journals: replay retained raw
+The `url-evidence-v6` converter rejects earlier journals: replay retained raw
 captures into a new journal rather than relabelling previously hashed pages.
 
 `stopReason` distinguishes a resumable `capture-limit` from hard `page-limit`

@@ -1,3 +1,5 @@
+/** Authored API documents share the docs renderer; generated operations use the API shell. */
+
 import type { Metadata } from 'next'
 import { redirect } from 'next/navigation'
 import { ApiLayout } from '@/components/api/api-layout'
@@ -9,7 +11,8 @@ import { JsonLdScript } from '@/components/seo/json-ld-script'
 import { apiReferenceConfig, getOpenApiSpecUrl } from '@/config/api-reference'
 import { getAllApiOperationNodes, getApiOperationBySlug, getApiOperationNodes } from '@/data/api-reference'
 import { getApiPlaygroundDisplay, getApiSpecLinkVisible, getBreadcrumbs, getSeoConfig, getDocEntries, loadDocEntries } from '@/data/docs'
-import { isRemoteContentSource } from '@/lib/content-source'
+import { getContentSource, isRemoteContentSource } from '@/lib/content-source'
+import { findDocSource } from '@/lib/i18n/translation-source'
 import { buildAgentAlternateLinks } from '@/lib/agent-discovery'
 import { buildApiOperationJsonLd } from '@/lib/json-ld'
 import { buildOgImageUrl, formatOgBreadcrumb, formatOgDisplayUrl } from '@/lib/og'
@@ -33,9 +36,10 @@ export async function generateStaticParams() {
   const apiNodes = await getAllApiOperationNodes()
   const apiParams = apiNodes.map((node) => ({ slug: node.slug }))
 
-  // Include MDX pages nested under src/content/api/ (e.g. api/overview.mdx → slug: ['overview'])
+  // The dedicated API route also owns api.mdx and api/index.mdx at its root.
+  // Enumerate that empty slug as well as nested authored pages.
   const mdxParams = getDocEntries()
-    .filter((doc) => doc.slug[0] === 'api' && doc.slug.length > 1)
+    .filter((doc) => doc.slug[0] === 'api')
     .map((doc) => ({ slug: doc.slug.slice(1) }))
 
   return [...mdxParams, ...apiParams]
@@ -105,9 +109,14 @@ async function renderApiReferencePage({ params }: PageProps) {
   const effectiveSite = resolveBuildSiteConfig()
   const reader = await getReaderContext()
 
-  // No slug — redirect to the first MDX page in the API group if one exists,
-  // otherwise fall through to the first OpenAPI operation.
+  // An authored root owns /api even when it is restricted or unpublished.
+  // Resolve its source independently of visible navigation, then delegate all
+  // publication/access decisions to the same renderer used by other docs.
   if (!resolved.slug?.length) {
+    if (await findDocSource(getContentSource(), 'api')) {
+      return DocsPage({ params: Promise.resolve({ slug: ['api'] }) })
+    }
+    // Without a root document, retain the API landing-page redirects.
     const firstMdx = (await loadDocEntries(reader)).find(
       (doc) => doc.slug[0] === 'api' && doc.slug.length > 1,
     )

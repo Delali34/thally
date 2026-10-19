@@ -29,6 +29,8 @@ export interface MigrationCapturedAsset {
   content: Uint8Array
   /** A trusted fetch boundary proved the original asset is already absent. */
   unavailable?: { status: 404 | 410 }
+  /** Original SVG digest when a trusted host supplied an inert PNG rendering. */
+  derivedFromSha256?: string
 }
 
 export interface MigrationCapture extends MigrationFetchResponse {
@@ -57,6 +59,8 @@ export interface MigrationEvidence {
   code: Array<string>
   anchors: Array<string>
   links: Array<string>
+  /** Exact observed canonical/article equality proof; never inferred from query names. */
+  articleIdentity?: { canonicalUrl: string; articleSha256: string; sectionAnchor?: string }
 }
 
 export interface MigrationJournalAsset {
@@ -66,6 +70,8 @@ export interface MigrationJournalAsset {
   sha256: string
   /** Base64 keeps checkpoints portable through JSON persistence. */
   base64: string
+  /** Binds an optional trusted SVG rasterization to the original source bytes. */
+  derivedFromSha256?: string
 }
 
 export interface UrlMigrationRecord {
@@ -74,6 +80,8 @@ export interface UrlMigrationRecord {
   outcome: 'pending' | 'imported' | 'excluded' | 'failed' | 'alias'
   reason?: string
   aliasOf?: string
+  /** A proven query section is projected to its captured article anchor. */
+  aliasAnchor?: string
   /** Observed redirect destination; external pages are links, never captured articles. */
   redirectTo?: string
   /** Publisher-declared Markdown representation of this exact same-origin article. */
@@ -145,6 +153,8 @@ export interface UrlMigrationRunOptions {
   fetcher?: MigrationFetcher
   /** Hosts that inject text fetching must also inject their safe binary boundary. */
   assetFetcher?: (url: URL, signal?: AbortSignal) => Promise<MigrationCapturedAsset>
+  /** Optional trusted, offline SVG renderer. Unsupported SVG stays rejected by default. */
+  rasterizeSvg?: (asset: MigrationCapturedAsset, signal?: AbortSignal) => Promise<MigrationCapturedAsset>
   captureProvider?: MigrationCaptureProvider
   /** Change this when browser/extraction policy changes; prevents stale reuse. */
   captureVersion?: string

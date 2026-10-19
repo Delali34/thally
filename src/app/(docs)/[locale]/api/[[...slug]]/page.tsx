@@ -1,7 +1,7 @@
 /** Localized API navigation, with request-policy rendering for managed assets. */
 
 import type { Metadata } from 'next'
-import { isRemoteContentSource } from '@/lib/content-source'
+import { getContentSource, isRemoteContentSource } from '@/lib/content-source'
 import { notFound, redirect } from 'next/navigation'
 import { ApiLayout } from '@/components/api/api-layout'
 import { OperationPanel } from '@/components/api/operation-panel'
@@ -12,7 +12,7 @@ import { pageFullTitle } from '@/lib/page-meta'
 import { apiReferenceConfig, getOpenApiSpecUrl } from '@/config/api-reference'
 import { getAllApiOperationNodes, getApiOperationBySlug, getApiOperationNodes } from '@/data/api-reference'
 import { getApiPlaygroundDisplay, getApiSpecLinkVisible, getBreadcrumbs, getSeoConfig, getDocEntries, loadDocEntries } from '@/data/docs'
-import { getIndexableDocTranslation, hasDocTranslation } from '@/lib/i18n/translation-source'
+import { findDocSource, getIndexableDocTranslation, hasDocTranslation } from '@/lib/i18n/translation-source'
 import { buildAgentAlternateLinks } from '@/lib/agent-discovery'
 import { buildApiOperationJsonLd } from '@/lib/json-ld'
 import { buildOgImageUrl, formatOgBreadcrumb, formatOgDisplayUrl } from '@/lib/og'
@@ -45,7 +45,7 @@ export async function generateStaticParams() {
   if (isRemoteContentSource() || isReaderAuthActive()) return [{ locale: i18n.defaultLocale, slug: [] }]
   const secondaryLocales = i18n.locales.filter((l) => l.code !== i18n.defaultLocale)
   const nodes = await getAllApiOperationNodes()
-  const docs = getDocEntries().filter((doc) => doc.slug[0] === 'api' && doc.slug.length > 1)
+  const docs = getDocEntries().filter((doc) => doc.slug[0] === 'api')
   const translatedDocs = await Promise.all(secondaryLocales.flatMap(({ code }) =>
     docs.map(async (doc) => (await hasDocTranslation(doc.slug, code)
       ? { locale: code, slug: doc.slug.slice(1) }
@@ -122,6 +122,11 @@ export default async function LocaleApiReferencePage({ params }: PageProps) {
   }
 
   if (!resolved.slug?.length) {
+    // Source lookup preserves normal translation fallback. The document
+    // renderer remains responsible for locale, publication and reader policy.
+    if (await findDocSource(getContentSource(), 'api', resolved.locale)) {
+      return DocsPage({ params: Promise.resolve({ slug: [resolved.locale, 'api'] }) })
+    }
     const mdxCandidates = (await loadDocEntries(reader)).filter(
       (doc) => doc.slug[0] === 'api' && doc.slug.length > 1,
     )

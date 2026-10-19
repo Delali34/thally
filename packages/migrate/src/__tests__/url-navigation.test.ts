@@ -49,6 +49,68 @@ function leaves(nodes: Array<MigrationNavigationOccurrence>): Array<string> {
 }
 
 describe('passive source navigation', () => {
+  it('keeps accessible icon destinations without assigning a logo title to an existing page', () => {
+    const body = '<aside><a href="/"><img alt="Site logo"></a><a href="/">Intro</a><a href="/guide">Guide</a><a href="https://code.example.test/project" aria-label="Repository"><svg></svg></a><a href="https://status.example.test/" title="Service status"><svg></svg></a><a href="https://support.example.test/"><img alt="Support"></a></aside>'
+    expect(extractSourceNavigation({ finalUrl: new URL('https://docs.example.test/guide'), contentType: 'text/html', body })).toEqual([
+      { label: 'Intro', url: 'https://docs.example.test/' }, { label: 'Guide', url: 'https://docs.example.test/guide' },
+      { label: 'Repository', url: 'https://code.example.test/project' }, { label: 'Service status', url: 'https://status.example.test/' }, { label: 'Support', url: 'https://support.example.test/' },
+    ])
+  })
+
+  it('ignores an external-only author aside containing metadata prose', () => {
+    const body = '<article><h1>Post</h1></article><aside><p>Published yesterday</p><p>Author</p><a href="https://social.example.test/author">Author name</a></aside>'
+    expect(extractSourceNavigation({ finalUrl: new URL('https://docs.example.test/post'), contentType: 'text/html', body })).toEqual([])
+  })
+
+  it.each([false, true])('reads only the root-owned sidebar collection menu (article fake=%s)', fakeArticle => {
+    const options = [{ title: 'Current', description: 'Current collection', url: '/' }, { title: 'Previous', description: 'Maintained collection', url: 'https://previous.example.test/' }]
+    const element = ['$', '$L1', null, { children: ['$', '$L2', null, { children: ['$', '$L3', null, { options: '$5:props:options' }] }] }]
+    const tree = fakeArticle ? ['$', '$L4', null, { children: element }] : element
+    const stream = `1:I["module",[],"Sidebar"]\n2:I["module",[],"SidebarHeader"]\n3:I["module",[],"RootToggle"]\n4:I["module",[],"PageArticle"]\n0:${JSON.stringify(tree)}\n5:${JSON.stringify(['$', 'div', null, { options }])}\n6:${JSON.stringify({ options: [{ title: 'Poison', url: 'https://poison.example.test/' }] })}\n`
+    const body = `<aside><button aria-haspopup="dialog"><span>Current</span></button><a href="/">Intro</a><a href="/guide">Guide</a></aside>${envelope(stream)}`
+    const result = extractSourceNavigation({ finalUrl: new URL('https://docs.example.test/guide'), contentType: 'text/html', body })
+    expect(result.map(node => node.label)).toEqual(fakeArticle ? ['Intro', 'Guide'] : ['Intro', 'Guide', 'Previous'])
+    expect(leaves(result)).not.toContain('https://poison.example.test/')
+  })
+
+  it('does not borrow sidebar menu options from an unreferenced record or unmatched visible trigger', () => {
+    const options = [{ title: 'Current', url: '/' }, { title: 'Previous', url: 'https://previous.example.test/' }]
+    for (const root of [['$', 'main', null, { children: 'Article' }], ['$', '$L1', null, { children: ['$', '$L2', null, { children: ['$', '$L3', null, { options }] }] }]]) {
+      const stream = `1:I["module",[],"Sidebar"]\n2:I["module",[],"SidebarHeader"]\n3:I["module",[],"RootToggle"]\n0:${JSON.stringify(root)}\nf:${JSON.stringify(['$', '$L1', null, { children: ['$', '$L2', null, { children: ['$', '$L3', null, { options }] }] }])}\n`
+      const body = `<aside><button aria-haspopup="dialog"><span>Unrelated action</span></button><a href="/">Intro</a><a href="/guide">Guide</a></aside>${envelope(stream)}`
+      expect(leaves(extractSourceNavigation({ finalUrl: new URL('https://docs.example.test/guide'), contentType: 'text/html', body }))).not.toContain('https://previous.example.test/')
+    }
+  })
+
+  it.each(['p', 'span'])('preserves repeated plain %s group labels and adjacent link order without platform classes', (tag) => {
+    const body = `<aside><div><button>Search</button></div><div><div></div><${tag}>Guides</${tag}><a href="/second">Second</a><a href="/first">First</a><${tag}>Packages</${tag}><div><a href="/runtime">Runtime</a></div><${tag}>More</${tag}><a href="/news">News</a></div></aside>`
+    expect(extractSourceNavigation({ finalUrl: new URL('https://docs.example.test/first'), contentType: 'text/html', body })).toEqual([
+      { kind: 'group', label: 'Guides', children: [{ label: 'Second', url: 'https://docs.example.test/second' }, { label: 'First', url: 'https://docs.example.test/first' }] },
+      { kind: 'group', label: 'Packages', children: [{ label: 'Runtime', url: 'https://docs.example.test/runtime' }] },
+      { kind: 'group', label: 'More', children: [{ label: 'News', url: 'https://docs.example.test/news' }] },
+    ])
+  })
+
+  it.each([
+    '<p>Search</p><form><input name="query"></form><a href="/guide">Guide</a><p>More</p><a href="/next">Next</a>',
+    '<p>Updates</p><div><p>Opaque promotion copy.</p><a href="/guide">Guide</a></div><p>More</p><a href="/next">Next</a>',
+    '<p>One isolated paragraph</p><a href="/guide">Guide</a><a href="/next">Next</a>',
+  ])('does not infer groups from search controls, opaque marketing wrappers or an isolated paragraph', (contents) => {
+    const navigation = extractSourceNavigation({ finalUrl: new URL('https://docs.example.test/guide'), contentType: 'text/html', body: `<aside>${contents}</aside>` })
+    expect(navigation.some(node => node.kind === 'group')).toBe(false)
+    expect(leaves(navigation)).toEqual(['https://docs.example.test/guide', 'https://docs.example.test/next'])
+  })
+
+  it.each(['', '?section=example'])('does not treat article breadcrumbs or a sibling author/TOC aside as site navigation (query=%s)', query => {
+    const body = '<main><article><nav aria-label="Breadcrumb"><a href="/blog">Blog</a></nav><h1>Article</h1></article><aside><a href="https://social.example.test/author">Author</a><nav><a href="#example">Example</a><a href="/post#other">Other section</a></nav></aside></main>'
+    expect(extractSourceNavigation({ finalUrl: new URL(`https://docs.example.test/post${query}`), contentType: 'text/html', body })).toEqual([])
+  })
+
+  it('retains exact query-selected page targets in a real sidebar', () => {
+    const body = '<main><aside aria-label="Sidebar"><a href="?version=one">One</a><a href="?version=two">Two</a></aside><article><h1>Guide</h1></article></main>'
+    expect(leaves(extractSourceNavigation({ finalUrl: new URL('https://docs.example.test/guide?version=one'), contentType: 'text/html', body }))).toEqual(['https://docs.example.test/guide?version=one', 'https://docs.example.test/guide?version=two'])
+  })
+
   it('reads the 14 ordered tabs, nested groups, and external link from scoped Flight JSON', () => {
     const navigation = extractSourceNavigation(capture())
     expect(navigation.map((node) => node.label)).toEqual(tabs.map(([label]) => label))
