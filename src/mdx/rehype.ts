@@ -159,10 +159,18 @@ const MAX_HIGHLIGHTED_LINE_NUMBER = 100_000
 // authored or imported page to exhaust a request Worker. Keep both individual
 // fences and the aggregate page work bounded; fences outside the budget remain
 // ordinary HAST text nodes and are therefore emitted as escaped plaintext.
-const MAX_HIGHLIGHTED_CODE_BLOCKS = 64
 const MAX_HIGHLIGHTED_CODE_BLOCK_BYTES = 64 * 1024
 const MAX_HIGHLIGHTED_CODE_BLOCK_LINES = 2_000
 const MAX_HIGHLIGHTED_PAGE_BYTES = 256 * 1024
+// A byte-only limit permits arbitrarily many empty fences. Charge a small
+// fixed amount of work per grammar invocation instead of stopping every page
+// at the same block count. At most 1,024 tiny fences can enter Shiki.
+const MIN_HIGHLIGHTED_CODE_BLOCK_WORK = 256
+const MAX_HIGHLIGHTED_PAGE_WORK = 256 * 1024
+// Input size does not bound the number of objects created by a grammar. These
+// shared limits cap HAST expansion before allocating or mutating a code block.
+const MAX_HIGHLIGHTED_PAGE_NODES = 100_000
+const MAX_HIGHLIGHTED_PAGE_OUTPUT_BYTES = 8 * 1024 * 1024
 
 /** Return a bounded UTF-8 cost, or null when a fence must remain plaintext. */
 export function measureHighlightableCode(code: string): number | null {
@@ -185,6 +193,7 @@ export function measureHighlightableCode(code: string): number | null {
 export interface SyntaxHighlightBudget {
   scheduledBlocks: number
   scheduledBytes: number
+  scheduledWork: number
   isExhausted: boolean
 }
 
@@ -195,7 +204,7 @@ export function scheduleSyntaxHighlight(
 ): boolean {
   if (
     budget.isExhausted ||
-    budget.scheduledBlocks >= MAX_HIGHLIGHTED_CODE_BLOCKS ||
+    budget.scheduledWork >= MAX_HIGHLIGHTED_PAGE_WORK ||
     budget.scheduledBytes >= MAX_HIGHLIGHTED_PAGE_BYTES
   ) {
     budget.isExhausted = true
@@ -204,15 +213,18 @@ export function scheduleSyntaxHighlight(
 
   const codeBytes = measureHighlightableCode(code)
   if (codeBytes === null) return false
-  if (budget.scheduledBytes + codeBytes > MAX_HIGHLIGHTED_PAGE_BYTES) {
+  const work = Math.max(codeBytes, MIN_HIGHLIGHTED_CODE_BLOCK_WORK)
+  if (budget.scheduledBytes + codeBytes > MAX_HIGHLIGHTED_PAGE_BYTES
+    || budget.scheduledWork + work > MAX_HIGHLIGHTED_PAGE_WORK) {
     budget.isExhausted = true
     return false
   }
 
   budget.scheduledBlocks += 1
   budget.scheduledBytes += codeBytes
+  budget.scheduledWork += work
   budget.isExhausted =
-    budget.scheduledBlocks >= MAX_HIGHLIGHTED_CODE_BLOCKS ||
+    budget.scheduledWork >= MAX_HIGHLIGHTED_PAGE_WORK ||
     budget.scheduledBytes >= MAX_HIGHLIGHTED_PAGE_BYTES
   return true
 }
@@ -241,6 +253,59 @@ interface LineMarks {
   focus: Set<number>
   add: Set<number>
   remove: Set<number>
+}
+
+export interface SyntaxHighlightOutputBudget {
+  nodes: number
+  bytes: number
+  isExhausted: boolean
+}
+
+/** A conservative serialized-text cost without constructing escaped markup. */
+function escapedOutputBytes(value: string): number {
+  if (value.length > MAX_HIGHLIGHTED_PAGE_OUTPUT_BYTES) return Infinity
+  let bytes = new TextEncoder().encode(value).byteLength
+  for (const character of value) {
+    if (character === '&') bytes += 4
+    else if (character === '<' || character === '>') bytes += 3
+    else if (character === '"') bytes += 5
+    else if (character === "'") bytes += 4
+  }
+  return bytes
+}
+
+/**
+ * Reserve a whole block before building its HAST. Raw token counts are an
+ * upper bound because joining placeholders can only remove token wrappers.
+ * Fixed markup allowances include line classes, style syntax and newlines;
+ * the separate node limit bounds object overhead beyond serialized bytes.
+ */
+export function reserveSyntaxHighlightOutput(
+  lines: Array<Array<ThemedToken>>,
+  budget: SyntaxHighlightOutputBudget,
+): boolean {
+  if (budget.isExhausted) return false
+  let nodes = budget.nodes
+  let bytes = budget.bytes
+  for (const [index, tokens] of lines.entries()) {
+    nodes += index === 0 ? 1 : 2
+    bytes += 192 + (index === 0 ? 0 : 1)
+    for (const token of tokens) {
+      nodes += 2
+      bytes += 64 + escapedOutputBytes(token.content) + escapedOutputBytes(token.color ?? 'inherit')
+      if (nodes > MAX_HIGHLIGHTED_PAGE_NODES || bytes > MAX_HIGHLIGHTED_PAGE_OUTPUT_BYTES) {
+        budget.isExhausted = true
+        return false
+      }
+    }
+    if (nodes > MAX_HIGHLIGHTED_PAGE_NODES || bytes > MAX_HIGHLIGHTED_PAGE_OUTPUT_BYTES) {
+      budget.isExhausted = true
+      return false
+    }
+  }
+  budget.nodes = nodes
+  budget.bytes = bytes
+  return true
 }
 
 /**
@@ -590,6 +655,7 @@ function rehypeShiki() {
     const budget: SyntaxHighlightBudget = {
       scheduledBlocks: 0,
       scheduledBytes: 0,
+      scheduledWork: 0,
       isExhausted: false,
     }
 
@@ -611,7 +677,11 @@ function rehypeShiki() {
       const language = node.properties?.language as string | undefined
       // Notation comments are authoring syntax: strip them from what is
       // rendered and copied. Mermaid consumes the raw fence untouched.
-      const notation = language && language !== 'mermaid' ? applyCodeNotation(textNode.value) : null
+      const originalCode = textNode.value
+      // Bound notation's split/mark allocations as well as tokenization. Work
+      // is charged against the original source, so directives cannot hide it.
+      const notation = language && language !== 'mermaid' && measureHighlightableCode(originalCode) !== null
+        ? applyCodeNotation(originalCode) : null
       if (notation) textNode.value = notation.code
       const code = textNode.value
       node.properties = {
@@ -628,7 +698,7 @@ function rehypeShiki() {
       // is never displayed.
       if (language === 'mermaid') return
 
-      if (!scheduleSyntaxHighlight(code, budget)) {
+      if (!scheduleSyntaxHighlight(originalCode, budget)) {
         return
       }
 
@@ -638,13 +708,18 @@ function rehypeShiki() {
     if (targets.length === 0) return
 
     const highlighter = await getHighlighter()
+    const outputBudget: SyntaxHighlightOutputBudget = { nodes: 0, bytes: 0, isExhausted: false }
 
+    // Shiki is synchronous: keep exactly one token result alive at a time.
+    // Promise fan-out would add memory without bounding or interrupting CPU.
     for (const target of targets) {
+      if (outputBudget.isExhausted) break
       const language = resolveLanguage(highlighter, target.language)
       const lines = highlighter.codeToTokensBase(target.code, {
         lang: language as Parameters<HighlighterCore['codeToTokensBase']>[1]['lang'],
         theme: cssVariablesTheme,
       })
+      if (!reserveSyntaxHighlightOutput(lines, outputBudget)) break
       const highlightSpec = target.node.properties?.highlightLines as string | undefined
       const focusSpec = target.node.properties?.focusLines as string | undefined
       const marks: LineMarks = {

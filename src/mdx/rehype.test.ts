@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 import { describe, expect, it } from 'vitest'
-import type { Element, Root, Text } from 'hast'
+import type { Element, ElementContent, Root, Text } from 'hast'
 
 import { codeInnerHtml } from './__tests__/test-html'
 import {
@@ -12,6 +12,7 @@ import {
   measureHighlightableCode,
   parseCodeFenceMeta,
   rehypePlugins,
+  reserveSyntaxHighlightOutput,
   scheduleSyntaxHighlight,
   type SyntaxHighlightBudget,
 } from './rehype'
@@ -39,6 +40,12 @@ async function transformCodeBlocks(blocks: Array<Element>): Promise<void> {
 
 function codeText(block: Element): Text {
   return ((block.children[0] as Element).children[0] as Text)
+}
+
+function renderedCodeText(block: Element): string {
+  const text = (node: ElementContent): string => node.type === 'text' ? node.value
+    : node.type === 'element' ? node.children.map(text).join('') : ''
+  return (block.children[0] as Element).children.map(text).join('')
 }
 
 describe('code-fence parsing', () => {
@@ -108,14 +115,18 @@ describe('code-fence metadata', () => {
   it('keeps oversized or exceptionally tall fences out of syntax highlighting', () => {
     expect(measureHighlightableCode('a'.repeat(64 * 1024))).toBe(64 * 1024)
     expect(measureHighlightableCode('a'.repeat(64 * 1024 + 1))).toBeNull()
+    expect(measureHighlightableCode('😀'.repeat(16_384))).toBe(64 * 1024)
+    expect(measureHighlightableCode('😀'.repeat(16_385))).toBeNull()
     expect(measureHighlightableCode('😀'.repeat(20_000))).toBeNull()
     expect(measureHighlightableCode('line\n'.repeat(2_000))).toBeNull()
+    expect(measureHighlightableCode('line\n'.repeat(1_999))).not.toBeNull()
   })
 
   it('stops measuring fences after the aggregate page budget is exhausted', () => {
     const budget: SyntaxHighlightBudget = {
       scheduledBlocks: 0,
       scheduledBytes: 0,
+      scheduledWork: 0,
       isExhausted: false,
     }
     for (let block = 0; block < 4; block += 1) {
@@ -133,11 +144,74 @@ describe('code-fence metadata', () => {
     expect(codeText(block).value).toBe(payload)
   })
 
-  it('leaves fences beyond the per-page block budget as raw text', async () => {
-    const blocks = Array.from({ length: 64 }, () => codeBlock('const ok = true'))
-    const overflow = codeBlock('<img src=x onerror=alert(1)>')
+  it.each([65, 271])('highlights every one of %i small examples and preserves rendered/copy text', async count => {
+    const blocks = Array.from({ length: count }, (_value, index) => codeBlock(`const value${index} = ${index}`, 'ts'))
+    await transformCodeBlocks(blocks)
+    for (const [index, block] of blocks.entries()) {
+      expect(codeInnerHtml(block)).toContain('var(--shiki-token-keyword)')
+      expect(renderedCodeText(block)).toBe(`const value${index} = ${index}`)
+      expect(block.properties?.code).toBe(`const value${index} = ${index}`)
+    }
+  })
+
+  it('bounds tiny and empty fences by fixed work even when their bytes are negligible', () => {
+    const budget: SyntaxHighlightBudget = { scheduledBlocks: 0, scheduledBytes: 0, scheduledWork: 0, isExhausted: false }
+    for (let index = 0; index < 1_024; index++) expect(scheduleSyntaxHighlight('', budget)).toBe(true)
+    expect(scheduleSyntaxHighlight('x', budget)).toBe(false)
+    expect(budget).toMatchObject({ scheduledBlocks: 1_024, scheduledBytes: 0, scheduledWork: 256 * 1024, isExhausted: true })
+  })
+
+  it('keeps content after the tiny-fence work limit as escaped plaintext', async () => {
+    const blocks = Array.from({ length: 1_024 }, () => codeBlock('', 'ts'))
+    const overflow = codeBlock('<script>literal()</script>', 'ts')
     await transformCodeBlocks([...blocks, overflow])
+    expect((blocks.at(-1)!.children[0] as Element).children[0].type).toBe('element')
+    expect(codeText(overflow).value).toBe('<script>literal()</script>')
+    expect(codeInnerHtml(overflow)).toContain('&#60;script&#62;literal()&#60;/script&#62;')
+    expect(overflow.properties?.code).toBe('<script>literal()</script>')
+  })
+
+  it('bounds raw notation source before stripping it or tokenizing its smaller result', async () => {
+    const payload = '// [!code highlight]\n'.repeat(4_000)
+    const block = codeBlock(payload, 'ts')
+    await transformCodeBlocks([block])
+    expect(codeText(block).value).toBe(payload)
+    expect(block.properties?.code).toBe(payload)
+  })
+
+  it('rejects oversized fences without consuming capacity needed by a later small block', () => {
+    const budget: SyntaxHighlightBudget = { scheduledBlocks: 0, scheduledBytes: 0, scheduledWork: 0, isExhausted: false }
+    expect(scheduleSyntaxHighlight('😀'.repeat(16_385), budget)).toBe(false)
+    expect(scheduleSyntaxHighlight('const ok = true', budget)).toBe(true)
+    expect(budget.scheduledBlocks).toBe(1)
+  })
+
+  it('reserves output atomically and shares node/escaped-byte limits between blocks', () => {
+    const token = { content: '<&"\'', color: 'var(--shiki-token-string)', offset: 0 }
+    const budget = { nodes: 99_997, bytes: 0, isExhausted: false }
+    expect(reserveSyntaxHighlightOutput([[token]], budget)).toBe(true)
+    expect(budget.nodes).toBe(100_000)
+    const reservedBytes = budget.bytes
+    expect(reserveSyntaxHighlightOutput([[token]], budget)).toBe(false)
+    expect(budget).toMatchObject({ nodes: 100_000, bytes: reservedBytes, isExhausted: true })
+    const bytes = { nodes: 0, bytes: 8 * 1024 * 1024 - 300, isExhausted: false }
+    expect(reserveSyntaxHighlightOutput([[{ ...token, content: '&'.repeat(10) }]], bytes)).toBe(false)
+    expect(bytes.nodes).toBe(0)
+    expect(bytes.bytes).toBe(8 * 1024 * 1024 - 300)
+  })
+
+  it('stops expanding shared output and preserves overflow as escaped plaintext', async () => {
+    const payload = 'const value = "text";\n'.repeat(1_000)
+    const blocks = Array.from({ length: 8 }, () => codeBlock(payload, 'ts'))
+    const overflow = codeBlock('<img src=x onerror=alert(1)>', 'ts')
+    await transformCodeBlocks([...blocks, overflow])
+    const highlighted = blocks.filter(block => (block.children[0] as Element).children[0].type === 'element')
+    expect(highlighted.length).toBeGreaterThan(0)
+    expect(highlighted.length).toBeLessThan(blocks.length)
     expect(codeText(overflow).value).toBe('<img src=x onerror=alert(1)>')
+    expect(codeInnerHtml(overflow)).toContain('&#60;img src=x onerror=alert(1)&#62;')
+    expect(renderedCodeText(overflow)).toBe('<img src=x onerror=alert(1)>')
+    expect(overflow.properties?.code).toBe('<img src=x onerror=alert(1)>')
   })
 
   it('preserves Mermaid source for the strict diagram renderer', async () => {
