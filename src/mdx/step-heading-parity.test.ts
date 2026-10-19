@@ -113,3 +113,17 @@ describe('authored step heading ids', () => {
     }
   })
 })
+
+describe('step titles with inline code', () => {
+  it.each([
+    ['Run the CLI `init` command', 'run-the-cli-init-command'],
+    ['Create an `actions.ts` file', 'create-an-actions-ts-file'],
+    ['`a`b', 'ab'],
+  ])('gives the title %s the id of its plain text in thally check, the renderer and the content parser', async (title, id) => {
+    const source = `<Steps titleSize="h3">\n<Step title="${title}">\nBody.\n</Step>\n</Steps>`
+    expect(await renderedIds(source)).toEqual([id])
+    expect(parseMdxContent(source).headings.map((heading) => heading.id)).toEqual([id])
+    expect(await brokenAnchorOutput(source, id)).not.toContain('Broken anchor')
+    expect(parseMdxContent(source).headings.map((heading) => heading.text)).toEqual([title.replaceAll('`', '')])
+  })
+})

@@ -21,6 +21,16 @@ describe('API field components', () => {
     expect(legacy).toContain('required')
   })
 
+  // Mintlify names a field's location only for a header; body, query and path fields show name, type and required.
+  it('labels a header field with its location and no other field', () => {
+    const field = (props: Record<string, unknown>) => renderToStaticMarkup(createElement(ParamField, { type: 'string', required: true, ...props }))
+    expect(field({ header: 'Authorization' })).toContain('>header</span>')
+    for (const props of [{ body: 'runCount' }, { query: 'page' }, { path: 'batchId' }, { name: 'plain' }]) {
+      expect(field(props)).not.toMatch(/>(body|query|path|header)<\/span>/)
+    }
+    expect(field({ query: 'page' })).toContain('<code class="text-sm font-semibold text-foreground">page</code>')
+  })
+
   it('renders response labels and accessible expandable state', () => {
     const response = renderToStaticMarkup(createElement(ResponseField, {
       name: 'status', type: 'string', pre: ['read-only'], post: ['enum'], deprecated: true,

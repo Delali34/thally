@@ -24,7 +24,7 @@ interface DocFrontmatter {
   title?: string
   headingTitle?: string
   description?: string
-  descriptionPlacement?: 'body'
+  descriptionPlacement?: DocEntry['descriptionPlacement']
   group?: string
   badge?: string
   keywords?: Array<string>
@@ -252,7 +252,7 @@ async function compileDocEntry(
     title,
     headingTitle: typeof frontmatter?.headingTitle === 'string' && frontmatter.headingTitle.trim() ? frontmatter.headingTitle.trim() : undefined,
     description: frontmatter?.description ?? '',
-    descriptionPlacement: frontmatter?.descriptionPlacement === 'body' ? 'body' : undefined,
+    descriptionPlacement: frontmatter?.descriptionPlacement === 'body' || frontmatter?.descriptionPlacement === 'operation' ? frontmatter.descriptionPlacement : undefined,
     slug: slugSegments,
     href,
     group: frontmatter?.group ?? 'Docs',

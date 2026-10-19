@@ -232,6 +232,24 @@ describe('documentation visual system', () => {
     expect(markup).toContain('href="/components"')
   })
 
+  it('keeps a group heading named after its collection when the site asks for every heading', () => {
+    const sections = [
+      { id: 'nav-root-get-started', title: 'Get started', items: [{ id: 'welcome', title: 'Welcome', href: '/welcome' }] },
+      { id: 'nav-group-0-get-started', title: 'Get started', items: [{ id: 'introduction', title: 'Introduction', href: '/' }] },
+      { id: 'nav-group-1-design', title: 'Design your docs', items: [{ id: 'components', title: 'Components', href: '/components' }] },
+    ]
+    const render = (navigationPresentation?: ComponentProps<typeof Sidebar>['navigationPresentation']) =>
+      renderToStaticMarkup(createElement(Sidebar, { title: 'Get started', sections, navigationPresentation }))
+    const headings = (markup: string) => [...markup.matchAll(/<p class="[^"]*font-semibold leading-6[^"]*">(?:<svg.*?<\/svg>)?<span>([^<]+)<\/span><\/p>/g)].map((match) => match[1])
+
+    // By default every section named after the collection loses its heading.
+    expect(headings(render())).toEqual(['Design your docs'])
+    expect(headings(render({ display: 'dropdown' }))).toEqual(['Design your docs'])
+    // `groupHeadings: all` restores the authored group's heading, but never the collection's own root section.
+    expect(headings(render({ display: 'dropdown', groupHeadings: 'all' }))).toEqual(['Get started', 'Design your docs'])
+    expect(render({ display: 'tabs', groupHeadings: 'all' })).toContain('href="/welcome"')
+  })
+
   it('renders a rail-free sidebar with a visible current-page state', () => {
     const markup = renderToStaticMarkup(
       createElement(Sidebar, {

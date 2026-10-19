@@ -10,11 +10,11 @@ import { isIP } from 'node:net'
 
 
 import { splitOpenApiRef, withSpecRef } from './openapi-ref.js'
-import { insertApiTab } from './navigation.js'
-import { dropConflictingRedirects, dropUnroutableRedirects, literalRoute, servedRoutes } from './redirects.js'
-import { apiTabSpecIds, isWithheld, linkApiMounts, mountPrefix, thallyOperationSlugSegments } from './repository.js'
+import { addMintlifyDirectoryRedirects, insertApiTab } from './navigation.js'
+import { dropConflictingRedirects, dropUnroutableRedirects, literalRoute, pageEntryRoutes, servedRoutes } from './redirects.js'
+import { addEndpointPages, apiTabSpecIds, createEndpointPageLedger, isWithheld, linkApiMounts, mountPrefix, qualifyDisplacedBareRefs, reportEndpointPages, specLookupOrder, thallyOperationSlugSegments } from './repository.js'
 import { markExcluded, parseSpecDocument, sharedSpecMessage, withoutByteOrderMark } from './spec-exclude.js'
-import type { MigrationBundle, MigrationFetcher, RemoteApiSpec } from './types.js'
+import type { MigrationBundle, MigrationFetcher, MigrationNavigationTab, RemoteApiSpec } from './types.js'
 
 const MAX_SPEC_BYTES = 25_000_000
 const MAX_REDIRECTS = 3
@@ -186,6 +186,22 @@ interface BoundSpec {
   content: Buffer
   operations: Array<OpenApiOperation>
   tabName: string
+  /** Set when the operations the tab listed became pages (`addEndpointPages`): those operations, in listed order, and the spec has no API tab of its own. */
+  endpointOperations?: Array<string>
+}
+
+/** Bind a spec to the tab its reference names, or to a new API tab beside it; returns that tab's label. How every spec was bound before operations could become pages. */
+function bindApiTab(
+  tabs: Array<MigrationNavigationTab>,
+  reference: Pick<RemoteApiSpec, 'tabLabel' | 'parentTab' | 'icon' | 'hidden'>,
+  api: NonNullable<MigrationNavigationTab['api']>,
+): string {
+  const tab = reference.tabLabel
+    ? tabs.find((candidate) => candidate.tab === reference.tabLabel)
+    : tabs.find((candidate) => candidate.tab.toLowerCase().includes('api'))
+  if (tab) tab.api = api
+  else insertApiTab(tabs, { tab: reference.tabLabel ?? 'API Reference', ...(reference.icon ? { icon: reference.icon } : {}), ...(reference.hidden ? { hidden: true } : {}), api }, reference.parentTab)
+  return tab?.tab ?? reference.tabLabel ?? 'API Reference'
 }
 
 /**
@@ -209,7 +225,9 @@ export async function hydrateRemoteApiSpecs(bundle: MigrationBundle, fetcher?: M
   const warnings = [...bundle.warnings]
   const pages = bundle.pages.map((page) => ({ ...page }))
   const authoredLinks = new Set<string>()
-  const served = servedRoutes(pages)
+  // The operations a tab lists become pages: URLs two of them share, and what an authored page already owns, are settled once for the site.
+  const ledger = createEndpointPageLedger(pages)
+  const pagesBefore = pages.length
   // Mintlify endpoint URL -> Thally endpoint page, for every redirect generated below.
   const endpointUrls = new Map<string, string>()
   for (const page of bundle.pages) {
@@ -224,6 +242,11 @@ export async function hydrateRemoteApiSpecs(bundle: MigrationBundle, fetcher?: M
     }
   }
   const bound: Array<BoundSpec> = []
+  // The tabs as they would be if every spec, converted or not, were bound as an API tab: the local specs whose operations became pages first.
+  const apiTabs = bundle.docsConfig.tabs.map((tab) => ({ ...tab }))
+  for (const mount of bundle.localApiMounts ?? []) {
+    if (mount.endpointOperations) bindApiTab(apiTabs, { tabLabel: mount.tab }, { source: `openapi/${mount.filename}` })
+  }
   for (const reference of bundle.remoteApiSpecs) {
     for (let index = warnings.length - 1; index >= 0; index--) {
       if (warnings[index].source === reference.url && warnings[index].message.includes('requires a network download')) warnings.splice(index, 1)
@@ -248,13 +271,33 @@ export async function hydrateRemoteApiSpecs(bundle: MigrationBundle, fetcher?: M
         const ref = page.openapi ? splitOpenApiRef(page.openapi) : null
         if (ref?.specRef === reference.url) page.openapi = withSpecRef(ref, `openapi/${filename}`)
       }
-      const tab = reference.tabLabel
-        ? tabs.find((candidate) => candidate.tab === reference.tabLabel)
-        : tabs.find((candidate) => candidate.tab.toLowerCase().includes('api'))
+      // Where the spec would be bound were it an API tab, whatever happens next: it decides which spec a bare `openapi:` reference reached first.
+      bindApiTab(apiTabs, reference, { source: `openapi/${filename}` })
+      // The operations the tab listed become its pages, and the spec is bound only in a hidden tab that lists nothing.
+      const endpoint = reference.groups && reference.endpointPages
+        ? addEndpointPages({
+            tabs,
+            pages,
+            ledger,
+            spec: {
+              assetPath: `openapi/${filename}`,
+              source: reference.url,
+              content: body,
+              groups: reference.groups,
+              target: reference.endpointPages,
+              tabLabel: reference.tabLabel,
+              parentTab: reference.parentTab,
+              icon: reference.icon,
+              hidden: reference.hidden,
+            },
+          })
+        : null
+      if (endpoint) {
+        bound.push({ reference, filename, content: body, operations, tabName: reference.tabLabel ?? 'API Reference', endpointOperations: endpoint.operations })
+        continue
+      }
       const api = { source: `openapi/${filename}`, ...(reference.navigation === false ? { navigation: false } : {}), ...(reference.groups ? { groups: reference.groups } : {}) }
-      if (tab) tab.api = api
-      else insertApiTab(tabs, { tab: reference.tabLabel ?? 'API Reference', ...(reference.icon ? { icon: reference.icon } : {}), ...(reference.hidden ? { hidden: true } : {}), api }, reference.parentTab)
-      bound.push({ reference, filename, content: body, operations, tabName: tab?.tab ?? reference.tabLabel ?? 'API Reference' })
+      bound.push({ reference, filename, content: body, operations, tabName: bindApiTab(tabs, reference, api) })
     } catch (error) {
       warnings.push({
         code: 'fetch-failed',
@@ -267,20 +310,26 @@ export async function hydrateRemoteApiSpecs(bundle: MigrationBundle, fetcher?: M
   // Every spec is bound, so every mount is linked once, local and remote together: each target carries the id its spec is served under,
   // and the redirects below exist before any guess from a link's last two segments.
   // A mount whose download failed is reserved all the same: it still owns the addresses under it, which stay as authored.
+  // The operations of a tab that became pages are served by those pages, from the directory the pages are under: nothing is redirected there.
+  const pageMounts = bound.flatMap(({ reference, endpointOperations }) => endpointOperations && reference.endpointPages ? [reference.endpointPages.directory] : [])
   const directories = [
     ...(bundle.localApiMounts ?? []).map(({ directory }) => directory),
     ...bundle.remoteApiSpecs.flatMap((reference) => (reference.directories ?? []).map(({ directory }) => directory)),
+    ...pageMounts,
   ]
   const endpointRedirects = linkApiMounts(
     [
-      ...(bundle.localApiMounts ?? []).map(({ filename, directory, tab }) => ({
+      ...(bundle.localApiMounts ?? []).map(({ filename, directory, tab, endpointOperations }) => ({
         filename,
         content: Buffer.from(assets.find((asset) => asset.path === `openapi/${filename}`)?.content ?? []),
         prefix: directory,
+        ...(endpointOperations ? { endpointPages: true, operations: endpointOperations } : {}),
         ...(tab ? { tab } : {}),
       })),
-      ...bound.flatMap(({ reference, filename, content, tabName }) => (reference.directories ?? [])
-        .map(({ directory, operations: listed }) => ({ filename, content, prefix: directory, tab: tabName, ...(listed ? { operations: listed } : {}) }))),
+      ...bound.flatMap(({ reference, filename, content, tabName, endpointOperations }) => endpointOperations && reference.endpointPages
+        ? [{ filename, content, prefix: reference.endpointPages.directory, tab: tabName, endpointPages: true, operations: endpointOperations }]
+        : (reference.directories ?? [])
+          .map(({ directory, operations: listed }) => ({ filename, content, prefix: directory, tab: tabName, ...(listed ? { operations: listed } : {}) }))),
     ],
     { ...bundle.docsConfig, tabs, redirects },
     pages,
@@ -292,6 +341,20 @@ export async function hydrateRemoteApiSpecs(bundle: MigrationBundle, fetcher?: M
     endpointUrls.set(literalRoute(redirect.source) ?? redirect.source, redirect.destination)
   }
 
+  reportEndpointPages(ledger, warnings)
+  // A bare `openapi:` reference keeps the spec it reached when a spec's tab became pages and the lookup order changed.
+  qualifyDisplacedBareRefs({
+    pages,
+    before: specLookupOrder(apiTabs, bundle.docsConfig.navigation?.versions),
+    after: specLookupOrder(tabs, bundle.docsConfig.navigation?.versions),
+    content: (source) => {
+      const asset = assets.find((entry) => entry.path === source)
+      return asset ? Buffer.from(asset.content) : undefined
+    },
+    qualifier: (source) => source,
+  })
+  // The pages the operations became are routes of the site too, which no redirect may take.
+  const served = servedRoutes(pages)
   // Lower case, and without a trailing slash: a redirect that differs from a guessed one only in letter case or a trailing slash wins on a server that ignores them, so none is guessed for that address.
   const existingSources = new Set(redirects.map((redirect) => literalRoute(redirect.source) ?? redirect.source.toLowerCase()))
   const mounts = directories.map(mountPrefix).filter(Boolean)
@@ -323,12 +386,23 @@ export async function hydrateRemoteApiSpecs(bundle: MigrationBundle, fetcher?: M
     const endpoint = endpointUrls.get(literalRoute(redirect.destination) ?? '')
     return endpoint ? { ...redirect, destination: endpoint } : redirect
   })
+  const boundConfig = { ...bundle.docsConfig, tabs, ...(direct.length > 0 ? { redirects: direct } : {}) }
+  // As for any page the navigation lists, a directory the new pages sit in (a tag, a product's API folder) opens on its first page.
+  const newPages = pages.slice(pagesBefore)
+  const withDirectories = bundle.platform === 'mintlify' && newPages.length > 0 ? addMintlifyDirectoryRedirects(boundConfig, newPages) : boundConfig
+  // A page whose frontmatter `url` links to another address is reached through redirects that hide it on purpose; the
+  // repository migration adds them after its own checks, so they skip these checks too and keep their place.
+  const linkRedirects = new Set(pages.flatMap((page) => page.externalUrl ? pageEntryRoutes(page).map((source) => `${source} ${page.externalUrl}`) : []))
+  const isLinkRedirect = (redirect: { source: string; destination: string }) => linkRedirects.has(`${redirect.source} ${redirect.destination}`)
+  const links = (withDirectories.redirects ?? []).filter(isLinkRedirect)
+  const unchecked = links.length > 0 ? { ...withDirectories, redirects: withDirectories.redirects!.filter((redirect) => !isLinkRedirect(redirect)) } : withDirectories
+  // Redirects added above meet the same checks as any other: none may fail the build, hide a page that exists, or loop.
+  const checked = dropConflictingRedirects(dropUnroutableRedirects(unchecked, warnings), pages, warnings)
   return {
     ...bundle,
     pages,
     assets,
-    // Redirects added above meet the same checks as any other: none may fail the build, hide a page that exists, or loop.
-    docsConfig: dropConflictingRedirects(dropUnroutableRedirects({ ...bundle.docsConfig, tabs, ...(direct.length > 0 ? { redirects: direct } : {}) }, warnings), pages, warnings),
+    docsConfig: links.length > 0 ? { ...checked, redirects: [...(checked.redirects ?? []), ...links] } : checked,
     warnings,
   }
 }

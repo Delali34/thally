@@ -135,7 +135,8 @@ src/
 - **`href`** — links to an internal route or external URL
 
 Large navigation trees load separately after the article appears, while small
-sidebars remain inline. Earlier/later controls replace windows of 100 visible
+sidebars remain inline. Sidebars with up to 1,000 visible entries render in full;
+larger ones get earlier/later controls that replace windows of 1,000 visible
 entries across the collection, retaining authored groups and active-page context.
 Loading failures leave the article available and offer a navigation retry.
 Reader-restricted navigation remains private and is never publicly cached.

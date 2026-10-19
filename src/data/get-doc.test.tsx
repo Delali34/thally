@@ -28,7 +28,7 @@ vi.mock('@/lib/runtime-sources', () => ({
 vi.mock('@/lib/content-source', () => ({
   getContentSource: () => ({
     kind: contentSourceState.kind,
-    exists: async (path: string) => ['src/content/introduction.mdx', 'src/content/events.mdx', 'src/content/inline-component.mdx', 'src/content/remote-inline.mdx'].includes(path),
+    exists: async (path: string) => ['src/content/introduction.mdx', 'src/content/events.mdx', 'src/content/endpoint.mdx', 'src/content/inline-component.mdx', 'src/content/remote-inline.mdx'].includes(path),
     read: async (path: string) => ({ content: path === 'src/content/inline-component.mdx'
       ? '---\ntitle: Inline component\n---\n\nexport const HeroCard = ({ title }) => <div>{title}</div>\n\n<HeroCard title={`Preview ${1 + 1}`} />'
       : '# Content' }),
@@ -44,10 +44,17 @@ vi.mock('@/generated/runtime-docs', () => ({
       component: () => null,
       frontmatter: { title: 'Event delivery' },
     },
+    'src/content/endpoint.mdx': {
+      component: () => null,
+      frontmatter: { title: 'Create a key', description: 'Short metadata summary.', descriptionPlacement: 'operation' },
+    },
   },
 }))
 
 describe('document source identity', () => {
+  it('preserves an operation description placement from compiled frontmatter', async () => {
+    expect(await getDocFromParams(['endpoint'])).toMatchObject({ description: 'Short metadata summary.', descriptionPlacement: 'operation' })
+  })
   it('preserves a display heading from compiled metadata without changing the SEO title', async () => {
     const doc = await getDocFromParams([])
     expect(doc).toMatchObject({ title: 'Product documentation', headingTitle: 'Display heading' })

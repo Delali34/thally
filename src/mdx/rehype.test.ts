@@ -289,6 +289,18 @@ describe('heading anchors', () => {
     expect(compiled).not.toContain('#scrape-+-interact */')
   })
 
+  it('keeps the @, slashes, doubled dashes and typographic quotes of a comment id', async () => {
+    const { compile } = await import('@mdx-js/mdx')
+    const compiled = String(await compile([
+      '## `@trigger.dev/sdk/v3` {/* #@trigger-dev/sdk/v3 */}',
+      '## `out.writer({ execute })` {/* #out-writer--execute- */}',
+      '## \u201cStream is deleted\u201d {/* #\u201dstream-is-deleted\u201d */}',
+    ].join('\n\n'), { rehypePlugins: [rehypePlugins[2]] }))
+    expect(compiled).toContain('id: "@trigger-dev/sdk/v3"')
+    expect(compiled).toContain('id: "out-writer--execute-"')
+    expect(compiled).toContain('id: "\u201dstream-is-deleted\u201d"')
+  })
+
   it('preserves Unicode heading IDs and suffixes repeated translated headings', () => {
     const headings: Array<Element> = ['Überblick', 'Überblick', '日本語 API'].map((value) => ({
       type: 'element', tagName: 'h2', properties: {}, children: [{ type: 'text', value }],

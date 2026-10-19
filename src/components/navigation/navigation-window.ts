@@ -5,7 +5,14 @@
  */
 import type { NavigationGroup, NavigationNode, NavigationSection } from '@/data/docs'
 
-export const NAVIGATION_WINDOW_SIZE = 100
+/**
+ * Visible rows mounted at once. Large enough that an ordinary documentation
+ * sidebar (a few hundred entries) renders completely and never shows paging
+ * controls, yet still a hard bound on mounted DOM for collections of thousands
+ * of entries. The payload bound lives elsewhere: trees over
+ * `MAX_INLINE_NAVIGATION_NODES` stream separately from the article.
+ */
+export const NAVIGATION_WINDOW_SIZE = 1000
 
 export interface NavigationDisclosure {
   isOpen: boolean
@@ -77,7 +84,8 @@ export function visibleNavigationRows(
 
 /**
  * Reconstruct only selected rows and their ancestors. For supported deferred
- * trees (depth <=64), at most 165 rows mount: 100 selected plus ancestor context.
+ * trees (depth <=64), at most NAVIGATION_WINDOW_SIZE + 65 rows mount: the
+ * selected window plus ancestor context.
  * Small inline trees contain <=256 nodes before reaching this renderer.
  */
 export function projectNavigationWindow(rows: Array<NavigationRow>, requestedStart: number, size = NAVIGATION_WINDOW_SIZE) {

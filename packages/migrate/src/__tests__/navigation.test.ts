@@ -613,6 +613,42 @@ describe('Mintlify tab menus', () => {
   })
 })
 
+describe('Mintlify group named after its tab or dropdown', () => {
+  const dropdowns = (group: string) => ({ navigation: { dropdowns: [
+    { dropdown: 'Docs', groups: [{ group: 'Start', pages: ['start'] }] },
+    { dropdown: 'API reference', groups: [{ group, pages: ['api/overview'] }, { group: 'Tasks API', pages: ['api/tasks'] }] },
+  ] } })
+
+  it('keeps that heading, alongside the dropdown display', () => {
+    const result = projectMintlifyNavigation(dropdowns('API reference'))
+    expect(result.docsConfig.navigation).toEqual({ display: 'dropdown', groupHeadings: 'all' })
+    // The group stays authored, so the heading is the group's own title.
+    expect(result.docsConfig.tabs[1]?.groups?.[0]?.group).toBe('API reference')
+  })
+
+  it('keeps it for a tab, and for a tab of another language', () => {
+    const tabs = projectMintlifyNavigation({ navigation: { tabs: [{ tab: 'Guides', groups: [{ group: 'Guides', pages: ['g/a'] }] }] } })
+    expect(tabs.docsConfig.navigation).toEqual({ groupHeadings: 'all' })
+    const localized = projectMintlifyNavigation({ navigation: { languages: [
+      { language: 'en', tabs: [{ tab: 'Guides', groups: [{ group: 'Start', pages: ['g/a'] }] }] },
+      { language: 'fr', tabs: [{ tab: 'Guides', groups: [{ group: 'Guides', pages: ['fr/g/a'] }] }] },
+    ] } })
+    expect(localized.docsConfig.navigation).toEqual({ groupHeadings: 'all' })
+  })
+
+  it('adds nothing when no group shares the name of its collection', () => {
+    expect(projectMintlifyNavigation(dropdowns('Overview')).docsConfig.navigation).toEqual({ display: 'dropdown' })
+    const tabs = projectMintlifyNavigation({ navigation: { tabs: [{ tab: 'T', groups: [{ group: 'G', pages: ['g/a'] }] }] } })
+    expect(tabs.docsConfig.navigation).toBeUndefined()
+    // A group of another tab with that name does not count, nor does a nested one.
+    const other = projectMintlifyNavigation({ navigation: { tabs: [
+      { tab: 'A', groups: [{ group: 'B', pages: ['a/1'] }] },
+      { tab: 'B', groups: [{ group: 'C', pages: [{ group: 'B', pages: ['b/1'] }] }] },
+    ] } })
+    expect(other.docsConfig.navigation).toBeUndefined()
+  })
+})
+
 describe('Mintlify productGroups wrapper (Upstash-shaped docs.json)', () => {
   const config = {
     navigation: {
@@ -1146,6 +1182,18 @@ describe('Mintlify styling.eyebrows', () => {
   it('keeps the breadcrumb trail off next to the group-path eyebrow', () => {
     const { docsConfig } = projectMintlifyNavigation({ styling: { eyebrows: 'breadcrumbs' }, navigation: { pages: ['index'] } })
     expect(docsConfig).toMatchObject({ breadcrumbs: false, eyebrow: 'path' })
+  })
+})
+
+describe('Mintlify smart quotes', () => {
+  const docsConfigOf = (config: Record<string, unknown> = {}) => projectMintlifyNavigation({
+    ...config,
+    navigation: { pages: ['index'] },
+  }).docsConfig
+
+  it('turns on typographic quotes, which Mintlify applies to prose', () => {
+    expect(docsConfigOf().smartQuotes).toBe(true)
+    expect(docsConfigOf({ styling: { eyebrows: 'breadcrumbs' } }).smartQuotes).toBe(true)
   })
 })
 

@@ -9,6 +9,7 @@
  */
 export { parseMdxContent } from './parse.js'
 export { projectMdxAudience } from './audience.js'
+export { markdownToPlainText } from './plain-text.js'
 export { isSafeContentIdentifier } from './identifiers.js'
 export type { ContentAudience } from './audience.js'
 export {

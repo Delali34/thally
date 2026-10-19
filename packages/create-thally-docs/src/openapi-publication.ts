@@ -52,7 +52,20 @@ const baseName = (value: string) => canonicalRef(value).split(/[?#]/, 1)[0].spli
 export interface CheckSpec {
   source: string
   overrides?: unknown
+  /** The group webhooks sort under when the tab names none (`api.webhookGroup`); the site's default is `Webhooks`. */
+  webhookGroup?: string
   document?: unknown
+}
+
+/** The spec a reference's prefix pins: the full path, else the file name; exact case before case-insensitive. */
+function pinnedSpec(specRef: string, specs: ReadonlyArray<CheckSpec>): CheckSpec | undefined {
+  const wanted = canonicalRef(specRef)
+  if (!wanted) return undefined
+  const wantedBase = baseName(specRef)
+  return specs.find((entry) => canonicalRef(entry.source) === wanted)
+    ?? specs.find((entry) => canonicalRef(entry.source).toLowerCase() === wanted.toLowerCase())
+    ?? (wantedBase ? specs.find((entry) => baseName(entry.source) === wantedBase) : undefined)
+    ?? (wantedBase ? specs.find((entry) => baseName(entry.source).toLowerCase() === wantedBase.toLowerCase()) : undefined)
 }
 
 /**
@@ -66,19 +79,76 @@ export function pageState(ref: DocReference, specs: ReadonlyArray<CheckSpec>): '
     ? 'unknown'
     : ref.webhook ? webhookState(spec.document, ref.path, spec.overrides) : operationState(spec.document, ref.method, ref.path, spec.overrides)
   if (ref.specRef) {
-    const wanted = canonicalRef(ref.specRef)
-    if (!wanted) return 'unknown'
-    const wantedBase = baseName(ref.specRef)
-    const spec = specs.find((entry) => canonicalRef(entry.source) === wanted)
-      ?? specs.find((entry) => canonicalRef(entry.source).toLowerCase() === wanted.toLowerCase())
-      ?? (wantedBase ? specs.find((entry) => baseName(entry.source) === wantedBase) : undefined)
-      ?? (wantedBase ? specs.find((entry) => baseName(entry.source).toLowerCase() === wantedBase.toLowerCase()) : undefined)
+    const spec = pinnedSpec(ref.specRef, specs)
     return spec ? judge(spec) : 'unknown'
   }
   const states = specs.map(judge)
   if (states.includes('published')) return 'published'
   if (specs.some((spec) => spec.document === undefined)) return 'unknown'
   return states.find((state) => state === 'hidden' || state === 'excluded') ?? 'unknown'
+}
+
+/** A method of a `paths` or `webhooks` entry the site lists, with the override that applies to it. */
+interface ListedOperation {
+  verb: string
+  operation: Obj
+  override: Obj
+}
+
+const firstSet = (...values: Array<unknown>) => values.find((value) => value !== undefined && value !== null)
+
+/**
+ * The operations of the entry a reference names that the site lists: `x-excluded`
+ * ones never are, and hidden ones are filtered out of every lookup. A path
+ * names one method; a webhook name lists its methods.
+ */
+function listedOperations(ref: DocReference, spec: CheckSpec | undefined): Array<ListedOperation> {
+  const document = spec?.document
+  if (!isObj(document)) return []
+  const entries = ref.webhook ? document.webhooks : document.paths
+  const entry = isObj(entries) && Object.hasOwn(entries, ref.path) ? entries[ref.path] : undefined
+  if (!isObj(entry)) return []
+  const { chain, item } = viewEntry(document, entry)
+  const overrides = isObj(spec?.overrides) ? spec.overrides : {}
+  return METHODS.flatMap((verb) => {
+    const operation = item[verb]
+    if (!isObj(operation) || (!ref.webhook && verb !== ref.method.toLowerCase())) return []
+    const override = overrides[`${ref.webhook ? 'WEBHOOK ' : ''}${verb.toUpperCase()} ${ref.path}`]
+    return visibility(chain, operation, override) === 'visible' ? [{ verb, operation, override: isObj(override) ? override : {} }] : []
+  })
+}
+
+/**
+ * The description the site shows for the operation a page documents, which is
+ * the page's own description when it has none: the spec's override, else the
+ * operation's `description`, else its `summary`; a present but empty description
+ * wins over the summary. Mirrors the site's lookup (`getApiOperationForFrontmatter`
+ * in src/data/api-reference.ts) and `normalizeOperation` (src/lib/openapi/normalize.ts);
+ * a parity test keeps them in step. A spec prefix pins that spec; a bare reference
+ * takes the first spec, in route order, that lists the operation, and a hidden or
+ * excluded operation is not listed. A webhook lists one operation per method, sorted
+ * by group, then title; the first is the page's. Undefined when no spec lists the
+ * operation as far as this check can read, or when it has no description.
+ */
+export function operationDescription(ref: DocReference, specs: ReadonlyArray<CheckSpec>): string | undefined {
+  for (const spec of ref.specRef ? [pinnedSpec(ref.specRef, specs)] : specs) {
+    const listed = listedOperations(ref, spec)
+    if (listed.length === 0) continue
+    const rank = ({ verb, operation, override }: ListedOperation) => ({
+      group: String(override.group || spec?.webhookGroup || 'Webhooks'),
+      title: String(firstSet(override.title, operation.summary, operation.operationId) ?? `${verb.toUpperCase()} ${ref.path}`),
+    })
+    // The sort is stable: methods tied on group and title keep the entry's order, as the site's do.
+    const [first] = ref.webhook
+      ? listed.sort((a, b) => {
+        const [left, right] = [rank(a), rank(b)]
+        return left.group === right.group ? left.title.localeCompare(right.title) : left.group.localeCompare(right.group)
+      })
+      : listed
+    const description = firstSet(first.override.description, first.operation.description, first.operation.summary)
+    return typeof description === 'string' && description.trim() ? description : undefined
+  }
+  return undefined
 }
 
 function resolveLocalRef(document: unknown, ref: string): unknown {

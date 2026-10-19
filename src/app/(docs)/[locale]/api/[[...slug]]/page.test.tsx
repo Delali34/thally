@@ -69,6 +69,24 @@ describe('localized API MDX routing', () => {
     expect(JSON.stringify(await LocaleApiReferencePage({ params }))).not.toContain('OpenAPI specification:')
     fixtures.node = null
   })
+
+  it.each([
+    ['a nested page', 'platform', ['overview']],
+    ['the folder index', 'platform', []],
+    ['a slug that is also an operation', 'platform', ['default', 'analytics', 'query', 'post']],
+    ['the default locale', 'en', ['overview']],
+  ])('renders %s under a first segment that is not a secondary locale as the document route does', async (_name, locale, slug) => {
+    fixtures.renderDoc.mockClear()
+    fixtures.metadata.mockClear()
+    fixtures.node = { href: '/api/default/analytics/query/post', operation: { title: 'Query', method: 'POST', path: '/analytics/query', specId: 'default' } }
+    const params = Promise.resolve({ locale, slug })
+    await LocaleApiReferencePage({ params })
+    expect(await generateMetadata({ params })).toEqual({ title: 'Guide français' })
+
+    expect(await fixtures.renderDoc.mock.calls[0]![0].params).toEqual({ slug: [locale, 'api', ...slug] })
+    expect(await fixtures.metadata.mock.calls[0]![0].params).toEqual({ slug: [locale, 'api', ...slug] })
+    fixtures.node = null
+  })
 })
 
 

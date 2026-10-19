@@ -23,25 +23,48 @@ export interface I18nConfig {
   locales: Array<{ code: string; label: string }>
 }
 
-function collectionContainsPath(collection: SidebarCollection, pathname: string, currentPath?: string, localeRoot?: string) {
-  if (collection.href && (matchesPath(collection.href, pathname, localeRoot) || matchesPath(collection.href, currentPath ?? pathname))) {
-    return true
-  }
+/**
+ * How strongly a collection claims a path; 0 means no claim. Its most specific
+ * matching href decides: an exact match outranks any prefix match and a longer
+ * href outranks a shorter one, so a nested tab owns its pages over a parent
+ * tab's broader item. Callers break ties by keeping list order.
+ */
+function collectionClaim(collection: SidebarCollection, pathname: string, currentPath?: string, localeRoot?: string) {
+  let claim = collection.href ? hrefClaim(collection.href, pathname, currentPath, localeRoot) : 0
   // API collections own all /api/* routes — check both full pathname and locale-stripped path
   // so the API tab is recognised on /es/api/... before the locale hydration completes.
-  if (collection.api && (matchesPath('/api', pathname) || matchesPath('/api', currentPath ?? pathname))) {
-    return true
+  if (collection.api) {
+    claim = Math.max(claim, pathClaim('/api', pathname), pathClaim('/api', currentPath ?? pathname))
   }
-  return collection.sections.some((section) =>
-    // Until the locale snapshot hydrates, the root layout still has primary
-    // language hrefs. Those identify the same collection after removing locale.
-    section.items.some((item) => matchesPath(item.href, pathname, localeRoot) || matchesPath(item.href, currentPath ?? pathname)),
-  )
+  for (const section of collection.sections) {
+    for (const item of section.items) {
+      // Until the locale snapshot hydrates, the root layout still has primary
+      // language hrefs. Those identify the same collection after removing locale.
+      claim = Math.max(claim, hrefClaim(item.href, pathname, currentPath, localeRoot))
+      if (claim === Infinity) return claim
+    }
+  }
+  return claim
+}
+
+/** Index of the first strongest positive claim, or -1 when nothing claims the path. */
+function strongestClaimIndex(claims: Array<number>) {
+  const strongest = Math.max(0, ...claims)
+  return strongest > 0 ? claims.indexOf(strongest) : -1
+}
+
+function hrefClaim(href: string, pathname: string, currentPath?: string, localeRoot?: string) {
+  return Math.max(pathClaim(href, pathname, localeRoot), pathClaim(href, currentPath ?? pathname))
 }
 
 function matchesPath(targetHref: string, pathname: string, localeRoot?: string) {
+  return pathClaim(targetHref, pathname, localeRoot) > 0
+}
+
+/** 0 for no claim, Infinity for an exact match, else the href length (deeper prefix = stronger). */
+function pathClaim(targetHref: string, pathname: string, localeRoot?: string) {
   if (!targetHref || /^https?:\/\//i.test(targetHref)) {
-    return false
+    return 0
   }
   const normalizedTarget = normalizePath(targetHref)
   const normalizedPath = normalizePath(pathname)
@@ -51,8 +74,10 @@ function matchesPath(targetHref: string, pathname: string, localeRoot?: string) 
     return normalizedPath === normalizedTarget
       || (normalizedTarget === '/' && normalizedPath === '/introduction')
       || (normalizedTarget === localeRoot && normalizedPath === `${localeRoot}/introduction`)
+      ? Infinity : 0
   }
-  return normalizedPath === normalizedTarget || normalizedPath.startsWith(`${normalizedTarget}/`)
+  if (normalizedPath === normalizedTarget) return Infinity
+  return normalizedPath.startsWith(`${normalizedTarget}/`) ? normalizedTarget.length : 0
 }
 
 function normalizePath(value: string) {
@@ -143,8 +168,12 @@ export function SiteShell({
     [initialCollections, isSecondaryLocale, routeLocale],
   )
   const collections = hydratedCollections ?? localizedInitialCollections
-  const routeOwningVersions = navigationVersions.filter((version) => collections.some((collection) =>
-    collection.version === version.label && collectionContainsPath(collection, pathname, currentPath, localeRoot)))
+  // Versions whose collections claim the route most specifically; a tie means no single owner.
+  const versionClaims = navigationVersions.map((version) => Math.max(0, ...collections.map((collection) =>
+    collection.version === version.label ? collectionClaim(collection, pathname, currentPath, localeRoot) : 0)))
+  const strongestVersionClaim = Math.max(0, ...versionClaims)
+  const routeOwningVersions = navigationVersions.filter((_, index) =>
+    strongestVersionClaim > 0 && versionClaims[index] === strongestVersionClaim)
   const activeVersion = navigationVersions.find((version) => version.prefix
     && (currentPath === `/${version.prefix}` || currentPath.startsWith(`/${version.prefix}/`)))
     // A source can serve versioned pages outside its version prefix (for
@@ -157,29 +186,32 @@ export function SiteShell({
     ? collections.filter((collection) => !collection.version || collection.version === activeVersion.label)
     : collections
   const navigableCollections = visibleCollections.filter((collection) => collection.sections.length > 0)
+  const claims = navigableCollections.map((collection) => collectionClaim(collection, pathname, currentPath, localeRoot))
+  const matchedIndex = strongestClaimIndex(claims)
   const matchedCollection =
-    navigableCollections.find((collection) => collectionContainsPath(collection, pathname, currentPath, localeRoot)) ??
+    navigableCollections[matchedIndex] ??
     navigableCollections[0] ??
     visibleCollections[0]
   // Manual override: set when the user clicks a tab and ignored once navigation
-  // leaves that collection. Deriving validity here avoids an effect-driven state reset.
+  // leaves that collection or a more specific one claims the page (a tie keeps
+  // the pick). Deriving validity here avoids an effect-driven state reset.
   const [selectedCollectionId, setSelectedCollectionId] = useState<SidebarCollection['id'] | null>(null)
-  const selectedCollection = navigableCollections.find((collection) => collection.id === selectedCollectionId)
+  const selectedIndex = navigableCollections.findIndex((collection) => collection.id === selectedCollectionId)
   const activeCollection = (
-    selectedCollection && collectionContainsPath(selectedCollection, pathname, currentPath, localeRoot)
-      ? selectedCollection
+    matchedIndex >= 0 && selectedIndex >= 0 && claims[selectedIndex] === claims[matchedIndex]
+      ? navigableCollections[selectedIndex]
       : matchedCollection) ?? { id: 'navigation-empty', label: identity.name, sections: [] }
 
-  // The tab to highlight. A standalone href tab (e.g. Changelog) that owns no
-  // sidebar sections still wins the highlight when its href matches the current
-  // path — otherwise the section-derived collection (Overview/API/…) does.
-  const activeTabId =
-    visibleCollections.find(
-      (collection) =>
-        collection.href &&
-        !/^https?:\/\//.test(collection.href) &&
-        (matchesPath(collection.href, pathname, localeRoot) || matchesPath(collection.href, currentPath)),
-    )?.id ?? activeCollection.id
+  // The header follows the sidebar's exact page ownership, including a manual
+  // selection tied for that page. A standalone link (e.g. Changelog) can still
+  // own the highlight, but a broad prefix must never displace an exact page.
+  const standaloneClaims = visibleCollections.map((collection) =>
+    collection.sections.length === 0 && collection.href ? hrefClaim(collection.href, pathname, currentPath, localeRoot) : 0)
+  const standaloneIndex = strongestClaimIndex(standaloneClaims)
+  const activeTabId = standaloneIndex >= 0
+    && standaloneClaims[standaloneIndex] >= collectionClaim(activeCollection, pathname, currentPath, localeRoot)
+    ? visibleCollections[standaloneIndex].id
+    : activeCollection.id
   const relocatedGithubHref = navbarConfig?.links?.find((link) => link.type === 'github')?.href
 
   // `clip` contains horizontal spill without creating a scroll container,

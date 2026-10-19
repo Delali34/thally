@@ -44,10 +44,44 @@ describe('previous/next navigation', () => {
     getSidebarCollections()[0].sections[1].items[0].title = 'Later a'
     expect(getPrevNextLinks('/a')).toEqual({ prev: null, next: { title: 'b', href: '/b' } })
     expect(getPrevNextLinks('/b')).toEqual({ prev: { title: 'a', href: '/a' }, next: { title: 'c', href: '/c' } })
-    expect(getPrevNextLinks('/c')).toEqual({ prev: { title: 'b', href: '/b' }, next: { title: 'd', href: '/d' } })
-    expect(getPrevNextLinks('/d')).toEqual({ prev: { title: 'c', href: '/c' }, next: null })
+    // Neighbours come only from the tab that first lists the page: First ends
+    // at /c, and /d paginates within Second (b, d, a), not across the tab edge.
+    expect(getPrevNextLinks('/c')).toEqual({ prev: { title: 'b', href: '/b' }, next: null })
+    expect(getPrevNextLinks('/d')).toEqual({ prev: { title: 'b', href: '/b' }, next: { title: 'a', href: '/a' } })
     expect(getPrevNextLinks('/b/')).toEqual({ prev: null, next: null })
     expect(getPrevNextLinks('/missing')).toEqual({ prev: null, next: null })
+  })
+
+  it('keeps pagination inside the current tab at its first and last pages', async () => {
+    state.config = { tabs: [
+      { tab: 'Guides', pages: ['g1', 'g2', 'g3'] },
+      { tab: 'CLI', pages: ['c1', 'c2', 'c3'] },
+    ] }
+    state.sources = Object.fromEntries(['g1', 'g2', 'g3', 'c1', 'c2', 'c3'].map(id => page(id)))
+    const { getPrevNextLinks } = await import('./docs')
+    const link = (id: string) => ({ title: id, href: `/${id}` })
+    // First and last pages of a tab get no neighbour from the tabs around it.
+    expect(getPrevNextLinks('/g1')).toEqual({ prev: null, next: link('g2') })
+    expect(getPrevNextLinks('/g3')).toEqual({ prev: link('g2'), next: null })
+    expect(getPrevNextLinks('/c1')).toEqual({ prev: null, next: link('c2') })
+    expect(getPrevNextLinks('/c3')).toEqual({ prev: link('c2'), next: null })
+    // Middle pages are unchanged.
+    expect(getPrevNextLinks('/g2')).toEqual({ prev: link('g1'), next: link('g3') })
+    expect(getPrevNextLinks('/c2')).toEqual({ prev: link('c1'), next: link('c3') })
+  })
+
+  it('paginates a page listed in two tabs within the first tab that lists it', async () => {
+    state.config = { tabs: [
+      { tab: 'First', pages: ['a', 'shared', 'b'] },
+      { tab: 'Second', pages: ['c', 'shared', 'd'] },
+    ] }
+    state.sources = Object.fromEntries(['a', 'b', 'c', 'd', 'shared'].map(id => page(id)))
+    const { getPrevNextLinks } = await import('./docs')
+    const link = (id: string) => ({ title: id, href: `/${id}` })
+    expect(getPrevNextLinks('/shared')).toEqual({ prev: link('a'), next: link('b') })
+    // The second tab's other pages still see /shared as their neighbour.
+    expect(getPrevNextLinks('/c')).toEqual({ prev: null, next: link('shared') })
+    expect(getPrevNextLinks('/d')).toEqual({ prev: link('shared'), next: null })
   })
 
   it('retains served-root redirects and exact href matching', async () => {

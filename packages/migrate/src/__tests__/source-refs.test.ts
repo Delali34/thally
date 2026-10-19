@@ -196,6 +196,24 @@ describe('migrateRepository with sourceRefs', () => {
     expect(bundle.warnings.some((warning) => /branding, colors and redirects were ignored/.test(warning.message))).toBe(true)
   })
 
+  it('redirects a mounted page whose frontmatter url is another address, from its mounted path', () => {
+    const imported = importSourceRef(MAPPING, sdkRepo({
+      'docs/docs.json': JSON.stringify({ navigation: { pages: ['overview', 'github', { group: 'Community', pages: ['community/index', 'community/roadmap'] }] } }),
+      'docs/github.mdx': '---\ntitle: GitHub\nurl: "https://github.com/Acme/ts-sdk"\n---\nOn GitHub.',
+      'docs/community/index.mdx': '---\ntitle: Community\nurl: https://community.example.com\n---\nJoin us.',
+      'docs/community/roadmap.mdx': '---\ntitle: Roadmap\nurl: "javascript:alert(1)"\n---\nNext.',
+    }))
+    const bundle = migrateRepository({ repositoryDir: mainRepo(), sourceUrl: 'https://github.com/example/docs', platform: 'mintlify', sourceRefs: [imported] })
+    expect(bundle.docsConfig.redirects).toEqual(expect.arrayContaining([
+      { source: '/client-sdks/typescript/github', destination: 'https://github.com/Acme/ts-sdk', permanent: false },
+      { source: '/client-sdks/typescript/community', destination: 'https://community.example.com', permanent: false },
+    ]))
+    // The page keeps its sidebar entry, stays out of the sitemap, and a url that is not a web address is no link.
+    expect(bundle.pages.find((page) => page.id === 'client-sdks/typescript/github')).toMatchObject({ noindex: true })
+    expect(bundle.docsConfig.redirects?.map((redirect) => redirect.source)).not.toContain('/client-sdks/typescript/community/roadmap')
+    expect(bundle.docsConfig.redirects?.filter((redirect) => redirect.source === '/client-sdks/typescript/github')).toHaveLength(1)
+  })
+
   it('redirects the mount root to the first page of the sub-site navigation', () => {
     const imported = importSourceRef(MAPPING, sdkRepo())
     const bundle = migrateRepository({ repositoryDir: mainRepo(), sourceUrl: 'https://github.com/example/docs', platform: 'mintlify', sourceRefs: [imported] })

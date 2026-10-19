@@ -70,7 +70,7 @@ function mintlify(config: Record<string, unknown>, pages: Record<string, string>
 }
 
 describe('Mintlify redirects that would loop or hide a page', () => {
-  it('serves the root page at /introduction when the source redirected /introduction back to /', () => {
+  it('keeps the root page at / when the source redirected /introduction back to /', () => {
     const bundle = mintlify({
       redirects: [{ source: '/introduction', destination: '/' }, { source: '/old', destination: '/guide' }],
       navigation: { groups: [{ group: 'Start', pages: ['index', 'guide'] }] },
@@ -80,11 +80,26 @@ describe('Mintlify redirects that would loop or hide a page', () => {
     })
     const redirects = bundle.docsConfig.redirects ?? []
     expect(bundle.pages.map((page) => page.id)).toContain('introduction')
-    expect(redirects).toContainEqual({ source: '/', destination: '/introduction', permanent: true })
+    // Mintlify served the root index at `/`: the root stays the page and `/introduction` stays an alias of it.
+    expect(redirects).toContainEqual({ source: '/introduction', destination: '/' })
+    expect(redirects.some((redirect) => redirect.source === '/')).toBe(false)
     expect(redirects).toContainEqual({ source: '/old', destination: '/guide' })
+    expect(redirectCycle(redirects)).toBeNull()
+    expect(messages(bundle)).not.toContain('/introduction')
+  })
+
+  it('still drops /introduction -> / when / itself redirects to another page', () => {
+    const bundle = mintlify({
+      redirects: [{ source: '/', destination: '/guide' }, { source: '/introduction', destination: '/' }],
+      navigation: { groups: [{ group: 'Start', pages: ['index', 'guide'] }] },
+    }, {
+      index: '---\ntitle: Home\n---\n\nWelcome.',
+      guide: '---\ntitle: Guide\n---\n\nBody.',
+    })
+    const redirects = bundle.docsConfig.redirects ?? []
+    expect(redirects).toContainEqual({ source: '/', destination: '/guide' })
     expect(redirects.some((redirect) => redirect.source === '/introduction')).toBe(false)
     expect(redirectCycle(redirects)).toBeNull()
-    expect(messages(bundle)).toContain('/introduction')
   })
 
   it('drops a redirect from a differently cased address to a page, and says it can come back on a case-sensitive host', () => {

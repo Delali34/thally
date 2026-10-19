@@ -1,5 +1,6 @@
+import { Window } from 'happy-dom'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { describe, expect, it } from 'vitest'
+import { afterAll, describe, expect, it } from 'vitest'
 import { OperationPanel } from '@/components/api/operation-panel'
 import { operationFrom } from '@/components/api/test-fixtures'
 
@@ -152,6 +153,77 @@ describe('OperationPanel field descriptions', () => {
     expect(html).toContain('href="https://example.com/p"')
     expect(html).not.toContain('<script>')
     expect(html).not.toContain('`basic`')
+  })
+})
+
+const inertWindow = new Window({ settings: {
+  enableJavaScriptEvaluation: false, disableJavaScriptFileLoading: true,
+  disableCSSFileLoading: true, enableImageFileLoading: false,
+} })
+afterAll(() => inertWindow.happyDOM.close())
+
+describe('OperationPanel Markdown descriptions keep their prose styles', () => {
+  const fence = '```ts\nimport { configure } from "@acme/sdk";\n\nconfigure({ token: "t" });\n```'
+  const markdown = `First paragraph with \`code\` and a [link](https://example.com).\n\nSecond paragraph.\n\n${fence}`
+  const spec = {
+    openapi: '3.1.0',
+    info: { title: 'T', version: '1' },
+    paths: {
+      '/runs': {
+        get: {
+          summary: 'List runs',
+          security: [{ secretKey: [] }],
+          parameters: [{ in: 'query', name: 'page[after]', schema: { type: 'string' }, description: markdown }],
+          responses: {
+            '200': {
+              description: 'ok',
+              content: { 'application/json': { schema: { type: 'object', properties: { data: { type: 'object', description: markdown, properties: { id: { type: 'string', description: markdown } } } } } } },
+            },
+          },
+        },
+      },
+    },
+    components: { securitySchemes: { secretKey: { type: 'http', scheme: 'bearer', description: markdown } } },
+  }
+  const html = renderToStaticMarkup(<OperationPanel operation={operationFrom(spec)} />)
+  const document = new inertWindow.DOMParser().parseFromString(html, 'text/html')
+
+  it('renders paragraphs, inline code, links and fenced code for the auth scheme, parameters and nested fields', () => {
+    const rows = [...document.querySelectorAll('section.border-b')]
+    // Authorization, page[after], then the data and nested id response fields.
+    expect(rows.map((row) => row.querySelector('code')?.textContent)).toEqual(['Authorization', 'page[after]', 'data', 'id'])
+    for (const row of rows) {
+      const description = row.querySelector(':scope > div.prose')
+      expect(description?.querySelectorAll('p').length, row.textContent ?? '').toBeGreaterThanOrEqual(2)
+      expect([...description?.querySelectorAll('p > code') ?? []].map((code) => code.textContent)).toContain('code')
+      expect(description?.querySelector('a[href="https://example.com"]')).not.toBeNull()
+      expect(description?.querySelector('pre > code.language-ts')?.textContent).toContain('configure({ token: "t" });')
+    }
+  })
+
+  it('keeps every description block free of a not-prose ancestor, which would switch its typography off', () => {
+    const blocks = [...document.querySelectorAll('div.prose p, div.prose pre, div.prose p code, div.prose pre code')]
+    expect(blocks.length).toBeGreaterThan(20)
+    for (const block of blocks) {
+      if (block.closest('.not-prose')) throw new Error(`${block.tagName} sits under .not-prose: ${block.parentElement?.className}`)
+    }
+    // Only the name, type and badge row opts out of prose.
+    for (const row of document.querySelectorAll('section.border-b')) {
+      expect(row.className).not.toContain('not-prose')
+      expect(row.querySelector(':scope > div.not-prose code')).not.toBeNull()
+    }
+  })
+
+  it('applies prose typography to the request body and response descriptions too', () => {
+    const body = renderToStaticMarkup(<OperationPanel operation={operationFrom({
+      openapi: '3.1.0',
+      info: { title: 'T', version: '1' },
+      paths: { '/x': { post: { summary: 'X', requestBody: { description: markdown, content: { 'application/json': { schema: { type: 'object' } } } }, responses: { '200': { description: markdown } } } } },
+    })} />)
+    const parsed = new inertWindow.DOMParser().parseFromString(body, 'text/html')
+    const described = [...parsed.querySelectorAll('div.prose')].filter((block) => block.querySelector(':scope > p > code'))
+    expect(described).toHaveLength(2)
+    for (const block of described) expect(block.closest('.not-prose')).toBeNull()
   })
 })
 

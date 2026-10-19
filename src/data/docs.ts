@@ -40,7 +40,8 @@ export interface DocEntry {
   /** Visible H1; title remains the metadata/search title. */
   headingTitle?: string
   description: string
-  descriptionPlacement?: 'body'
+  /** `operation` keeps a generated summary in metadata and renders the bound spec's full description. */
+  descriptionPlacement?: 'body' | 'operation'
   slug: Array<string>
   href: string
   group: string
@@ -104,6 +105,8 @@ export type NavigationNode =
 
 export interface NavigationPresentation {
   display: 'tabs' | 'dropdown'
+  /** `all` keeps the heading of a group that is named after its collection; by default it is left out. */
+  groupHeadings?: 'all'
 }
 
 export interface DocsNavigationVersion {
@@ -299,7 +302,7 @@ export interface DocsJsonFeedback {
 export type StructuralTheme = 'default' | 'maple' | 'sharp' | 'minimal'
 export type ContentIconTone = 'neutral' | 'accent'
 
-interface DocsJsonConfig {
+export interface DocsJsonConfig {
   tabs: Array<DocsJsonTab>
   /** Local, customer-owned stylesheets served from public/. */
   stylesheets?: Array<string>
@@ -307,6 +310,12 @@ interface DocsJsonConfig {
   breadcrumbs?: boolean
   /** Text above each page title: its nearest group (default) or its full group path. */
   eyebrow?: 'group' | 'path'
+  /**
+   * Typographic quotes in rendered prose: straight quotes become curly ones, as in Mintlify.
+   * Defaults to false. Code, heading ids, Markdown, `llms.txt` and search text keep straight quotes.
+   * Applied by the MDX pipeline (`src/mdx/rehype.ts`), which reads it from docs.json itself.
+   */
+  smartQuotes?: boolean
   /** Manual API pages (`api:` frontmatter): default server(s) and auth for the playground. */
   api?: {
     mdx?: {
@@ -320,6 +329,8 @@ interface DocsJsonConfig {
   }
   navigation?: {
     display?: 'tabs' | 'dropdown'
+    /** `all` keeps the heading of a sidebar group named after its collection; `distinct` (default) leaves it out. */
+    groupHeadings?: 'distinct' | 'all'
     versions?: Array<DocsNavigationVersion>
     shortcuts?: Array<DocsNavigationShortcut>
   }
@@ -458,7 +469,7 @@ interface FrontmatterData {
   icon?: string
   iconType?: IconStyle
   description?: string
-  descriptionPlacement?: 'body'
+  descriptionPlacement?: DocEntry['descriptionPlacement']
   badge?: string
   keywords?: Array<string>
   timeEstimate?: string
@@ -646,7 +657,7 @@ function buildDocEntryFromPageId(pageId: string, indexedFrontmatter?: Frontmatte
     title,
     headingTitle: typeof fm.headingTitle === 'string' && fm.headingTitle.trim() ? fm.headingTitle.trim() : undefined,
     description: fm.description ?? '',
-    descriptionPlacement: fm.descriptionPlacement === 'body' ? 'body' : undefined,
+    descriptionPlacement: fm.descriptionPlacement === 'body' || fm.descriptionPlacement === 'operation' ? fm.descriptionPlacement : undefined,
     slug,
     href,
     group: '',
@@ -1246,33 +1257,38 @@ function navigationLocaleForHref(href: string): string | undefined {
     : undefined
 }
 
-/** Adjacent readable pages in first-seen navigation order, deduplicated by exact href. */
+/**
+ * Adjacent readable pages in first-seen navigation order, deduplicated by exact
+ * href. Pagination stays inside the page's own tab: the first collection that
+ * lists the exact href (the rule `getNavContext` uses), so a tab's first and
+ * last pages never borrow neighbours from the tabs around it.
+ */
 export function getPrevNextLinks(currentHref: string, reader: ReaderContext = ANONYMOUS_READER): {
   prev: PrevNextLink | null
   next: PrevNextLink | null
 } {
-  const collections = getSidebarCollections(navigationLocaleForHref(currentHref), reader)
+  const collection = getSidebarCollections(navigationLocaleForHref(currentHref), reader).find((candidate) =>
+    candidate.sections.some((section) => section.items.some((item) => item.href === currentHref)))
+  if (!collection) {
+    return { prev: null, next: null }
+  }
+
   const flatPages: Array<{ title: string; href: string }> = []
   // Pages may occur in several groups. Exact href membership preserves the
   // first title/order without rescanning every earlier page on large sites.
   const seenHrefs = new Set<string>()
 
-  for (const collection of collections) {
-    for (const section of collection.sections) {
-      for (const item of section.items) {
-        const href = item.href
-        if (!seenHrefs.has(href)) {
-          seenHrefs.add(href)
-          flatPages.push({ title: item.title, href })
-        }
+  for (const section of collection.sections) {
+    for (const item of section.items) {
+      const href = item.href
+      if (!seenHrefs.has(href)) {
+        seenHrefs.add(href)
+        flatPages.push({ title: item.title, href })
       }
     }
   }
 
   const index = flatPages.findIndex((p) => p.href === currentHref)
-  if (index === -1) {
-    return { prev: null, next: null }
-  }
 
   return {
     prev: index > 0 ? flatPages[index - 1] : null,
@@ -1519,8 +1535,10 @@ export function getNavbarConfig(): DocsJsonNavbar | null {
 
 /** Resolve how sibling navigation collections are exposed in the docs chrome. */
 export function getNavigationPresentation(): NavigationPresentation {
+  const navigation = docsConfig().navigation
   return {
-    display: docsConfig().navigation?.display === 'dropdown' ? 'dropdown' : 'tabs',
+    display: navigation?.display === 'dropdown' ? 'dropdown' : 'tabs',
+    ...(navigation?.groupHeadings === 'all' ? { groupHeadings: 'all' as const } : {}),
   }
 }
 

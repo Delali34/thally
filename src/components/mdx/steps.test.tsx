@@ -55,4 +55,17 @@ describe('Step title element', () => {
     expect(html).toMatch(/<p [^>]*>One<\/p>/)
     expect(html).not.toMatch(/data-heading|\bid="one"/)
   })
+
+  it('renders a code span in the title as code, in plain-text and heading titles alike', () => {
+    expect(renderToStaticMarkup(<Steps titleSize="p"><Step title="Run the CLI `init` command" /></Steps>))
+      .toMatch(/<p [^>]*>Run the CLI <code>init<\/code> command<\/p>/)
+    expect(renderToStaticMarkup(<Steps><Step title="Create an `actions.ts` file" /></Steps>))
+      .toMatch(/<h3 [^>]*>Create an <code>actions\.ts<\/code> file<\/h3>/)
+  })
+
+  it('labels a registered heading with the title text, without the backticks', () => {
+    const html = renderToStaticMarkup(<Steps titleSize="h3"><Step title="Run the CLI `init` command" id="run-the-cli-init-command" /></Steps>)
+    expect(html).toContain('data-heading="Run the CLI init command"')
+    expect(html).toMatch(/<h3 [^>]*\bid="run-the-cli-init-command"/)
+  })
 })

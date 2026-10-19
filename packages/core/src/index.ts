@@ -40,6 +40,7 @@ export {
   registerAsyncContentDocumentSource,
   registerContentDocumentSource,
   mdxToMarkdown,
+  markdownToPlainText,
 } from './content/index.js'
 export type { ContentAudience } from './content/index.js'
 export type {

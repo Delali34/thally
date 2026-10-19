@@ -11,6 +11,7 @@ import { descendNavigationAccess, hasNavigationRules, isNavigationRestricted, na
 import type { NavigationAccess } from './mintlify-extras.js'
 import { mintlifyLocalizedReference, pageIdFromReference, resolveWithin, trimEdgeSlashes } from './path.js'
 import type {
+  EndpointTabSlot,
   MigrationApiGroup,
   MigrationDocsConfig,
   MigrationNavigationGroup,
@@ -48,6 +49,11 @@ export interface MintlifyNavigationResult {
   referenceAccess: Array<MintlifyReferenceAccess>
   /** `sourceRef` mounts under a restricted container; never resolved, so nothing of theirs is imported. */
   gatedSourceRefs: Array<string>
+  /**
+   * The API tabs that list operations and nothing else, which `docsConfig.tabs` leaves out: each with the navigation container that
+   * owns it and the place it held among the tabs. Only produced with `operationGroups`; the spec binding puts such a tab back as a page tab.
+   */
+  apiTabSlots: Array<{ container: object; slot: EndpointTabSlot }>
   warnings: Array<MigrationWarning>
 }
 
@@ -174,15 +180,24 @@ export function addMintlifyHomepageRedirects(
   // renderer's root alias for it is not served and links, canonicals and the sitemap agree on one URL.
   if (!homepage) return config
   const redirects = [...(config.redirects ?? [])]
-  const sources = new Set(redirects.map((redirect) => (redirect.source.replace(/\/$/, '') || '/').toLowerCase()))
+  const routeKey = (route: string) => (route.split(/[?#]/, 1)[0].replace(/\/$/, '') || '/').toLowerCase()
+  const sources = new Set(redirects.map((redirect) => routeKey(redirect.source)))
   const roots = ['', ...(config.i18n?.locales ?? [])
     .filter((locale) => locale.code !== config.i18n?.defaultLocale)
     .filter((locale) => homepage !== 'introduction' || pages.some((page) => page.locale === locale.code && page.navigationId === homepage))
     .map((locale) => locale.code)]
+  // A home document with its own `url` takes over the root (the link step redirects `/` to that address),
+  // so a root redirect to the first page would hide the link.
+  const homeLinksElsewhere = pages.some((page) => page.id === 'introduction' && page.externalUrl)
   for (const locale of roots) {
+    if (!locale && homeLinksElsewhere) continue
     const source = locale ? `/${locale}` : '/'
     if (sources.has(source.toLowerCase())) continue
-    redirects.push({ source, destination: `${locale ? `/${locale}` : ''}/${homepage}`, permanent: true })
+    const destination = `${locale ? `/${locale}` : ''}/${homepage}`
+    // An authored redirect from the homepage back to its root says Mintlify
+    // served the homepage at the root (a root `index.mdx`), so the root keeps it.
+    if (redirects.some((redirect) => routeKey(redirect.source) === destination.toLowerCase() && routeKey(redirect.destination) === source.toLowerCase())) continue
+    redirects.push({ source, destination, permanent: true })
   }
   return { ...config, redirects }
 }
@@ -506,7 +521,11 @@ const hasNavigationChildren = (node: Record<string, unknown>): boolean =>
  * sibling tab `<Tab>: <Item>` bound to its own spec, or binds to the tab
  * itself when it is the tab's only content.
  */
-export function mintlifyNavigationApiReferences(config: Record<string, unknown>): Array<MintlifyApiSpecReference> {
+export function mintlifyNavigationApiReferences(
+  config: Record<string, unknown>,
+  /** The label the projection gave the tab of a container (`apiTabSlots`), which a container's own label does not tell when its parent prefixes it. */
+  tabFor?: (container: object) => string | undefined,
+): Array<MintlifyApiSpecReference> {
   const navigation = objectValue(config.navigation) ?? config
   const references: Array<MintlifyApiSpecReference> = []
   // The language the projection treats as the default, found by the same rule.
@@ -538,7 +557,7 @@ export function mintlifyNavigationApiReferences(config: Record<string, unknown>)
           && groupOperationKeys(operationGroups(node, SWEEP_DEPTH_LIMIT)).length === listed.length
         const operationsWithheld = !otherLanguage && (hidden || (groups.length === 0 && listed.length > 0 && !tooDeepOnly))
         references.push({
-          value, kind, tabLabel, ...sibling,
+          value, kind, tabLabel: tabFor?.(node) ?? tabLabel, ...sibling,
           ...(typeof directory === 'string' && directory.trim() ? { directory: directory.trim() } : {}),
           ...(operations.length > 0 ? { operations } : {}),
           ...(groups.length > 0 ? { groups } : {}),
@@ -1034,6 +1053,27 @@ function convertNavigationValues(
   })
 }
 
+/** Marks a tab that stands for an API container listing operations. It survives the object spreads that rename and annotate tabs, and is never serialized. */
+const API_TAB_CONTAINER = Symbol('apiTabContainer')
+type ApiTabPlaceholder = MigrationNavigationTab & { [API_TAB_CONTAINER]?: object }
+
+/** Take the API-tab placeholders out of `tabs`, recording the container each stands for and where it was. */
+function takeApiTabSlots(tabs: Array<MigrationNavigationTab>): { tabs: Array<MigrationNavigationTab>; slots: MintlifyNavigationResult['apiTabSlots'] } {
+  const slots: MintlifyNavigationResult['apiTabSlots'] = []
+  const real: Array<MigrationNavigationTab> = []
+  tabs.forEach((tab, index) => {
+    const container = (tab as ApiTabPlaceholder)[API_TAB_CONTAINER]
+    if (!container) {
+      real.push(tab)
+      return
+    }
+    // The template keeps the tab's presentation and none of its (empty) content, and none of the marker.
+    const template = Object.fromEntries(Object.entries(tab).filter(([key]) => key !== 'groups')) as unknown as MigrationNavigationTab
+    slots.push({ container, slot: { tab: template, preceding: tabs.slice(0, index).map((earlier) => earlier.tab).reverse() } })
+  })
+  return { tabs: real, slots }
+}
+
 interface NavigationProjectionTrace {
   rootContainerKind?: 'tabs' | 'anchors' | 'products' | 'dropdowns' | 'versions' | 'menus'
 }
@@ -1120,6 +1160,21 @@ function convertContainerToTabs(
     ...convertNavigationValues(values, context),
     ...(Array.isArray(container.menu) ? convertMenuItems(container.menu, context) : []),
   ]
+  if (children.length === 0 && depth > 0 && context.operationGroups && !context.otherLanguage && !context.operations.gated && !context.operations.hidden
+    && specSource(rawContainer.openapi) && operationGroups(rawContainer).length > 0) {
+    // A tab that lists operations and nothing else has no page of its own to project, but it keeps its place and its label among its siblings
+    // (a product's tabs are prefixed with it, as theirs are): the spec binding puts it back as a tab whose pages are the operations.
+    // It stays in the tabs only until `projectMintlifyNavigation` takes it out, so nothing else ever sees a tab without content.
+    const placeholder: ApiTabPlaceholder = {
+      tab: fallbackTab,
+      groups: [],
+      ...containerPresentation(container),
+      ...(projectedHref(container.href) ? { href: projectedHref(container.href) } : {}),
+      ...(container.hidden === true ? { hidden: true } : {}),
+      [API_TAB_CONTAINER]: rawContainer,
+    }
+    return [placeholder]
+  }
   return children.length > 0
     ? [{
         tab: fallbackTab,
@@ -1363,6 +1418,8 @@ function projectedCompatibleConfig(config: Record<string, unknown>, warnings: Ar
   return {
     // Mintlify pages show a group eyebrow above the title and no breadcrumb trail.
     breadcrumbs: false,
+    // Mintlify typesets straight quotes in prose as curly ones.
+    smartQuotes: true,
     // `styling.eyebrows: "breadcrumbs"` shows the whole group path; "section" (the default) shows the nearest group.
     ...(objectValue(config.styling)?.eyebrows === 'breadcrumbs' ? { eyebrow: 'path' as const } : {}),
     ...(projectedTheme(config.theme) ? { theme: projectedTheme(config.theme) } : {}),
@@ -1706,6 +1763,10 @@ export function projectMintlifyNavigation(
     }
   }
 
+  // An API tab that lists only operations is not a tab of the projection until its spec is bound: the binding puts it back in its place.
+  const taken = takeApiTabSlots(tabs)
+  tabs = taken.tabs
+  const apiTabSlots = taken.slots
   if (tabs.length === 0) {
     warnings.push({
       code: 'unsupported-config',
@@ -1764,6 +1825,7 @@ export function projectMintlifyNavigation(
   }) : []
   if (versions.length > 1) {
     tabs = annotateVersions(tabs)
+    for (const entry of apiTabSlots) [entry.slot.tab] = annotateVersions([entry.slot.tab])
     for (const [locale, items] of Object.entries(localizedNavigation)) localizedNavigation[locale] = annotateVersions(items)
   }
   const redirects = Array.isArray(config.redirects)
@@ -1789,12 +1851,16 @@ export function projectMintlifyNavigation(
       })
     : []
   collectReferenceAccess(navigation, OPEN_NAVIGATION_ACCESS, options.pathPrefix, appearances)
+  // Mintlify titles every sidebar group, including one named after its tab or dropdown; Thally leaves that heading out unless asked.
+  const keepsCollectionNamedGroup = [tabs, ...Object.values(localizedNavigation)]
+    .some((items) => items.some((item) => item.groups?.some((group) => group.group === (item.displayLabel ?? item.tab))))
   return {
     docsConfig: {
       tabs,
-      ...(projectionTrace.rootContainerKind === 'dropdowns' || versions.length > 1 || shortcuts.length > 0
+      ...(projectionTrace.rootContainerKind === 'dropdowns' || versions.length > 1 || shortcuts.length > 0 || keepsCollectionNamedGroup
         ? { navigation: {
           ...(projectionTrace.rootContainerKind === 'dropdowns' ? { display: 'dropdown' as const } : {}),
+          ...(keepsCollectionNamedGroup ? { groupHeadings: 'all' as const } : {}),
           ...(versions.length > 1 ? { versions } : {}),
           ...(shortcuts.length > 0 ? { shortcuts } : {}),
         } }
@@ -1807,6 +1873,7 @@ export function projectMintlifyNavigation(
     pageReferences: references,
     referenceAccess: appearances,
     gatedSourceRefs,
+    apiTabSlots,
     warnings,
   }
 }

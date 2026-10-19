@@ -84,7 +84,7 @@ export function Sidebar({
               ))}
             </div>
           ) : null}
-          <NavigationSections sections={sections} title={title} pathname={pathname} showGroupIcons={showGroupIcons} />
+          <NavigationSections sections={sections} title={title} keepCollectionNamedGroups={navigationPresentation.groupHeadings === 'all'} pathname={pathname} showGroupIcons={showGroupIcons} />
         </nav>
       </div>
     </aside>

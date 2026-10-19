@@ -18,6 +18,9 @@ import { cn } from '@/lib/utils'
 import Markdown from '@/components/mdx/markdown'
 import { Prose } from '@/components/mdx/prose'
 
+/** Prose typography for descriptions rendered outside a field row; the `prose` block trims its own outer margins. */
+const markdownProse = 'prose prose-sm max-w-none dark:prose-invert'
+
 interface OperationPanelProps {
   operation: NormalizedOperation
   /** The page's own MDX body, shown between the header and the schema. */
@@ -148,7 +151,7 @@ export function OperationPanel({ operation, children, showDescription = true, sh
           <section className="space-y-4">
             <div className="space-y-1">
               <h2 className="text-lg font-semibold text-foreground">{t('requestBody')}</h2>
-              {operation.requestBody.description ? <Markdown className="text-sm text-foreground/70">{operation.requestBody.description}</Markdown> : null}
+              {operation.requestBody.description ? <Markdown className={cn(markdownProse, 'text-sm text-foreground/70')}>{operation.requestBody.description}</Markdown> : null}
             </div>
             {operation.requestBody.contents.map((content) => (
               <div key={content.mediaType}>
@@ -301,7 +304,7 @@ function ResponseTabs({ responses }: { responses: Array<NormalizedResponse> }) {
       {active ? (
         <div className="px-4 py-3">
           {active.description ? (
-            <Markdown className="mb-3 text-sm text-foreground/60">{active.description}</Markdown>
+            <Markdown className={cn(markdownProse, 'mb-3 text-sm text-foreground/60')}>{active.description}</Markdown>
           ) : null}
           {active.contents.length ? (
             active.contents.map((content) => (
@@ -421,7 +424,7 @@ function SchemaVariants({ variants, depth }: { variants: Array<SchemaVariant>; d
           ))}
         </div>
       ) : null}
-      {description ? <Markdown className="mb-2 text-sm text-foreground/70">{description}</Markdown> : null}
+      {description ? <Markdown className={cn(markdownProse, 'mb-2 text-sm text-foreground/70')}>{description}</Markdown> : null}
       {hasFields ? (
         <SchemaAsResponseFields schema={current.schema} depth={depth} />
       ) : (

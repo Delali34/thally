@@ -148,7 +148,8 @@ renderer, so it always produces a clear warning naming the spec instead of
 disappearing.
 
 `METHOD /path` entries (`"POST /v2/keys.createKey"`) under a container that
-binds an `openapi` spec become `api.groups` on the tab that spec binds to:
+binds an `openapi` spec become pages of the site (see the next paragraph) or,
+where that is not possible, `api.groups` on the tab that spec binds to:
 nested groups, icons and authored order are kept, and page entries stay in the
 tab's own groups (a group that mixes pages and operations is split, so the
 sidebar lists the API groups after the page groups). Operations written
@@ -178,8 +179,55 @@ site imported by URL, cannot be placed: one warning says they were not added to 
 operations still have their pages. This is separate from a `directory`'s flat
 operation list, which still only drives the endpoint redirects.
 
+Mintlify serves one generated page per operation a navigation container lists,
+at `/<directory>/<first tag>/<summary>` (`directory` is the reference's
+`{ source, directory }` folder, `api-reference` when it is a plain string).
+Each such operation becomes an MDX page at that path under `src/content`, so it
+keeps its URL, sidebar entry, eyebrow and previous/next links. Its frontmatter is
+the summary as `title` (else the operation id, else `METHOD /path`), the first
+sentence of the description as `description` (the title when there is none), and
+`openapi: "<spec file> METHOD /path"`; the body is empty. `descriptionPlacement: operation`
+keeps that short summary for search and metadata while the runtime renders the
+full operation description as Markdown, including every paragraph and warning.
+The tab that listed the
+operations is an ordinary page tab, kept where it was among its siblings and
+labelled as they are (`Product: API reference`), whose groups are the authored
+ones, nesting and order kept, each operation replaced by its page. Tabs that were
+separate in the source are never merged, even when they share a spec. The spec
+is bound once per spec file in a hidden tab (`OpenAPI: <spec>`, the same as for a
+spec only a page names), which is what the pages' `openapi:` frontmatter resolves
+against; the renderer serves no `/api/` page, sitemap entry or search record for it. A remote spec's pages
+and tab are made by `hydrateRemoteApiSpecs` once it is downloaded; a download
+that fails leaves no tab and no page, as before. An operation the spec withholds
+(`x-hidden`, `x-excluded`) gets no page, nor does one listed only under a
+`hidden` group or an access-restricted container (such groups are left out of
+the tab, as above). Of two operations with the same tag and
+summary the first listed keeps the URL and one warning names the others; an
+authored page at that URL keeps it. Nothing is redirected from these URLs and a
+link to one stays as written; a link to a tag folder or to an address under the
+directory that matches no page goes to a page, and a folder of pages with no page
+of its own opens on its first page, as in any other navigation. The operations
+fall back to `api.groups` on an API tab, as described above, when the containers
+that share a tab disagree on the directory, the directory cannot be a folder name,
+the spec has none of the listed operations, or the tab is bound to another spec.
+A reference that lists no operation (Mintlify generated every endpoint) is not
+affected. Operations whose path item is a local `$ref` are read as the renderer
+reads them (hidden or excluded on any level of the reference withholds them).
+The renderer tries the first visible API tab's spec first for a bare
+`openapi: "METHOD /path"` page; when converting a tab to pages stops its spec being
+that one, each bare reference to an operation the converted spec defines is
+written with that spec's path in front, so it still renders the same operation.
+
 Mintlify `styling.eyebrows: "breadcrumbs"` becomes `eyebrow: "path"` (the full
 group path above the page title); `"section"` or no setting writes nothing.
+Mintlify sources also get `smartQuotes: true`, because Mintlify renders straight
+quotes in prose as curly ones; the setting leaves code, heading ids, Markdown and
+`llms.txt` as written.
+
+Thally leaves out the sidebar heading of a group named after its tab or dropdown, because
+the collection already names it. Mintlify keeps that heading, so a source with such a group
+(an `API reference` dropdown whose first group is also `API reference`) gets
+`navigation.groupHeadings: "all"`. A source without one gets nothing.
 
 Page `openapi:` frontmatter with a spec prefix
 (`openapi: "specs/openapi-b.yaml GET /widgets/{id}"`) is rewritten to where the
@@ -199,7 +247,8 @@ no operation points to that section's overview page instead, and one warning
 lists the affected links (up to ten). A link to an address the site answers
 itself (a guide authored inside an API directory, trailing slash or `/index` or
 not, or the source of an authored redirect) is never rewritten. A spec that
-Mintlify mounted under a `directory` also gets a redirect from each endpoint URL that directory served,
+Mintlify mounted under a `directory` also gets a redirect from each endpoint URL that directory served
+(not the operations a container lists, which are pages at those URLs),
 to the matching endpoint page, and never to an operation the published spec
 withholds with `x-hidden` or `x-excluded`. A remote spec gets every directory
 each of its tabs mounted it under, limited to the operations the navigation
@@ -243,6 +292,15 @@ whose address has a `+ ? ( ) [ ] { }` character (a `directory` such as
 `sdk/c++`) would fail the build; every redirect from authored config, a local
 spec or a downloaded spec is left out instead, and one warning lists the first
 ten of them.
+
+A Mintlify page whose frontmatter `url` is a web address is a link in the
+source sidebar. It is imported as a page that is kept out of the sitemap, stays
+in the navigation, and has a redirect from its path to that address. That
+redirect is added after the checks above, because hiding the page is its
+purpose; a `url` that is not an `http(s)` address is ignored. The home page
+(`index.mdx` or `introduction.mdx`) is served at `/` and at `/introduction`, so
+both redirect, and the redirect from `/` replaces the generated one to the first
+page. A redirect for `/` that the source site wrote stays, and a warning says so.
 
 A repository is limited to 5,000 documentation files and, separately, 5,000
 asset files. Past that, files are kept in navigation order with the default

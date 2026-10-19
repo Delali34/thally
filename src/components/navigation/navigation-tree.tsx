@@ -69,6 +69,8 @@ function NavigationPage({ node, pathname, onNavigate, mobile, showGroupIcons }: 
 interface NavigationSectionsProps extends Omit<NavigationTreeProps, 'nodes'> {
   sections: Array<NavigationSection>
   title?: string
+  /** Keep the heading of an authored group that is named after the collection; the collection's own root section never has one. */
+  keepCollectionNamedGroups?: boolean
 }
 
 /**
@@ -76,7 +78,7 @@ interface NavigationSectionsProps extends Omit<NavigationTreeProps, 'nodes'> {
  * groups. Paging replaces rows instead of accumulating DOM, while disclosure
  * state survives a group's removal from the currently rendered window.
  */
-export function NavigationSections({ sections, title, pathname, onNavigate, mobile = false, showGroupIcons = true }: NavigationSectionsProps) {
+export function NavigationSections({ sections, title, keepCollectionNamedGroups = false, pathname, onNavigate, mobile = false, showGroupIcons = true }: NavigationSectionsProps) {
   const [disclosures, setDisclosures] = useState<{ sections: Array<NavigationSection>; values: Record<string, NavigationDisclosure> }>({ sections, values: {} })
   const [cursor, setCursor] = useState<{ pathname: string; sections: Array<NavigationSection>; start: number } | null>(null)
   const content = useRef<HTMLDivElement>(null)
@@ -99,7 +101,7 @@ export function NavigationSections({ sections, title, pathname, onNavigate, mobi
     return rows.map(({ row, children }) => {
       if (row.section) return (
         <div key={row.key} className="thally-docs-sidebar-group space-y-2.5" data-navigation-row="section">
-          {row.section.defaultOpen === undefined && (mobile || row.section.title !== title) ? (
+          {row.section.defaultOpen === undefined && (mobile || row.section.title !== title || (keepCollectionNamedGroups && !row.section.id?.startsWith('nav-root-'))) ? (
             <p className="flex items-center gap-2 px-2 text-sm font-semibold leading-6 text-foreground">
               {showGroupIcons && row.section.icon ? <Icon icon={row.section.icon} className="h-3.5 w-3.5 shrink-0 text-muted-foreground" /> : null}
               <span>{row.section.title}</span>

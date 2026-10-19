@@ -25,6 +25,8 @@ export function Markdown({ children, className }: MarkdownProps) {
             </a>
           ),
           p: ({ children }) => <p className="leading-relaxed">{children}</p>,
+          // The inline-code ring and size must not leak into a fenced block's own `code` element.
+          pre: ({ children }) => <pre className="[&>code]:bg-transparent [&>code]:p-0 [&>code]:shadow-none [&>code]:[font-size:inherit]">{children}</pre>,
         }}
       >
         {children}

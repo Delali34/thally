@@ -9,6 +9,8 @@
 import { createContext, useContext, useEffect, useId, useRef, type ReactNode } from 'react'
 import { ChevronDown } from 'lucide-react'
 import { Icon } from '@/components/mdx/content-icon'
+import { InlineCodeText } from '@/components/mdx/inline-code-text'
+import { plainInlineText } from '@/lib/inline-code'
 import { cn } from '@/lib/utils'
 
 /**
@@ -53,7 +55,7 @@ function normalizeId(value: string): string {
 export function Accordion({ title, description, id, icon, iconType, defaultOpen, children }: AccordionProps) {
   const group = useContext(AccordionGroupContext)
   const generatedId = useId().replace(/:/g, '')
-  const value = id || normalizeId(title) || generatedId
+  const value = id || normalizeId(plainInlineText(title)) || generatedId
   const ref = useRef<HTMLDetailsElement>(null)
   const open = Boolean(defaultOpen) || Boolean(group?.defaultValue.includes(value))
 
@@ -81,7 +83,7 @@ export function Accordion({ title, description, id, icon, iconType, defaultOpen,
             </span>
           ) : null}
           <span className="min-w-0">
-            <span className="block text-base font-semibold leading-6 text-foreground">{title}</span>
+            <span className="block text-base font-semibold leading-6 text-foreground"><InlineCodeText>{title}</InlineCodeText></span>
             {description ? (
               <span className="mt-0.5 block text-sm font-normal leading-5 text-foreground/60">{description}</span>
             ) : null}

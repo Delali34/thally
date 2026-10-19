@@ -1,8 +1,9 @@
 /**
  * Library-aware icon rendering for documentation content.
  *
- * Resolution order for a name: an inline brand mark, a Font Awesome brand
- * fallback, then the site's icon library. Bundled Lucide glyphs render inline
+ * Resolution order for a name: an inline brand mark, a drawn badge (a number in
+ * a circle, a letter in a square), a Font Awesome brand fallback, then the
+ * site's icon library. Bundled Lucide glyphs render inline
  * and stay hidden when the owner selects Font Awesome or Tabler, where the
  * same name resolves through a CSS mask to the pinned CDN asset. The layout
  * sets `html[data-icon-library]`, so client components never need the config.
@@ -31,6 +32,7 @@ import { brandIconAliases, brandIcons } from '@/components/mdx/brand-icons'
 import {
   FONT_AWESOME_BRAND_NAMES,
   ICON_NAME_PATTERN,
+  badgeGlyph,
   fontAwesomeBrandUrl,
   iconLibraryAssetUrl,
   type IconStyle,
@@ -155,6 +157,30 @@ export function Icon({ icon, src: srcProp, iconType = 'outline', className, colo
         data-content-icon-tone={tone}
       >
         <path d={brand.path} />
+      </svg>
+    )
+  }
+
+  // Pro-only badge names (`circle-1`, `square-e`) have no asset in any library, so they are drawn.
+  const badge = lucideIconMap[name] ? null : badgeGlyph(name)
+  if (badge) {
+    return (
+      <svg
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={2}
+        aria-hidden="true"
+        className={cn('thally-icon h-5 w-5 shrink-0 text-accent', className)}
+        style={style}
+        data-icon-name={name}
+        data-icon-source="badge"
+        data-content-icon-tone={tone}
+      >
+        {badge.shape === 'circle' ? <circle cx="12" cy="12" r="10" /> : <rect x="3" y="3" width="18" height="18" rx="3" />}
+        <text x="12" y="12.5" textAnchor="middle" dominantBaseline="central" fill="currentColor" stroke="none" fontSize="12" fontWeight="600">
+          {badge.character}
+        </text>
       </svg>
     )
   }

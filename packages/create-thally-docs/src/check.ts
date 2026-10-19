@@ -13,11 +13,11 @@ import remarkMdx from 'remark-mdx'
 import remarkParse from 'remark-parse'
 import { unified } from 'unified'
 import { readDocsJson, writeDocsJson, type DocsJsonConfig } from './docs-json.js'
-import { API_GROUPS_MAX_DEPTH, groupKeyState, listedOperationKeys, pageState, parseDocReference, type CheckSpec, type DocReference } from './openapi-publication.js'
+import { API_GROUPS_MAX_DEPTH, groupKeyState, listedOperationKeys, operationDescription, pageState, parseDocReference, type CheckSpec, type DocReference } from './openapi-publication.js'
 import { manualApiProblems } from './manual-api-check.js'
 import { findPublicSpecs, shadowNote, specHasHiddenOperations } from './public-specs.js'
 import { projectNavigationContract } from '@thallylabs/core/navigation'
-import { slugify } from '@thallylabs/core/slugify'
+import { plainInlineText, slugify } from '@thallylabs/core/slugify'
 import { validateIntegrations } from '@thallylabs/migrate'
 import { checkExternalLinks, type ExternalLinkCheckOptions, type ExternalLinkReference } from './external-links.js'
 
@@ -240,7 +240,7 @@ function extractStepHeadings(content: string): Array<{ line: number; base: strin
         const title = stringAttribute(node, 'title')?.trim()
         if (title && size && ['h2', 'h3', 'h4'].includes(size)) {
           const id = stringAttribute(node, 'id')?.trim()
-          steps.push({ line: node.position?.start.line ?? 0, base: id || slugify(title), explicit: !!id })
+          steps.push({ line: node.position?.start.line ?? 0, base: id || slugify(plainInlineText(title)), explicit: !!id })
         }
       }
     }
@@ -406,6 +406,8 @@ function resolveDynamicRedirectDestination(redirect: DynamicRedirect, match: Reg
 
 const MAX_REDIRECT_HOPS = 20
 
+const MISSING_DESCRIPTION = 'Missing "description" in frontmatter'
+
 /** Follow literal and Next.js-style dynamic site redirects without accepting cycles as reachable pages. */
 function resolveLink(target: string, redirects: ReadonlyMap<string, string>, dynamicRedirects: ReadonlyArray<DynamicRedirect> = []): ResolvedLink {
   let current = target
@@ -557,21 +559,30 @@ function checkTabApiGroups(projectDir: string, tab: ApiGroupsTab, locale: string
  * the site's default spec (the first visible API tab's, which is what the
  * route consults) 404s and is left out of every listing. Unknown operations
  * are not reported, and remote specs cannot be judged here.
+ *
+ * A page with no description of its own is described by its operation, so it
+ * is reported as missing one only when the operation has none either, or cannot
+ * be read here. The site resolves a page's reference against the specs of hidden
+ * tabs too (after the visible ones), and so does that lookup.
  */
-function checkUnpublishedOperationPages(
+function checkOperationPages(
   projectDir: string,
   tabs: Array<{ hidden?: boolean; api?: { source?: string } }>,
-  pages: Array<{ file: string; reference: DocReference }>,
+  pages: Array<{ file: string; reference: DocReference; hasDescription: boolean }>,
   issues: LintIssue[],
 ): void {
   if (pages.length === 0) return
+  const load = (hidden: boolean): Array<CheckSpec> => tabs
+    .filter((tab) => Boolean(tab.hidden) === hidden && typeof tab.api?.source === 'string')
+    .map((tab) => {
+      const api = tab.api as { source: string; overrides?: unknown; webhookGroup?: unknown }
+      return { ...loadCheckSpec(projectDir, api.source, api.overrides), ...(typeof api.webhookGroup === 'string' ? { webhookGroup: api.webhookGroup } : {}) }
+    })
   // The specs the docs route serves, in its order: visible API tabs, the first being the default.
-  const specs: Array<CheckSpec> = tabs
-    .filter((tab) => !tab.hidden && typeof tab.api?.source === 'string')
-    .map((tab) => loadCheckSpec(projectDir, tab.api!.source as string, (tab.api as { overrides?: unknown }).overrides))
-  if (specs.length === 0) return
-  for (const { file, reference } of pages) {
-    const state = pageState(reference, specs)
+  const specs = load(false)
+  const described = pages.some((page) => !page.hasDescription) ? [...specs, ...load(true)] : specs
+  for (const { file, reference, hasDescription } of pages) {
+    const state = specs.length > 0 ? pageState(reference, specs) : 'unknown'
     if (state === 'hidden' || state === 'excluded') {
       const operation = `${reference.specRef ? `${reference.specRef} ` : ''}${reference.method} ${reference.path}`
       issues.push({
@@ -579,6 +590,8 @@ function checkUnpublishedOperationPages(
         file,
         message: `page ${file} points at ${state} operation ${operation} and is not published: it returns 404 and is left out of navigation, search, sitemap and llms.txt. Publish the operation or point the page at another one`,
       })
+    } else if (!hasDescription && operationDescription(reference, described) === undefined) {
+      issues.push({ severity: 'warning', message: MISSING_DESCRIPTION, file })
     }
   }
 }
@@ -704,7 +717,7 @@ export async function runCheck(projectDir: string, options: CheckOptions): Promi
   if (existsSync(contentDir)) scanMdx(contentDir, allFiles)
 
   const fixedOrphans: string[] = []
-  const operationPages: Array<{ file: string; reference: DocReference }> = []
+  const operationPages: Array<{ file: string; reference: DocReference; hasDescription: boolean }> = []
   const validPaths = new Set<string>(['/'])
   const anchorsByPath = new Map<string, Set<string>>()
   const linksByFile: Array<{ file: string; path: string; anchors: Set<string>; links: FoundLink[]; images: FoundLink[]; offset: number }> = []
@@ -741,13 +754,14 @@ export async function runCheck(projectDir: string, options: CheckOptions): Promi
 
     const rel2 = relative(projectDir, filePath)
     if (!data.title) issues.push({ severity: 'warning', message: `Missing "title" in frontmatter`, file: rel2 })
-    if (!data.description) issues.push({ severity: 'warning', message: `Missing "description" in frontmatter`, file: rel2 })
+    const reference = parseDocReference(data.openapi)
+    // The site describes an API page by its operation when the page has no description, so only the spec can say it has none.
+    if (!data.description && !reference) issues.push({ severity: 'warning', message: MISSING_DESCRIPTION, file: rel2 })
     if (typeof data.openapi !== 'string' && content.trim().length < 50) {
       issues.push({ severity: 'warning', message: `Very short body (${content.trim().length} chars) — page may be empty`, file: rel2 })
     }
 
-    const reference = parseDocReference(data.openapi)
-    if (reference) operationPages.push({ file: rel2, reference })
+    if (reference) operationPages.push({ file: rel2, reference, hasDescription: Boolean(data.description) })
     for (const message of manualApiProblems(rel2, data, Boolean(reference), content, (config as { api?: unknown }).api)) {
       issues.push({ severity: 'warning', file: rel2, message })
     }
@@ -839,7 +853,7 @@ export async function runCheck(projectDir: string, options: CheckOptions): Promi
   }
 
   checkPublicSpecs(projectDir, config.tabs, issues)
-  checkUnpublishedOperationPages(projectDir, config.tabs, operationPages, issues)
+  checkOperationPages(projectDir, config.tabs, operationPages, issues)
   checkApiGroupKeys(projectDir, config, issues)
 
   if (options.external && externalLinks.length > 0) {

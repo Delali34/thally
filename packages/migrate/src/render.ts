@@ -22,7 +22,7 @@ function renderPage(bundle: MigrationBundle, page: MigrationBundle['pages'][numb
     page.icon ? `icon: ${yamlString(page.icon)}` : null,
     page.iconType ? `iconType: ${yamlString(page.iconType)}` : null,
     `description: ${yamlString(page.description)}`,
-    page.descriptionPlacement === 'body' ? 'descriptionPlacement: body' : null,
+    page.descriptionPlacement === 'body' || page.descriptionPlacement === 'operation' ? `descriptionPlacement: ${page.descriptionPlacement}` : null,
     page.badge ? `badge: ${yamlString(page.badge)}` : null,
     page.keywords.length > 0 ? `keywords: [${page.keywords.map(yamlString).join(', ')}]` : null,
     page.mode ? `mode: ${yamlString(page.mode)}` : null,

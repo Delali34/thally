@@ -1,6 +1,8 @@
 'use client'
 
 import { createContext, useContext, type ReactNode } from 'react'
+import { InlineCodeText } from '@/components/mdx/inline-code-text'
+import { plainInlineText } from '@/lib/inline-code'
 import { cn } from '@/lib/utils'
 
 // ---------------------------------------------------------------------------
@@ -44,8 +46,8 @@ interface StepProps {
 
 function StepTitle({ as: Title, id, children }: { as: StepTitleSize; id?: string; children: string }) {
   // A plain-text (`p`) title is never a heading, whatever id it was handed.
-  const heading = id && Title !== 'p' ? { id, 'data-heading': children, 'data-level': Number(Title[1]) } : undefined
-  return <Title {...heading} className="font-heading text-[1.02rem] font-semibold tracking-[-0.012em] text-foreground">{children}</Title>
+  const heading = id && Title !== 'p' ? { id, 'data-heading': plainInlineText(children), 'data-level': Number(Title[1]) } : undefined
+  return <Title {...heading} className="font-heading text-[1.02rem] font-semibold tracking-[-0.012em] text-foreground"><InlineCodeText>{children}</InlineCodeText></Title>
 }
 
 export function Step({ title, titleSize, id, children }: StepProps) {

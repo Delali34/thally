@@ -15,6 +15,32 @@ export function slugify(value: string): string {
     .replace(/(^-|-$)/g, '')
 }
 
+/** One `code` span in a title string; the backticks are markup, the text between them is what renders. */
+const INLINE_CODE = /`([^`\n]+)`/g
+
+/**
+ * Split a title string (a component `title`, a page `description`) into plain
+ * text and `inline code` runs, as Mintlify renders them. Renderers wrap the code
+ * runs; anchors, outlines and meta tags read {@link plainInlineText}, so every
+ * consumer agrees on what the title says.
+ */
+export function inlineCodeParts(value: string): Array<{ text: string; code: boolean }> {
+  const parts: Array<{ text: string; code: boolean }> = []
+  let end = 0
+  for (const match of value.matchAll(INLINE_CODE)) {
+    if (match.index > end) parts.push({ text: value.slice(end, match.index), code: false })
+    parts.push({ text: match[1], code: true })
+    end = match.index + match[0].length
+  }
+  if (end < value.length) parts.push({ text: value.slice(end), code: false })
+  return parts
+}
+
+/** A title string as plain text: each code span without its backticks. */
+export function plainInlineText(value: string): string {
+  return value.replace(INLINE_CODE, '$1')
+}
+
 /** ASCII-only anchor normalization the `<Update>` timeline has always used. */
 function normalizeUpdateId(value: string): string {
   return value.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')

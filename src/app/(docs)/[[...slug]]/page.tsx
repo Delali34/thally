@@ -34,6 +34,8 @@ import {
   getEffectiveI18nConfig,
   getRepositoryI18nConfig,
 } from '@/lib/i18n/request'
+import { plainInlineText } from '@/lib/inline-code'
+import { markdownToPlainText } from '@thallylabs/core/content'
 import { buildDocPageJsonLd } from '@/lib/json-ld'
 import { pageFullTitle } from '@/lib/page-meta'
 import { buildOgImageUrl, formatOgBreadcrumb, formatOgDisplayUrl } from '@/lib/og'
@@ -82,6 +84,20 @@ export async function generateStaticParams() {
   ]
 }
 
+/**
+ * The description a page's tags and structured data carry, as plain text. The
+ * header renders a code span in the page's own description as code; tags read
+ * its text. A page bound to an OpenAPI operation with no description of its own
+ * shows the operation's description on the page, so its tags carry that, as one
+ * plain line (the description is Markdown).
+ */
+async function tagDescription(doc: { description: string; openapi?: Parameters<typeof lookupApiOperationForFrontmatter>[0] }): Promise<string> {
+  if (doc.description) return plainInlineText(doc.description)
+  if (!doc.openapi) return ''
+  const { node } = await lookupApiOperationForFrontmatter(doc.openapi)
+  return markdownToPlainText(node?.operation.description ?? '')
+}
+
 export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
   const routeParams = await params
   const buildI18n = await getEffectiveI18nConfig()
@@ -107,9 +123,10 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
   const canonicalHref = hasTranslation ? requestedHref : primaryHref
   const availableI18n = await getContentI18nConfig(route.docSlug, buildI18n)
   const nav = await loadNavContext(doc.id, route.isLocaleRoute ? route.locale : undefined, reader)
+  const description = await tagDescription(doc)
   const ogImageUrl = buildOgImageUrl({
     title: doc.title,
-    description: doc.description,
+    description,
     crumb: formatOgBreadcrumb(nav.breadcrumb, doc.title, doc.group),
     url: formatOgDisplayUrl(canonicalHref, siteUrl),
   })
@@ -122,11 +139,11 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
     separator: getSeoConfig().titleSeparator,
   })
   const socialTitle = fullTitle ?? doc.title
-  const socialDescription = doc.ogDescription ?? doc.description
+  const socialDescription = doc.ogDescription ?? description
 
   return {
     title: fullTitle ? { absolute: fullTitle } : doc.title,
-    description: doc.description,
+    description,
     ...(isNoindex
       ? { robots: { index: false, follow: !doc.noindex && !doc.hidden } }
       : {}),
@@ -209,7 +226,7 @@ export default async function DocsPage({ params }: PageProps) {
     pageUrl: `${siteUrl}${canonicalHref}`,
     id: doc.id,
     title: doc.title,
-    description: doc.description,
+    description: await tagDescription(doc),
     keywords: doc.keywords,
     lastUpdated: doc.lastUpdated,
     locale: contentLocale,
@@ -263,10 +280,10 @@ export default async function DocsPage({ params }: PageProps) {
           <JsonLdScript data={jsonLd} />
           {localeNotice}
           <div className="not-prose">
-            <DocHeader doc={doc} eyebrow={getEyebrowMode() === 'path' ? nav.groupPath : nav.group} />
+            <DocHeader doc={doc} eyebrow={getEyebrowMode() === 'path' ? nav.groupPath : nav.group} showDescription={doc.descriptionPlacement !== 'operation'} />
           </div>
           <ApiLayout>
-            <OperationPanel operation={operationNode.operation} showDescription={!doc.description} playground={playground} locale={contentLocale}>
+            <OperationPanel operation={operationNode.operation} showDescription={!doc.description || doc.descriptionPlacement === 'operation'} playground={playground} locale={contentLocale}>
               <Body />
             </OperationPanel>
           </ApiLayout>

@@ -52,7 +52,19 @@ This behavior comes with the shared runtime: new sites inherit it from their sel
 }
 ```
 
-The optional `description` and `icon` fields appear in the collection selector. There are three collection types:
+The optional `description` and `icon` fields appear in the collection selector.
+
+A sidebar group named after its collection, such as a group `API reference` in the collection `API reference`, has no heading by default, because the collection label already names it. Set `navigation.groupHeadings` to `"all"` to keep that heading as well:
+
+```json
+{
+  "navigation": { "display": "dropdown", "groupHeadings": "all" }
+}
+```
+
+Sites migrated from Mintlify set this when one of their groups has the name of its tab or dropdown.
+
+There are three collection types:
 
 ### Content tab
 

@@ -57,6 +57,7 @@ description: A short summary for search results and meta tags.
 | `title` | Yes | Page heading, browser title, and search result |
 | `navTitle` | No | Shorter sidebar and previous/next label |
 | `description` | Yes | Meta description and search snippet |
+| `descriptionPlacement` | No | `body` hides a summary already present in the body. On an `openapi:` page, `operation` keeps the summary for metadata and shows the full operation description instead. |
 
 The title from frontmatter is automatically rendered as the page heading — you don't need to add an `# H1` in the body.
 
@@ -190,6 +191,23 @@ Disable zoom with `<Frame zoom={false}>`.
 Every `h2` and `h3` heading is a permalink. Selecting the heading copies the
 section URL without adding a visible marker beside it, so you can share a
 specific answer while keeping the page visually clean.
+
+## Typographic quotes
+
+Straight quotes in prose render as written. Set `smartQuotes` at the top level
+of `docs.json` to show them as curly quotes, the way Mintlify does:
+
+```json
+{
+  "smartQuotes": true
+}
+```
+
+With it on, `"quoted"` shows as “quoted” and `doesn't` as doesn’t. Only
+rendered prose changes. Inline code, code blocks, math, link addresses, JSX
+attributes (such as a `title`), heading anchors, the Markdown copy, `llms.txt`
+and search results keep the straight quotes you wrote. Dashes and ellipses are
+not changed. Migrated Mintlify sites turn it on.
 
 ## Tables
 

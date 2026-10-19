@@ -407,6 +407,13 @@ describe('config mapping', () => {
     expect(site({ 'docs.json': JSON.stringify(nav), ...intro }).docsConfig.breadcrumbs).toBe(false)
   })
 
+  it('turns on smart quotes in the generated docs.json because Mintlify typesets prose quotes', () => {
+    const bundle = site({ 'docs.json': JSON.stringify(nav), ...intro })
+    expect(bundle.docsConfig.smartQuotes).toBe(true)
+    const docs = renderMigrationFiles(bundle).find((file) => file.path === 'docs.json')
+    expect(JSON.parse(String(docs?.content)).smartQuotes).toBe(true)
+  })
+
   it('takes brand colours from the stylesheet custom properties over docs.json', () => {
     const colors = { primary: '#16a34a', light: '#ffffff', dark: '#111111' }
     const withCss = (css: string) => site({ 'docs.json': JSON.stringify({ ...nav, colors }), 'style.css': css, ...intro })

@@ -141,6 +141,19 @@ describe('release-bound docs.json', () => {
     expect(getStructuralTheme()).toBe('sharp')
   })
 
+  it('reads navigation.groupHeadings only when it asks to keep every group heading', () => {
+    const presentation = (navigation: Record<string, unknown>) => {
+      vi.stubEnv('THALLY_DOCS_CONFIG', JSON.stringify({ navigation, tabs: [] }))
+      resetDocsJsonConfigForTests()
+      return getNavigationPresentation()
+    }
+    expect(presentation({ display: 'dropdown', groupHeadings: 'all' })).toEqual({ display: 'dropdown', groupHeadings: 'all' })
+    expect(presentation({ groupHeadings: 'all' })).toEqual({ display: 'tabs', groupHeadings: 'all' })
+    for (const groupHeadings of ['distinct', 'none', true, undefined]) {
+      expect(presentation({ display: 'dropdown', groupHeadings })).not.toHaveProperty('groupHeadings')
+    }
+  })
+
   it('preserves recursive groups without duplicate visual sections', () => {
     vi.stubEnv('THALLY_DOCS_CONFIG', JSON.stringify({
       navigation: { display: 'dropdown' },

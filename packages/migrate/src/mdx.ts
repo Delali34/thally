@@ -343,22 +343,46 @@ function headingIdMarker(id: string): string {
   return `{/* #${id} */}`
 }
 
+/** Characters Mintlify keeps in an id besides letters, marks and digits; the ones around which it also places a dash. */
+const HEADING_ID_WORD = /[\p{L}\p{M}\p{N}_+&/@\u2019\u201c\u201d\u2014\u2013\u2192]/u
+
 /**
- * The id Mintlify gives a heading with no explicit `{#id}`. Derived from the
- * live ids of a Mintlify site: whitespace and `.` become `-`, and `+ & / _`,
- * typographic quotes and dashes and arrows are kept, other punctuation and
- * emoji are dropped. Repeats are numbered `-2`, `-3`, ... by the renderer.
+ * The id Mintlify gives a heading with no explicit `{#id}`, from its rendered
+ * text. Derived from the live ids of two Mintlify sites: whitespace and `-`
+ * become one dash, as does a `.` before a word, a `(` between a word and a
+ * word or `{` (`start(body`), and a `)` glued to what follows it (`()`+`:`).
+ * `{`, `:` and `"` drop out but end a run of dashes, so `(`, `{`, space gives
+ * two. `+ & / _ @`, typographic quotes and dashes and arrows are kept, other
+ * punctuation and emoji are dropped, and repeats are numbered `-2`, `-3`, ...
+ * by the renderer.
  */
 export function mintlifyHeadingSlug(text: string): string {
-  return text
-    .replace(/\u200b/g, '')
-    .normalize('NFC')
-    .trim()
-    .toLowerCase()
-    .replace(/[.\s]+/g, '-')
-    .replace(/-{2,}/g, '-')
-    .replace(/^-|-$/g, '')
-    .replace(/[^\p{L}\p{M}\p{N}_\-+&/\u2019\u201c\u201d\u2014\u2013\u2192]/gu, '')
+  const chars = [...text.replace(/[\u200b*]/g, '').normalize('NFC').trim().toLowerCase()]
+  const isWord = (char: string | undefined): boolean => char !== undefined && HEADING_ID_WORD.test(char)
+  let id = ''
+  let afterDash = false
+  let endsWithDash = false
+  chars.forEach((char, index) => {
+    const before = chars[index - 1]
+    const after = chars[index + 1]
+    endsWithDash = false
+    if (isWord(char)) {
+      id += char
+      afterDash = false
+    } else if (
+      /[\s-]/.test(char)
+      || (char === '.' && isWord(after))
+      || (char === '(' && isWord(before) && (isWord(after) || after === '{'))
+      || (char === ')' && after !== undefined && !/\s/.test(after))
+    ) {
+      if (id && !afterDash) id += '-'
+      afterDash = true
+      endsWithDash = true
+    } else if (char === '{' || char === ':' || char === '"') {
+      afterDash = false
+    }
+  })
+  return endsWithDash ? id.replace(/-$/, '') : id
 }
 
 /** Thally's own heading slug (`slugify` in `@thallylabs/core`), used to tell which headings already match. */
@@ -384,7 +408,7 @@ function plainHeadingText(source: string): string {
     .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/<\/?[A-Za-z][^>]*>/g, '')
     .replace(/`([^`]*)`/g, '$1')
-    .replace(/(\*\*|__|~~|\*)/g, '')
+    .replace(/(?<!\\)(\*\*|__|~~|\*)/g, '')
     .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
     .replace(/\\([\\`*_{}[\]()#+.!&<>|~-])/g, '$1')
 }
@@ -2253,8 +2277,6 @@ export function normalizeMdx(body: string, platform?: MigrationPlatform, unwrapM
       .replace(/<\/Danger>/g, '</Error>')
       .replace(/<Warn(\s[^>]*)?>/g, '<Warning$1>')
       .replace(/<\/Warn>/g, '</Warning>')
-      .replace(/<Check(\s[^>]*)?>/g, '<Note$1>')
-      .replace(/<\/Check>/g, '</Note>')
       .replace(/<Tree\.Folder/g, '<Folder')
       .replace(/<\/Tree\.Folder>/g, '</Folder>')
       .replace(/<Tree\.File/g, '<File')
@@ -2286,6 +2308,10 @@ export function normalizeMdx(body: string, platform?: MigrationPlatform, unwrapM
         // card Thally already registers as `<GitHub repo="owner/name" />`.
         .replace(/<GitHub\.Repo/g, '<GitHub')
         .replace(/<\/GitHub\.Repo>/g, '</GitHub>')
+        // Mintlify's `<Callout>` has no tone: it ignores a `type` prop and renders
+        // a neutral box, which is Thally's info callout (an untyped one would take
+        // a tone from its wording).
+        .replace(/<Callout(\s[^<>]*)?>/g, (tag: string) => tag.replace(/(\s)type=(?:"[^"]*"|'[^']*'|\{[^{}]*\})/, '$1type="info"'))
         // `<Column>` is an unstyled wrapper for arbitrary content inside
         // `<Columns>`; Thally's grid already treats any direct child as a
         // column, so a plain `<div>` (built into MDX, no registry entry
@@ -2329,6 +2355,18 @@ export function normalizeMdx(body: string, platform?: MigrationPlatform, unwrapM
     }
   }
   return normalizeFlowParagraphContainers(normalized)
+}
+
+/** A Mintlify page whose frontmatter `url` is a web address is a link in the sidebar: visiting its path leaves for that address. */
+function externalPageUrl(value: unknown): string | undefined {
+  const url = typeof value === 'string' ? value.trim() : ''
+  if (!/^https?:\/\/[^\s]+$/i.test(url)) return undefined
+  try {
+    new URL(url)
+    return url
+  } catch {
+    return undefined
+  }
 }
 
 /** Parse source Markdown or MDX into the canonical page representation. */
@@ -2392,6 +2430,7 @@ export function parseMarkdownPage(input: {
     : ['default', 'wide', 'custom', 'center', 'home'].includes(sourceMode ?? '')
       ? sourceMode as MigrationPage['mode']
       : undefined
+  const externalUrl = input.platform === 'mintlify' ? externalPageUrl(parsed.data.url) : undefined
   const description = typeof parsed.data.description === 'string' && parsed.data.description.trim()
     ? parsed.data.description.trim()
     // An API reference page is described by its operation, not by its prose.
@@ -2414,7 +2453,9 @@ export function parseMarkdownPage(input: {
     keywords,
     mode,
     hidden: parsed.data.hidden === true ? true : undefined,
-    noindex: parsed.data.noindex === true || parsed.data.noindex === 'true' ? true : undefined,
+    // The path of a page that links elsewhere redirects, so it has no business in a sitemap.
+    noindex: parsed.data.noindex === true || parsed.data.noindex === 'true' || externalUrl ? true : undefined,
+    ...(externalUrl ? { externalUrl } : {}),
     ...(Object.keys(meta).length > 0 ? { meta } : {}),
     openapi: typeof parsed.data.openapi === 'string' ? parsed.data.openapi.trim() : undefined,
     ...apiFrontmatter(parsed.data, input.warn),

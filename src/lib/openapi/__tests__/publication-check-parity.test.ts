@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 // Monorepo-only: `thally check` ships in packages/create-thally-docs, which the
 // standalone starter does not have (see SOURCE_ONLY_PATHS in
 // .github/scripts/starter-runtime-contract.mjs).
-import { API_GROUPS_MAX_DEPTH as CHECK_GROUPS_MAX_DEPTH, groupKeyState, listedOperationKeys, operationState, pageState, parseDocReference } from '../../../../packages/create-thally-docs/src/openapi-publication'
+import { API_GROUPS_MAX_DEPTH as CHECK_GROUPS_MAX_DEPTH, groupKeyState, listedOperationKeys, operationDescription, operationState, pageState, parseDocReference } from '../../../../packages/create-thally-docs/src/openapi-publication'
 import { API_GROUPS_MAX_DEPTH as MIGRATE_GROUPS_MAX_DEPTH } from '../../../../packages/migrate/src/navigation'
 import { mdxServers, paramFieldPathNames, parseManualApi } from '../../../../packages/create-thally-docs/src/manual-api-check'
 import { extractParamFields, parseApiFrontmatter, sanitizeApiMdxConfig } from '../manual-operation'
@@ -43,6 +43,39 @@ describe('thally check publication parity', () => {
         }
       }
     }
+  })
+})
+
+describe('thally check operation description parity', () => {
+  const document = doc({
+    '/described': { get: { description: 'Described.', summary: 'Summary.', ...ok } },
+    '/summary-only': { get: { summary: 'Summary.', ...ok } },
+    '/empty-description': { get: { description: '', summary: 'Summary.', ...ok } },
+    '/neither': { get: ok },
+    '/overridden': { get: { description: 'Described.', ...ok }, post: ok },
+    '/ref': { $ref: '#/components/pathItems/Plain' },
+  }, { components: { pathItems: { Plain: { get: { description: 'Through a reference.', ...ok } } } } })
+  const overrides = { 'GET /overridden': { description: 'Overridden.' }, 'POST /overridden': { description: '' } }
+
+  it('shows the description `thally check` reads, or none where the site has none', () => {
+    let compared = 0
+    for (const withOverrides of [undefined, overrides]) {
+      const config = { id: 'default', label: '', source: { type: 'file' as const, path: 'openapi.yaml' }, operationOverrides: withOverrides }
+      const site = new Map(normalizeSpec({ config, document } as ResolvedSpec).operations.map((operation) => [operation.key, operation.description]))
+      for (const path of ['/described', '/summary-only', '/empty-description', '/neither', '/overridden', '/ref']) {
+        for (const method of ['GET', 'POST']) {
+          const ref = parseDocReference(`openapi.yaml ${method} ${path}`)!
+          const key = operationKeyFromRef(`${method} ${path}`)
+          if (!key || !site.has(key)) continue
+          compared++
+          const shown = site.get(key)
+          expect(operationDescription(ref, [{ source: 'openapi.yaml', document, overrides: withOverrides }]), `${method} ${path} ${withOverrides ? 'with' : 'without'} overrides`)
+            .toBe(typeof shown === 'string' && shown.trim() ? shown : undefined)
+        }
+      }
+    }
+    // 6 get operations and 1 post, each with and without overrides.
+    expect(compared).toBe(14)
   })
 })
 

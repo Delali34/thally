@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm'
 import remarkMdx from 'remark-mdx'
 import { toString as mdastToString } from 'mdast-util-to-string'
 import type { Root, RootContent } from 'mdast'
-import { slugify, updateAnchorId } from '../slugify.js'
+import { plainInlineText, slugify, updateAnchorId } from '../slugify.js'
 import type {
   ContentCodeBlock,
   ContentUpdate,
@@ -278,7 +278,7 @@ function walk(state: WalkState, nodes: Array<RootContent>, stepSize?: string) {
         const title = stringAttribute(node, 'title')
         const depth = STEP_HEADING_DEPTH.get((own === undefined ? stepSize : own) ?? '')
         // fall through after: the title still reads as prose, and the body belongs to the new section
-        if (title && depth) startSection(state, depth, title, stringAttribute(node, 'id')?.trim() || undefined)
+        if (title && depth) startSection(state, depth, plainInlineText(title), stringAttribute(node, 'id')?.trim() || undefined)
       }
     }
     if (node.type === 'heading') {

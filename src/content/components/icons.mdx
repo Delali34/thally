@@ -34,13 +34,18 @@ was written for those names:
 | Library | Value | Notes |
 |---|---|---|
 | [Lucide](https://lucide.dev/icons) | `lucide` | Default. Common names ship with the site and render offline. |
-| [Font Awesome Free](https://fontawesome.com/search?o=r&m=free) | `fontawesome` | `iconType="regular"` selects the regular set; anything else uses solid. |
+| [Font Awesome Free](https://fontawesome.com/search?o=r&m=free) | `fontawesome` | `iconType="regular"` selects the regular set where Free has the icon; anything else uses solid. |
 | [Tabler](https://tabler.io/icons) | `tabler` | `iconType="solid"` selects the filled set; anything else uses outline. |
 
 Names that are not bundled load on demand from the selected library on jsDelivr
 at a pinned version, so a glyph never changes without a runtime release. A name
 the library does not have renders nothing rather than a placeholder. Font
 Awesome class syntax such as `fa-solid fa-book` is accepted as `book`.
+
+Font Awesome Pro names that Free does not ship never render blank. Most map to
+the closest Lucide glyph (`browser` shows an app window, `snake` a worm), and a
+number in a circle (`circle-1`) or a letter in a square (`square-e`) is drawn
+directly under every library.
 
 ## Brand icons
 

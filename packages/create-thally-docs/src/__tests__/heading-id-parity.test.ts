@@ -40,3 +40,15 @@ describe('heading id parity between the migrator and thally check', () => {
     expect(await brokenAnchorOutput(body, 'nope')).toContain('Broken anchor')
   })
 })
+
+describe('thally check resolves the ids Mintlify serves for punctuation-heavy headings', () => {
+  it.each([
+    ['### @trigger.dev/sdk/v3', '@trigger-dev/sdk/v3'],
+    ['### `sessions.start(body, requestOptions?)`', 'sessions-start-body-requestoptions'],
+    ['### `out.writer({ execute, ... })`', 'out-writer--execute-'],
+    ['## `chat.requestUpgrade()`: same call, faster handoff', 'chat-requestupgrade--same-call-faster-handoff'],
+  ])('resolves a link to the id of %s', async (heading, id) => {
+    const body = normalizeMdx(`${heading}\n\nContent.`, 'mintlify')
+    expect(await brokenAnchorOutput(body, id)).not.toContain('Broken anchor')
+  })
+})

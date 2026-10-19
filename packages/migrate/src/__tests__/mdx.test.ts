@@ -727,6 +727,91 @@ describe('Mintlify heading ids', () => {
   })
 })
 
+describe('Mintlify heading ids from the live Trigger.dev docs', () => {
+  /** The id a heading line ends up with: the marker the migrator writes, or the slug Thally gives the rendered text. */
+  function effectiveId(line: string): string {
+    const output = normalizeMdx(line, 'mintlify')
+    const marker = /\{\/\* #(\S+) \*\/\}$/.exec(output)
+    if (marker) return marker[1]
+    return output.replace(/^#+ /, '').replace(/[`*\\]/g, '').toLowerCase().replace(/[^\p{L}\p{M}\p{N}]+/gu, '-').replace(/(^-|-$)/g, '')
+  }
+
+  // [heading as authored upstream, id docs trigger.dev serves]
+  it.each([
+    ['### @trigger.dev/sdk/v3', '@trigger-dev/sdk/v3'],
+    ['### @effect/schema', '@effect/schema'],
+    ['### `sessions.start(body, requestOptions?)`', 'sessions-start-body-requestoptions'],
+    ['### `sessions.retrieve(idOrExternalId, requestOptions?)`', 'sessions-retrieve-idorexternalid-requestoptions'],
+    ['### `sessions.update(idOrExternalId, body, requestOptions?)`', 'sessions-update-idorexternalid-body-requestoptions'],
+    ['### `sessions.close(idOrExternalId, body?, requestOptions?)`', 'sessions-close-idorexternalid-body-requestoptions'],
+    ['### `sessions.list(options?, requestOptions?)`', 'sessions-list-options-requestoptions'],
+    ['### `sessions.open(idOrExternalId)`', 'sessions-open-idorexternalid'],
+    ['### `out.append(value, options?)`', 'out-append-value-options'],
+    ['### `out.pipe(stream, options?)`', 'out-pipe-stream-options'],
+    ['### `out.writer({ execute, ... })`', 'out-writer--execute-'],
+    ['### `out.read(options?)`', 'out-read-options'],
+    ['### `out.writeControl(subtype, extraHeaders?)`', 'out-writecontrol-subtype-extraheaders'],
+    ['### `out.trimTo(earliestSeqNum)`', 'out-trimto-earliestseqnum'],
+    ['### `in.send(value, requestOptions?)`', 'in-send-value-requestoptions'],
+    ['### `in.on(handler)`', 'in-on-handler'],
+    ['### `in.once(options?)`', 'in-once-options'],
+    ['### `in.wait(options?)`', 'in-wait-options'],
+    ['### `in.waitWithIdleTimeout({ idleTimeoutInSeconds, timeout, ... })`', 'in-waitwithidletimeout--idletimeoutinseconds-timeout-'],
+    ['### Backend: `chat.withUIMessage(...).agent(...)`', 'backend-chat-withuimessage-agent'],
+    ['### `loadSkill({ name })`', 'loadskill--name-'],
+    ['### `readFile({ skill, path })`', 'readfile--skill-path-'],
+    ['### `bash({ skill, command })`', 'bash--skill-command-'],
+    ['### mockChatAgent(agent, options?)', 'mockchatagent-agent-options'],
+    ['## `chat.requestUpgrade()`: same call, faster handoff', 'chat-requestupgrade--same-call-faster-handoff'],
+    ['## `transport.stopGeneration(chatId)`', 'transport-stopgeneration-chatid'],
+    ['### "Module not found: @prisma/client/sql"', '\u201cmodule-not-found-@prisma/client/sql\u201d'],
+    ['### Using \\*', 'using'],
+    ['### `Error: @prisma/client did not initialize yet.`', 'error-@prisma/client-did-not-initialize-yet'],
+    ['### Database package (`@repo/db`)', 'database-package-@repo/db'],
+    ['### `No loader is configured for ".node" files`', 'no-loader-is-configured-for--node-files'],
+    ['### `Failed to index deployment` with `Column must be greater than or equal to 0, got -1`', 'failed-to-index-deployment-with-column-must-be-greater-than-or-equal-to-0-got-1'],
+  ])('gives %s the id %s', (line, id) => {
+    expect(effectiveId(line)).toBe(id)
+  })
+
+  it('reads the ids Mintlify serves from the rendered heading text', () => {
+    expect(mintlifyHeadingSlug('@trigger.dev/sdk/v3')).toBe('@trigger-dev/sdk/v3')
+    expect(mintlifyHeadingSlug('sessions.start(body, requestOptions?)')).toBe('sessions-start-body-requestoptions')
+    expect(mintlifyHeadingSlug('out.writer({ execute, ... })')).toBe('out-writer--execute-')
+  })
+})
+
+describe('Mintlify callouts', () => {
+  it('keeps <Check> as its own callout instead of turning it into a <Note>', () => {
+    const source = '<Check>\n  All set.\n</Check>\n\n<Check title="Done">Finished.</Check>'
+    for (const platform of ['mintlify', 'fern', 'docusaurus', undefined] as const) {
+      expect(normalizeMdx(source, platform)).toBe(source)
+    }
+  })
+
+  // Mintlify's <Callout> has no tone: a `type` prop is ignored and the box renders neutral.
+  it.each([
+    ['<Callout type="warning">\n  Not available.\n</Callout>', '<Callout type="info">\n  Not available.\n</Callout>'],
+    ['<Callout type={"danger"} icon="key">Careful</Callout>', '<Callout type="info" icon="key">Careful</Callout>'],
+    ['<Callout icon="key" type=\'tip\' />', '<Callout icon="key" type="info" />'],
+  ])('renders a Mintlify <Callout> that sets a type as the neutral info callout: %s', (source, expected) => {
+    expect(normalizeMdx(source, 'mintlify')).toBe(expected)
+  })
+
+  it('leaves a Mintlify <Callout> without a type, a coloured one and other platforms alone', () => {
+    const plain = '<Callout icon="key" color="#C77DFF">Custom</Callout>'
+    expect(normalizeMdx(plain, 'mintlify')).toBe(plain)
+    expect(normalizeMdx('<Callout>Plain</Callout>', 'mintlify')).toBe('<Callout>Plain</Callout>')
+    const typed = '<Callout type="warning">Docusaurus-style</Callout>'
+    expect(normalizeMdx(typed, 'docusaurus')).toBe(typed)
+  })
+
+  it('does not rewrite a <Callout> shown in a code fence', () => {
+    const fenced = '```mdx\n<Callout type="warning">x</Callout>\n```'
+    expect(normalizeMdx(fenced, 'mintlify')).toBe(fenced)
+  })
+})
+
 describe('Mintlify explicit heading ids stay on the heading', () => {
   it('keeps a translated heading\'s English id as the heading id, not as a separate anchor', () => {
     const output = normalizeMdx('## Primeros pasos {#get-started}\n\nTexto.', 'mintlify')

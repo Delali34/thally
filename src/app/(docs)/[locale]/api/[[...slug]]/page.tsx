@@ -2,7 +2,7 @@
 
 import type { Metadata } from 'next'
 import { getContentSource, isRemoteContentSource } from '@/lib/content-source'
-import { notFound, redirect } from 'next/navigation'
+import { redirect } from 'next/navigation'
 import { ApiLayout } from '@/components/api/api-layout'
 import { OperationPanel } from '@/components/api/operation-panel'
 import { resolvePlaygroundDisplay } from '@/lib/openapi/playground-display'
@@ -35,6 +35,15 @@ function isValidSecondaryLocale(locale: string, i18n: I18nConfig): boolean {
   return i18n.locales.some((l) => l.code === locale && l.code !== i18n.defaultLocale)
 }
 
+/**
+ * The full document slug for this route. When `locale` is not a secondary
+ * locale, the route has only matched an authored page such as
+ * `/platform/api/overview`, which must render exactly as the document route would.
+ */
+function documentSlug(resolved: { locale: string; slug?: Array<string> }): Array<string> {
+  return [resolved.locale, 'api', ...(resolved.slug ?? [])]
+}
+
 /** Keep managed routes dynamic even before a secondary locale or spec exists. */
 export async function generateStaticParams() {
   const i18n = getRepositoryI18nConfig()
@@ -60,12 +69,14 @@ export async function generateStaticParams() {
 export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
   const resolved = await params
   const i18n = await getEffectiveI18nConfig()
-  if (!isValidSecondaryLocale(resolved.locale, i18n)) return {}
+  if (!isValidSecondaryLocale(resolved.locale, i18n)) {
+    return generateDocsMetadata({ params: Promise.resolve({ slug: documentSlug(resolved) }) })
+  }
   const siteUrl = getSiteUrl()
   const node = await getApiOperationBySlug(resolved.slug)
   const specUrl = node ? getOpenApiSpecUrl(siteUrl, node.operation.specId) : null
   if (!node) {
-    return generateDocsMetadata({ params: Promise.resolve({ slug: [resolved.locale, 'api', ...(resolved.slug ?? [])] }) })
+    return generateDocsMetadata({ params: Promise.resolve({ slug: documentSlug(resolved) }) })
   }
   if (!canReaderSeeUnmarkedContent(await getReaderContext())) return {}
   const title = node.operation.title
@@ -118,7 +129,7 @@ export default async function LocaleApiReferencePage({ params }: PageProps) {
   const reader = await getReaderContext()
 
   if (!isValidSecondaryLocale(resolved.locale, i18n)) {
-    notFound()
+    return DocsPage({ params: Promise.resolve({ slug: documentSlug(resolved) }) })
   }
 
   if (!resolved.slug?.length) {
@@ -147,7 +158,7 @@ export default async function LocaleApiReferencePage({ params }: PageProps) {
   if (!node) {
     // /{locale}/api/* also belongs to authored MDX; the OpenAPI operation
     // surface only owns slugs present in the spec.
-    return DocsPage({ params: Promise.resolve({ slug: [resolved.locale, 'api', ...resolved.slug] }) })
+    return DocsPage({ params: Promise.resolve({ slug: documentSlug(resolved) }) })
   }
 
   if (!canReaderSeeUnmarkedContent(reader)) denyDocumentAccess(reader, `/${resolved.locale}/api/${resolved.slug.join('/')}`)

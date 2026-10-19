@@ -93,3 +93,15 @@ it('renders authored step anchors on both compilation paths and reserves them fo
   expect(headings(page(content))).toEqual(expected)
   expect(parseMdxContent(source).headings.map(({ id, text, depth }) => ({ id, text, level: depth }))).toEqual(expected)
 })
+
+it('lists a step title with a code span by its plain text, under the id its words would get', async () => {
+  const source = '<Steps titleSize="h3">\n<Step title="Run the CLI `init` command">x</Step>\n<Step title="Create an `actions.ts` file">x</Step>\n</Steps>'
+  const expected = [
+    { id: 'run-the-cli-init-command', text: 'Run the CLI init command', level: 3 },
+    { id: 'create-an-actions-ts-file', text: 'Create an actions.ts file', level: 3 },
+  ]
+  expect(await toc(source)).toEqual(expected)
+  expect(parseMdxContent(source).headings.map(({ id, text, depth }) => ({ id, text, level: depth }))).toEqual(expected)
+  const { content } = await interpretMDX({ source, components: builtinMdxComponents })
+  expect(headings(page(content))).toEqual(expected)
+})

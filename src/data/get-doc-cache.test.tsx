@@ -27,6 +27,10 @@ function interpreted(text = 'Exact {code} <bytes>') {
 }
 
 describe('bounded managed rendered documents', () => {
+  it('preserves operation description placement when managed content is interpreted', async () => {
+    vi.mocked(interpretMDX).mockResolvedValue({ content: null, frontmatter: { title: 'Create a key', description: 'Short metadata summary.', descriptionPlacement: 'operation' } })
+    expect(await getDocFromParams(['managed-endpoint-summary'])).toMatchObject({ description: 'Short metadata summary.', descriptionPlacement: 'operation' })
+  })
   it('coalesces concurrent compilation and evicts old rendered entries after the entry budget', async () => {
     vi.stubEnv('NODE_ENV', 'production')
     vi.mocked(interpretMDX).mockReset().mockResolvedValue(interpreted())

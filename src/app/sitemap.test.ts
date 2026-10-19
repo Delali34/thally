@@ -2,11 +2,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({ translated: vi.fn() }))
-const docs = vi.hoisted(() => ({ sitemap: undefined as 'navigable' | undefined }))
+const docs = vi.hoisted(() => ({ sitemap: undefined as 'navigable' | undefined, introductionHref: '/' }))
 vi.mock('@/data/docs', () => ({
   loadDocEntries: async () => [
     { id: 'guide', slug: ['guide'], href: '/guide', hidden: false, noindex: false, lastUpdated: '2026-01-01' },
-    { id: 'introduction', slug: [], href: '/', hidden: false, noindex: false },
+    { id: 'introduction', slug: [], href: docs.introductionHref, hidden: false, noindex: false },
     { id: 'orphan', slug: ['orphan'], href: '/orphan', hidden: false, noindex: false },
   ],
   canReaderViewPage: async () => true,
@@ -28,6 +28,7 @@ import sitemap from './sitemap'
 beforeEach(() => {
   mocks.translated.mockReset()
   docs.sitemap = undefined
+  docs.introductionHref = '/'
 })
 
 describe('static sitemap entries', () => {
@@ -46,9 +47,13 @@ describe('navigable-only sitemap', () => {
     const urls = await sitemap()
     expect(urls.some((entry) => entry.url.endsWith('/orphan'))).toBe(false)
     expect(urls.some((entry) => entry.url.endsWith('/guide'))).toBe(true)
-    // `/` redirects to `/introduction` on a migrated Mintlify site, so that is the URL to list.
-    expect(urls.some((entry) => entry.url === 'https://docs.example.com/introduction')).toBe(true)
-    expect(urls.some((entry) => entry.url === 'https://docs.example.com/')).toBe(false)
+    // The introduction page is served at `/` unless the site redirects `/` to it.
+    expect(urls.some((entry) => entry.url === 'https://docs.example.com/')).toBe(true)
+    expect(urls.some((entry) => entry.url === 'https://docs.example.com/introduction')).toBe(false)
+    docs.introductionHref = '/introduction'
+    const redirected = await sitemap()
+    expect(redirected.some((entry) => entry.url === 'https://docs.example.com/introduction')).toBe(true)
+    expect(redirected.some((entry) => entry.url === 'https://docs.example.com/')).toBe(false)
     // Mintlify's sitemap lists documentation pages only, not the agent text files.
     expect(urls.some((entry) => /\/(llms|ai)\.txt$/.test(entry.url))).toBe(false)
   })
