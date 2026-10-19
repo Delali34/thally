@@ -1,10 +1,12 @@
 /**
- * Passive navigation evidence for URL imports. Mintlify sends one expanded tab
- * in React Flight and entry-page placeholders for its siblings. Read only JSON
- * records, then merge observations without losing authored occurrence order.
+ * Passive navigation evidence for URL imports. Preserve semantic DOM groups,
+ * accessible icon links, declared Mintlify collections and root-owned Fumadocs
+ * sidebar menus. Inert Flight data is never executed, and article TOCs or
+ * example data cannot supply global navigation. Merge authored occurrences in order.
  */
 import { load } from 'cheerio'
 import { inferUrlMigrationScope } from './url-scope.js'
+import { readMigrationFlightDocument } from './url-flight-content.js'
 import type { MigrationCapture, MigrationNavigationOccurrence } from './url-run-types.js'
 
 interface SourceNode extends MigrationNavigationOccurrence {
@@ -221,6 +223,73 @@ function resolveNavigation(nodes: Array<SourceNode>, base: URL): Array<SourceNod
   return walk(nodes)
 }
 
+/** Recover the literal collection menu only from the rendered sidebar's owned tree. */
+function sidebarCollectionMenus($: ReturnType<typeof load>, root: ReturnType<ReturnType<typeof load>>, base: URL, existing: Array<SourceNode>): Array<SourceNode> {
+  const document = readMigrationFlightDocument($)
+  if (!document) return []
+  const resolve = (input: unknown): unknown => {
+    let value = input
+    const seen = new Set<string>()
+    for (let depth = 0; depth < 32 && typeof value === 'string'; depth++) {
+      if (value === '$undefined') return undefined
+      if (value.startsWith('$$')) return value.slice(1)
+      const reference = /^\$L?([a-f\d]+)(?::(.+))?$/i.exec(value)
+      if (!reference) return value
+      if (seen.has(value) || !document.records.has(reference[1])) return undefined
+      seen.add(value)
+      value = document.records.get(reference[1])
+      for (const key of reference[2]?.split(':') ?? []) {
+        // Flight exposes React element properties by semantic name even
+        // though its inert wire value is the four-item element tuple.
+        if (key === 'props' && Array.isArray(value) && value[0] === '$') { value = value[3]; continue }
+        if (!value || typeof value !== 'object' || !Object.hasOwn(value, key)) return undefined
+        value = (value as Record<string, unknown>)[key]
+      }
+    }
+    return typeof value === 'string' && /^\$L?[a-f\d]+(?::|$)/i.test(value) ? undefined : value
+  }
+  const known = new Set<string>()
+  const remember = (nodes: Array<SourceNode>): void => {
+    for (const node of nodes) { if (node.url) known.add(node.url); remember(node.children ?? []) }
+  }
+  remember(existing)
+  const result: Array<SourceNode> = []
+  let visited = 0
+  const active = new Set<unknown>()
+  const visit = (input: unknown, inSidebar: boolean, inHeader: boolean, inArticle: boolean, depth: number): void => {
+    if (++visited > 100_000 || depth > 96 || active.has(input)) return
+    const value = resolve(input)
+    if (!value || typeof value !== 'object') return
+    active.add(input)
+    if (Array.isArray(value)) {
+      if (value[0] === '$' && object(value[3])) {
+        const componentId = typeof value[1] === 'string' ? /^\$L([a-f\d]+)$/i.exec(value[1])?.[1] : undefined
+        const component = componentId ? document.modules.get(componentId) : value[1]
+        const article = inArticle || ['PageArticle', 'article', 'pre', 'code'].includes(String(component))
+        const sidebar = !article && (inSidebar || component === 'Sidebar')
+        const header = sidebar && (inHeader || component === 'SidebarHeader')
+        if (header && component === 'RootToggle') {
+          const options = resolve(value[3].options)
+          if (Array.isArray(options) && options.length >= 2 && options.length <= 100) {
+            const entries = options.map(resolve).map(option => object(option) ? { label: text(resolve(option.title)), url: target(resolve(option.url), base) } : {})
+            const hasVisibleChoice = entries.some(entry => entry.label && root.find('button[aria-haspopup]').toArray().some(button => [button, ...$(button).find('*').toArray()].some(node => $(node).text().trim() === entry.label)))
+            if (hasVisibleChoice && entries.every(entry => entry.label && entry.url)) for (const entry of entries) {
+              // The active collection's landing page already occurs in the
+              // sidebar. Keep additional menu destinations without inventing a
+              // second title for that article or flattening its authored groups.
+              if (!known.has(entry.url!)) { known.add(entry.url!); result.push({ label: entry.label!, url: entry.url! }) }
+            }
+          }
+        }
+        visit(value[3].children, sidebar, header, article, depth + 1)
+      } else for (const child of value) visit(child, inSidebar, inHeader, inArticle, depth + 1)
+    } else for (const child of Object.values(value)) visit(child, inSidebar, inHeader, inArticle, depth + 1)
+    active.delete(input)
+  }
+  visit(document.records.get('0'), false, false, false, 0)
+  return visited > 100_000 ? [] : result
+}
+
 /** Extract explicit capture navigation, passive Mintlify data, or a DOM sidebar. */
 export function extractSourceNavigation(capture: MigrationCapture, selectedScope?: string): Array<MigrationNavigationOccurrence> {
   if (capture.navigation) return resolveNavigation(capture.navigation, capture.finalUrl)
@@ -229,33 +298,108 @@ export function extractSourceNavigation(capture: MigrationCapture, selectedScope
   if (mintlify.length) return mintlify
   const $ = load(capture.body)
   const candidates = ['.theme-doc-sidebar-menu,[aria-label*="sidebar" i]', 'aside', '[role="navigation"],nav']
-  const root = candidates.map((selector) => $(selector).filter((_index, node) => $(node).find('a[href]').length > 0 && $(node).closest('header').length === 0).first()).find((candidate) => candidate.length)
+  const root = candidates.map((selector) => $(selector).filter((_index, node) => {
+    const item = $(node)
+    if (!item.find('a[href]').length || item.closest('header,article').length) return false
+    const current = new URL(capture.finalUrl)
+    const internal = item.find('a[href]').toArray().flatMap(link => {
+      const reference = target($(link).attr('href'), capture.finalUrl)
+      if (!reference) return []
+      const url = new URL(reference)
+      return url.origin === current.origin ? [url] : []
+    })
+    // An article's sibling TOC/author aside is not a site sidebar. Its same-
+    // origin links all point back into this one article; breadcrumbs inside an
+    // article were rejected above. Real query-selected page targets stay exact.
+    if (!internal.length) {
+      if (item.is('nav,[role="navigation"]')) return true
+      const prose = item.clone(); prose.find('a,svg,img,script,style').remove()
+      return !prose.text().trim()
+    }
+    return internal.every(url => !url.hash)
+      || internal.some(url => url.pathname !== current.pathname || (!url.hash && url.search !== current.search))
+  }).first()).find((candidate) => candidate.length)
   if (!root) return []
   let count = 0
+  const labelOf = (item: ReturnType<typeof $>): string => {
+    const visible = item.text().replace(/\s+/g, ' ').trim()
+    if (visible) return visible
+    if (item.is('a[href]')) {
+      const url = target(item.attr('href'), capture.finalUrl)
+      if (url && root.find('a[href]').toArray().some(node => node !== item[0] && $(node).text().trim() && target($(node).attr('href'), capture.finalUrl) === url)) return ''
+    }
+    return text(item.attr('aria-label')) || text(item.attr('title')) || text(item.find('img[alt]').first().attr('alt')) || ''
+  }
   const walk = (element: Parameters<typeof $>[0], excluded?: unknown, depth = 0): Array<SourceNode> => {
     if (depth > MAX_DEPTH) throw new Error('Source navigation exceeds its safety bound.')
     const result: Array<SourceNode> = []
+    const siblings = $(element).children().toArray().filter(node => node !== excluded)
+    if (siblings.length > MAX_NODES) throw new Error('Source navigation exceeds its safety bound.')
+    // Some sidebars use plain p/span labels in a single sibling stream. A
+    // repeated label→links structure proves grouping; an isolated paragraph or
+    // arbitrary wrapper text does not. Refuse ambiguous/search/marketing nodes
+    // rather than letting a label absorb unrelated controls or prose.
+    const marker = (node: typeof siblings[number]): boolean => {
+      const item = $(node)
+      return item.is('p,span') && Boolean(item.text().trim()) && item.text().length <= 512
+        && item.find('*').toArray().every(child => $(child).is('span,strong,em,b,i,small,code,br'))
+        && !item.find('a,button,input,textarea,select,form,div,p,section,article').length
+        && !item.closest('form,[role="search"],[aria-hidden="true"]').length
+    }
+    const markerPositions = siblings.flatMap((node, index) => marker(node) ? [index] : [])
+    const markers = markerPositions.map(index => siblings[index])
+    const isLinkContainer = (node: typeof siblings[number]): boolean => {
+      const item = $(node)
+      if (item.is('a[href]')) return true
+      if (!item.is('div,li,ul,ol,details')) return false
+      if (!item.find('a[href]').length || item.find('form,input,textarea,select,[role="search"]').length) return false
+      const remainder = item.clone()
+      remainder.find('a[href],svg,img').remove()
+      return !remainder.text().trim() && !remainder.find('button,form,input,textarea,select,section,article').length
+    }
+    const groupedMarkers = new Set<typeof siblings[number]>()
+    if (markers.length >= 2 && markers.every(node => node.tagName === markers[0].tagName)) {
+      let isComplete = true
+      for (let index = 0; index < markers.length; index++) {
+        const start = markerPositions[index] + 1
+        const end = index + 1 < markers.length ? markerPositions[index + 1] : siblings.length
+        const following = siblings.slice(start, end).filter(node => $(node).text().trim() || $(node).find('a[href],button,input,textarea,select,form,img').length)
+        if (!following.length || !following.every(isLinkContainer)) { isComplete = false; break }
+      }
+      if (isComplete) markers.forEach(node => groupedMarkers.add(node))
+    }
+    let currentGroup: SourceNode | undefined
+    const append = (nodes: Array<SourceNode>): void => {
+      if (currentGroup) currentGroup.children!.push(...nodes)
+      else result.push(...nodes)
+    }
     $(element).children().each((_index, node) => {
       if (++count > MAX_NODES) throw new Error('Source navigation exceeds its safety bound.')
       if (node === excluded) return
       const item = $(node)
-      if (item.is('a[href]')) {
-        const label = item.text().replace(/\s+/g, ' ').trim()
+      if (groupedMarkers.has(node)) {
+        currentGroup = { kind: 'group', label: item.text().replace(/\s+/g, ' ').trim(), children: [] }
+        result.push(currentGroup)
+      } else if (item.is('a[href]')) {
+        const label = labelOf(item)
         const url = target(item.attr('href'), capture.finalUrl)
-        if (label && url) result.push({ label, url })
+        if (label && url) append([{ label, url }])
       } else if (item.is('li,details') || item.attr('data-migration-group') !== undefined || item.children('h2,h3,h4,h5,h6').length > 0) {
         const directLink = item.children('a[href]').first()
         const direct = directLink.length ? directLink : item.children('div').children('a[href]').first()
-        const label = direct.text().trim() || item.children('summary,button,span,h2,h3,h4,h5,h6').first().text().trim()
+        const label = labelOf(direct) || labelOf(item.children('summary,button,span,h2,h3,h4,h5,h6').first())
         const children = walk(node, direct[0], depth + 1)
         const url = target(direct.attr('href'), capture.finalUrl)
-        if (label && (url || children.length)) result.push({ label, ...(url ? { url } : {}), ...(children.length ? { children } : {}) })
-        else result.push(...children)
-      } else result.push(...walk(node, excluded, depth + 1))
+        if (label && (url || children.length)) append([{ label, ...(url ? { url } : {}), ...(children.length ? { children } : {}) }])
+        else append(children)
+      } else append(walk(node, excluded, depth + 1))
     })
     return result
   }
-  try { return walk(root) } catch { return [] }
+  try {
+    const nodes = walk(root)
+    return [...nodes, ...sidebarCollectionMenus($, root, capture.finalUrl, nodes)]
+  } catch { return [] }
 }
 
 function placeholder(node: SourceNode): boolean {

@@ -90,10 +90,10 @@ describe('URL import fidelity regressions', () => {
   })
   it.each([false, true])('recovers deferred API fields only from a complete local operation (external ref: %s)', async (externalRef) => {
     const fetched: string[] = []
-    const markdown = '# API\n\n```yaml get /status\nopenapi: 3.0.3\ninfo: {title: Example, version: "1"}\npaths:\n  /status:\n    get:\n      responses:\n        "200":\n          description: Status\n          content:\n            application/json:\n              schema:\n                $ref: "' + (externalRef ? 'https://private.invalid/schema' : '#/components/schemas/Status') + '"\ncomponents:\n  schemas:\n    Status:\n      type: object\n      properties:\n        ready: {type: boolean, description: Complete nested field}\n```'
+    const markdown = '# API\n\n```yaml get /status\nopenapi: 3.0.3\ninfo: {title: Example, version: "1"}\npaths:\n  /status:\n    get:\n      responses:\n        "200":\n          description: Status\n          content:\n            application/json:\n              schema:\n                $ref: "' + (externalRef ? 'https://private.invalid/schema' : '#/components/schemas/Status') + '"\ncomponents:\n  schemas:\n    Status:\n      type: object\n      properties:\n        ready: {type: object, description: Complete nested field, properties: {value: {type: boolean}}}\n```'
     const result = await runUrlMigration({ sourceUrl: 'https://docs.test/api', captureProvider: { capture: async ({ url }) => {
       fetched.push(url.href)
-      if (url.pathname === '/api') return response('/api', html('API', '<pre><code>GET /status</code></pre><details class="expandable"><summary data-component-part="expandable-button">Attributes</summary></details>', '<link rel="alternate" type="text/markdown" href="/api.md">'))
+      if (url.pathname === '/api') return response('/api', html('API', '<pre><code>GET /status</code></pre><div id="api-playground-2-operation-page"><div class="method-pill">GET</div><div data-component-part="scroll-area-content">/status</div><section class="api-section"><div class="api-section-heading"><button aria-haspopup="menu">200</button><span>application/json</span></div><div class="object-param-field"><p data-component-part="field-name">ready</p><details class="expandable" data-component-part="expandable"><summary data-component-part="expandable-button" aria-controls="ready-panel" aria-expanded="false"><p>Attributes</p></summary><div id="ready-panel" data-component-part="expandable-content"></div></details></div></section></div>', '<link rel="alternate" type="text/markdown" href="/api.md">'))
       if (url.pathname === '/api.md') return response('/api.md', markdown, 'text/markdown')
       throw new Error('Missing source')
     } } })
@@ -123,6 +123,17 @@ describe('URL import fidelity regressions', () => {
     expect(recaptured.validation.status).toBe('partial')
     expect(recaptured.validation.issues).toContainEqual(expect.objectContaining({ code: 'unsupported-component' }))
     expect(recaptured.bundle.assets.some(asset => asset.path.startsWith('openapi/'))).toBe(false)
+  })
+  it.each([false, true])('does not cover unrelated empty article details with a registered API operation (ARIA: %s)', async aria => {
+    const schema = { openapi: '3.0.3', info: { title: 'Example', version: '1' }, paths: { '/status': { get: { responses: { '200': { description: 'Status', content: { 'application/json': { schema: { type: 'object', properties: { ready: { type: 'object', properties: { value: { type: 'boolean' } } } } } } } } } } } } }
+    const result = await runUrlMigration({ sourceUrl: 'https://docs.test/api', captureProvider: { capture: async ({ url }) => {
+      if (url.pathname === '/api.md') return response('/api.md', '# API\n\n```json GET /status\n' + JSON.stringify(schema) + '\n```', 'text/markdown')
+      if (url.pathname === '/api') return response('/api', html('API', '<pre><code>GET /status</code></pre><details class="expandable" data-component-part="expandable"><summary data-component-part="expandable-button"' + (aria ? ' aria-expanded="false" aria-controls="unknown-panel"' : '') + '><p>Unrelated authored alternative</p></summary><div id="unknown-panel" data-component-part="expandable-content"></div></details>', '<link rel="alternate" type="text/markdown" href="/api.md">'))
+      throw new Error('Missing source')
+    } } })
+    expect(result.bundle.pages[0].openapi).toBeTruthy()
+    expect(result.validation.status).toBe('partial')
+    expect(result.validation.issues).toContainEqual(expect.objectContaining({ code: 'unsupported-component' }))
   })
   it('falls back to the page for proven source defects while blocking anchors lost during conversion', async () => {
     const run = await runUrlMigration({ sourceUrl: 'https://docs.test/guide', captureProvider: { capture: async ({ url }) => {

@@ -17,8 +17,10 @@ import { cloneUrlMigrationCheckpoint } from './url-journal-clone.js'
 import { extractSourceNavigation, mergeSourceNavigation } from './url-navigation.js'
 import { migrationImageAttribute, migrationImageCandidates, renderMigrationSrcset } from './url-images.js'
 import { projectMigrationMedia } from './url-media.js'
+import { declaredMigrationArticleUrl, isMigrationUtilityUrl, migrationSectionQueryCandidate, observedMigrationArticleIdentity } from './url-identity.js'
 import { inferUrlMigrationScope } from './url-scope.js'
-import { apiSchemaTabGroups } from './url-api-schema-controls.js'
+import { apiOperationCodeControls, apiSchemaDisclosureGroups, apiSchemaTabGroups } from './url-api-schema-controls.js'
+import { projectProtectedEmails } from './url-static-content.js'
 import { defaultMigrationFetcher, extractEmbeddedOpenApi, htmlPage, markdownPage, migrationHtmlArticle, sanitizeRemoteMarkdown, validateMigrationUrl } from './url.js'
 import type { MigrationBundle, MigrationFetchResponse, MigrationNavigationGroup, MigrationPage } from './types.js'
 import type {
@@ -29,7 +31,7 @@ import type {
 
 // Conversion and navigation evidence changed together. Older journals must be
 // recaptured rather than reusing page hashes produced by the previous rules.
-const CONVERTER_VERSION = 'url-evidence-v5'
+const CONVERTER_VERSION = 'url-evidence-v6'
 const parser = unified().use(remarkParse).use(remarkMdx)
 const ACCEPT = 'text/markdown,text/html,application/xhtml+xml;q=0.9'
 const MAX_RESPONSE_BYTES = 8_000_000
@@ -152,7 +154,7 @@ function evidenceOf(capture: MigrationCapture): MigrationEvidence {
     sha256: hash(capture.body), byteLength: Buffer.byteLength(capture.body), finalUrl: capture.finalUrl.toString(), contentType: capture.contentType,
     ...(capture.artifactRef ? { artifactRef: capture.artifactRef } : {}),
     states: (capture.states ?? []).map((state) => ({ id: state.id, label: state.label, sha256: hash(state.response.body) })),
-    ...technical, links: linksOf(capture),
+    ...technical, links: linksOf(capture), articleIdentity: observedMigrationArticleIdentity(capture),
   }
 }
 
@@ -178,21 +180,6 @@ function idForUrl(url: URL, scope: string): string | null {
   return id && `${id}${url.search ? `--${hash(url.search).slice(0, 12)}` : ''}`
 }
 
-/** A declared directory index may share its route; query-selected versions never collapse. */
-function articleIdentity(document: MigrationFetchResponse): URL {
-  if (!/html/i.test(document.contentType)) return document.finalUrl
-  const $ = load(document.body)
-  const reference = $('link[rel="canonical"][href]').first().attr('href')
-  if (!reference) return document.finalUrl
-  try {
-    const target = new URL(reference, document.finalUrl)
-    const source = document.finalUrl
-    const directory = (path: string) => path.replace(/\/index\/?$/i, '').replace(/\/$/, '')
-    return target.origin === source.origin && !target.username && !target.password
-      && target.search === source.search && directory(target.pathname) === directory(source.pathname)
-      ? target : source
-  } catch { return document.finalUrl }
-}
 
 function convert(document: MigrationFetchResponse, id: string): MigrationPage | null {
   if (/html/i.test(document.contentType)) {
@@ -254,30 +241,67 @@ function assetReferences(capture: MigrationCapture): Array<string> {
   ].filter(Boolean)
 }
 
-function unresolvedStaticControls(body: string, hasApiSchema = false, coveredSchemaGroups: number[] = []): boolean {
+function unresolvedStaticControls(body: string, coveredSchemaGroups: number[] = [], coveredSchemaDisclosures: number[] = [], coveredCodeControls: number[] = []): boolean {
   const { $, root } = migrationHtmlArticle(body)
+  root.find('[aria-expanded]').each((index, node) => { if (coveredCodeControls.includes(index)) $(node).removeAttr('aria-expanded') })
   // Coverage belongs to an exact operation and source group. Merely recovering
   // some API schema must never excuse unrelated, deferred article tabs.
   root.find('[role="tablist"],[data-component-part="tabs-list"]').each((index, node) => {
     if (coveredSchemaGroups.includes(index)) $(node).remove()
   })
+  root.find('details').each((index, node) => { if (coveredSchemaDisclosures.includes(index)) $(node).remove() })
   const tabs = root.find('[role="tab"]').toArray()
+  const idCounts = new Map<string, number>()
+  root.find('[id]').each((_index, node) => {
+    const id = $(node).attr('id')!
+    idCounts.set(id, (idCounts.get(id) ?? 0) + 1)
+  })
   for (const tab of tabs) {
+    const controlId = $(tab).attr('id')
+    if (controlId && idCounts.get(controlId) !== 1) return true
     const controls = $(tab).attr('aria-controls')
-    const group = $(tab).closest('[role="tablist"]')
+    const group = $(tab).closest('[role="tablist"],ul.tabs')
     const container = group.closest('.code-group,.tabs-container,.tabs.tab-container')
     // Positional panels belong to their own control group. A global index can
     // mistake a deferred schema panel for a fully captured code example.
-    const peers = group.find('[role="tab"]').toArray().filter(node => $(node).closest('[role="tablist"]')[0] === group[0])
+    const peers = group.find('[role="tab"]').toArray().filter(node => $(node).closest('[role="tablist"],ul.tabs')[0] === group[0])
     const localPanels = container.find('[role="tabpanel"]').toArray().filter(node => $(node).closest('.code-group,.tabs-container,.tabs.tab-container')[0] === container[0])
-    const owners = container.find('[role="tablist"]').toArray().filter(node => $(node).closest('.code-group,.tabs-container,.tabs.tab-container')[0] === container[0])
+    const owners = container.find('[role="tablist"],ul.tabs').toArray().filter(node => $(node).closest('.code-group,.tabs-container,.tabs.tab-container')[0] === container[0])
     const panels = controls ? root.find('[id]').filter((_index, node) => $(node).attr('id') === controls)
       : owners.length === 1 && peers.length === localPanels.length ? $(localPanels).eq(peers.indexOf(tab)) : $([])
     if (panels.length !== 1 || (!panels.text().trim() && !panels.find('pre,img,table,svg').length)
-      || panels.find('[aria-busy="true"],[role="progressbar"]').length) return true
+      || panels.is('[aria-busy="true"],[role="progressbar"]') || panels.find('[aria-busy="true"],[role="progressbar"]').length) return true
+    const labels = panels.attr('aria-labelledby')?.trim().split(/\s+/)
+    if (labels && (!controlId || !labels.includes(controlId))) return true
+    if (controls && !labels && (container.length
+      ? panels.closest('.code-group,.tabs-container,.tabs.tab-container')[0] !== container[0]
+      : panels.parent()[0] !== group.parent()[0])) return true
   }
+  const isCapturedImageZoom = (node: Parameters<typeof $>[0], depth = 0): boolean => {
+    if (depth > 8) return false
+    const control = $(node), image = control.prev('span.zoom-image-trigger[data-ramka-trigger]')
+    return control.is('button[data-ramka-trigger][aria-haspopup="dialog"][aria-label]')
+      && Boolean(control.attr('aria-label')?.trim()) && !control.attr('aria-controls') && !control.text().trim()
+      && image.find('img[src]').length === 1 && !image.text().trim()
+      && !image.find('form,iframe,object,embed,canvas').length
+      && image.find('button').toArray().every(button => isCapturedImageZoom(button, depth + 1))
+  }
+  // Complete captured disclosures lose their live ARIA attributes only after
+  // the shared projector proves content and ownership. A surviving control is
+  // unsupported, even when an unrelated populated region could satisfy a
+  // weaker second interpretation of the capture.
+  if (root.find('[aria-expanded]').toArray().some(node => {
+    const control = $(node)
+    if (control.attr('role') === 'tab') return false
+    // Publisher page actions are icon-only chrome beside the existing copy
+    // action in the page header. Their menu does not own article alternatives.
+    const actions = control.parent('[id="page-context-menu"]')
+    if (control.is('button[aria-haspopup="menu"]') && !control.attr('aria-controls') && !control.text().trim()
+      && actions.closest('header').length && actions.children('button#page-context-menu-button').length === 1) return false
+    if (isCapturedImageZoom(node)) return false
+    return true
+  })) return true
   return root.find('details:not([open])').toArray().some((node) => {
-    if (hasApiSchema && $(node).is('.expandable') && $(node).children('summary[data-component-part="expandable-button"]').length) return false
     const clone = $(node).clone(); clone.children('summary').remove()
     return !clone.text().trim() && !clone.find('pre,img,table,svg').length
   })
@@ -328,6 +352,7 @@ function validRecord(record: UrlMigrationRecord): boolean {
       && record.apiSpecification.path === `openapi/migration-${record.apiSpecification.sha256}.json`
       && hash(canonicalJson(record.apiSpecification.document)) === record.apiSpecification.sha256))
     && record.assets?.every((asset) => /^migration-assets\/[a-f0-9]{64}\.[a-z0-9]+$/.test(asset.path)
+      && (!asset.derivedFromSha256 || /^[a-f0-9]{64}$/.test(asset.derivedFromSha256))
       && hash(Buffer.from(asset.base64, 'base64')) === asset.sha256))
 }
 
@@ -549,14 +574,14 @@ export function validateUrlMigration(checkpoint: UrlMigrationCheckpoint, cancell
       let link: URL
       try { link = new URL(value, record.evidence.finalUrl) } catch { continue }
       if (!inScope(link, source, checkpoint.scopePath)) continue
-      if (isDiscoveryIndex(link, source)) continue
+      if (isDiscoveryIndex(link, source) || isMigrationUtilityUrl(link)) continue
       if (/\.(?:png|jpe?g|gif|svg|webp|avif|pdf|zip|mp4|webm|css|js|json|ya?ml)$/i.test(link.pathname)) continue
       const destination = resolve(link.toString())
       if (!destination || !['imported', 'excluded'].includes(destination.outcome)) {
         issues.push({ code: 'missing-page', source: record.url, message: `Unresolved internal destination: ${link}` })
-      } else if (link.hash && destination.outcome === 'imported') {
-        let anchor = link.hash.slice(1)
-        try { anchor = decodeURIComponent(anchor) } catch { /* Invalid encoding remains a literal anchor. */ }
+      } else if ((link.hash || records.get(canonical(link.href, checkpoint.sourceUrl) ?? '')?.aliasAnchor) && destination.outcome === 'imported') {
+        let anchor = link.hash.slice(1) || records.get(canonical(link.href, checkpoint.sourceUrl) ?? '')!.aliasAnchor!
+        if (link.hash) try { anchor = decodeURIComponent(anchor) } catch { /* Invalid encoding remains a literal anchor. */ }
         if (!destination.evidence?.anchors.includes(anchor)) {
           // This exact href was already broken in the captured source. Do not
           // invent anchors or mislabel it as lost conversion content.
@@ -576,7 +601,7 @@ export function validateUrlMigration(checkpoint: UrlMigrationCheckpoint, cancell
       const locale = node.locale ? canonicalLanguage(node.locale) : parentLocale
       if (node.url) {
         const url = new URL(node.url, source)
-        if (inScope(url, source, checkpoint.scopePath)) {
+        if (inScope(url, source, checkpoint.scopePath) && !isMigrationUtilityUrl(url)) {
           const destination = resolve(url.toString())
           if (destination?.outcome === 'excluded' && destination.redirectTo) continue
           const page = destination?.page
@@ -646,7 +671,7 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
     if (!validRecord(record) || (record.outcome === 'failed' && options.retryFailed !== false)
       || (record.outcome !== 'pending' && options.reconcile && !await options.reconcile(record))) {
       record.outcome = 'pending'; delete record.page; delete record.pageSha256; delete record.evidence; delete record.assets
-      delete record.apiSpecification; delete record.version; delete record.issues; delete record.warnings; delete record.redirectTo; delete record.reason; delete record.aliasOf
+      delete record.apiSpecification; delete record.version; delete record.issues; delete record.warnings; delete record.redirectTo; delete record.reason; delete record.aliasOf; delete record.aliasAnchor
     }
     if (record.page && pageIdFromReference(record.page.id, true) !== record.page.id) throw new Error('Checkpoint contains an unsafe page path.')
     records.set(record.url, record)
@@ -659,7 +684,8 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
     if (!url || (!inScope(new URL(url), source, scopePath) && !isDiscoveryIndex(new URL(url), source))) return
     // Machine indexes also advertise schemas/package files. They are linked
     // resources, not article inventory; API schemas have a separate proven path.
-    const isAttachment = discoveredBy !== 'submitted' && /\.(?:json|ya?ml)$/i.test(new URL(url).pathname)
+    const isUtility = isMigrationUtilityUrl(new URL(url))
+    const isAttachment = isUtility || (discoveredBy !== 'submitted' && /\.(?:json|ya?ml)$/i.test(new URL(url).pathname))
     const existing = records.get(url)
     if (existing) {
       if (!existing.discoveredBy.includes(discoveredBy)) { existing.discoveredBy.push(discoveredBy); changed.push(existing) }
@@ -667,7 +693,7 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
     }
     if (records.size >= MAX_RECORDS) throw new Error('Discovered URL inventory exceeded the 100000 URL safety bound.')
     const record: UrlMigrationRecord = { url, discoveredBy: [discoveredBy], outcome: isAttachment ? 'excluded' : 'pending',
-      ...(isAttachment ? { reason: 'Machine-readable attachment, not an authored article.' } : {}) }
+      ...(isAttachment ? { reason: isUtility ? 'Recognized provider utility endpoint, not an authored article.' : 'Machine-readable attachment, not an authored article.' } : {}) }
     records.set(url, record); checkpoint.records.push(record); if (!isAttachment) pending.push(record); changed.push(record)
   }
   enqueue(sourceUrl, sourceUrl, 'submitted')
@@ -712,12 +738,31 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
   // identical binary payload. Normalize before a cached promise fulfills:
   // replacing only the local awaited value leaves the original Buffer alive.
   const assetBytes = new Map<string, Uint8Array>()
-  const retainAsset = (asset: MigrationCapturedAsset): MigrationCapturedAsset => {
+  const rasterizedSvgs = new Map<string, Promise<MigrationCapturedAsset>>()
+  const retainAsset = async (original: MigrationCapturedAsset): Promise<MigrationCapturedAsset> => {
+    let asset = { ...original }
+    delete asset.derivedFromSha256
     if (asset.unavailable) {
       if ([404, 410].includes(asset.unavailable.status) && asset.content.byteLength === 0) return asset
       throw new Error('Invalid source asset availability evidence.')
     }
-    if (!acceptedAsset(asset)) throw new Error('Asset MIME/signature is unsupported or unsafe to serve.')
+    if (!acceptedAsset(asset)) {
+      if (asset.content.byteLength > MAX_ASSET_BYTES || asset.contentType.split(';', 1)[0].trim().toLowerCase() !== 'image/svg+xml'
+        || !options.rasterizeSvg) throw new Error('Asset MIME/signature is unsupported or unsafe to serve.')
+      const sourceSha256 = hash(asset.content)
+      let rendering = rasterizedSvgs.get(sourceSha256)
+      if (!rendering) {
+        // The host owns the offline execution boundary. This engine accepts
+        // only bounded PNG bytes back, never a relaxed SVG safety policy.
+        rendering = options.rasterizeSvg({ ...asset, content: Buffer.from(asset.content) }, options.signal).then(rendered => {
+          if (rendered.unavailable || rendered.contentType.split(';', 1)[0].trim().toLowerCase() !== 'image/png'
+            || acceptedAsset(rendered) !== 'png') throw new Error('Trusted SVG renderer did not return a bounded PNG image.')
+          return { ...rendered, derivedFromSha256: sourceSha256 }
+        })
+        rasterizedSvgs.set(sourceSha256, rendering)
+      }
+      asset = { ...await rendering, url: original.url }
+    }
     const sha256 = hash(asset.content)
     // Own the retained bytes: adapters may recycle their capture buffers after
     // returning them, while checkpoint hashes must stay bound to this snapshot.
@@ -736,6 +781,27 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
   let totalBytes = checkpoint.records.reduce((sum, record) => sum + (record.evidence?.byteLength ?? 0), 0)
     + [...assetPayloads.values()].reduce((sum, asset) => sum + Buffer.byteLength(asset.base64, 'base64'), 0)
   let budgetExhausted = false
+  // An exact capture match avoids reparsing large identical query permalinks. The
+  // signature covers complete bytes and host-supplied article state/metadata;
+  // URL identity still requires the separately proven exact section candidate.
+  const exactCaptures = new Map<string, string>()
+  const exactCaptureKey = (document: MigrationCapture): string => {
+    let body = document.body
+    if (body.includes('data-cfemail')) {
+      // This provider encodes the same literal with a fresh XOR key per read.
+      // Normalize only after the shared, bounded decoder proves the actual
+      // email. Every other DOM attribute, text byte and inert script remains.
+      const $ = load(body)
+      projectProtectedEmails($, $.root())
+      body = $.html()
+    }
+    return hash(canonicalJson([
+    hash(body), document.contentType, document.status, document.locale, document.version,
+    document.headers?.['content-language'], document.navigation,
+    (document.states ?? []).map(state => [state.id, state.label, state.response.finalUrl.href, state.response.contentType, state.response.status, hash(state.response.body)]),
+    (document.assets ?? []).map(asset => [asset.url, asset.contentType, asset.unavailable, hash(asset.content)]),
+    ]))
+  }
   let cursor = 0
   const flush = async (): Promise<void> => {
     const distinct = [...new Map(changed.map((record) => [record.url, record])).values()]
@@ -749,6 +815,7 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
     let claimedId: string | undefined
     let claimedFinal: string | undefined
     let markdownRepresentation: string | undefined
+    let exactKey: string | undefined
     try {
       delete record.reason
       if (/\/llms-full\.txt$/i.test(new URL(record.url).pathname)) {
@@ -772,7 +839,32 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
         throw new Error('Capture returned an unresolved redirect.')
       }
       if (Buffer.byteLength(document.body) > MAX_RESPONSE_BYTES) throw new Error('Captured response exceeds the 8 MB safety bound.')
-      const identity = articleIdentity(document)
+      if ((document.states?.length ?? 0) > 64 || (document.assets?.length ?? 0) > 256) throw new Error('Capture contains too many alternative states or assets.')
+      for (const state of document.states ?? []) if (Buffer.byteLength(state.response.body) > MAX_RESPONSE_BYTES) throw new Error('Alternative state exceeds the 8 MB safety bound.')
+      if (/html/i.test(document.contentType) && (!document.status || document.status < 300) && inScope(document.finalUrl, source, scopePath)) {
+        exactKey = exactCaptureKey(document)
+        const peer = resolveMigrationRecord(records, records.get(exactCaptures.get(exactKey) ?? ''))
+        const peerIdentity = peer?.evidence?.articleIdentity
+        if (peer?.outcome === 'imported' && peer.evidence && peerIdentity) {
+          const candidate = migrationSectionQueryCandidate(document.finalUrl, peer.evidence.anchors)
+          if (candidate.sectionAnchor && candidate.canonicalUrl === peerIdentity.canonicalUrl) {
+            const byteLength = Buffer.byteLength(document.body) + (document.states ?? []).reduce((sum, state) => sum + Buffer.byteLength(state.response.body), 0)
+            totalBytes += byteLength
+            if (totalBytes > (options.maxTotalBytes ?? 500_000_000)) { budgetExhausted = true; throw new Error('Migration exceeded its content byte budget.') }
+            record.outcome = 'alias'; record.aliasOf = peer.url; record.aliasAnchor = candidate.sectionAnchor
+            if (peerIdentity.sectionAnchor && peer.aliasAnchor !== peerIdentity.sectionAnchor) {
+              peer.aliasAnchor = peerIdentity.sectionAnchor; changed.push(peer)
+            }
+            record.evidence = { ...peer.evidence, sha256: hash(document.body), byteLength, finalUrl: document.finalUrl.href,
+              ...(document.artifactRef ? { artifactRef: document.artifactRef } : {}),
+              articleIdentity: { ...peerIdentity, sectionAnchor: candidate.sectionAnchor } }
+            if (!document.artifactRef) delete record.evidence.artifactRef
+            enqueueArticleLinks(record.evidence.links, document.finalUrl.href, record.url)
+            return
+          }
+        }
+      }
+      const identity = declaredMigrationArticleUrl(document)
       const final = canonical(identity.toString(), sourceUrl)!
       const role = classifyMigrationResponse(document)
       if (!inScope(document.finalUrl, source, scopePath) && !(role === 'index' && isDiscoveryIndex(document.finalUrl, source))) {
@@ -839,6 +931,9 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
       const page = convert(document, id)
       if (!page) { record.outcome = 'failed'; record.reason = 'Content could not be represented as safe inert MDX.'; return }
       let coveredSchemaGroups: number[] = []
+      let coveredSchemaDisclosures: number[] = []
+      let coveredCodeControls: number[] = []
+      let schemaOperation: { method: string; path: string } | undefined
       const hasSchemaChoice = /html/i.test(document.contentType) && migrationHtmlArticle(document.body).root.find('select[aria-label="Select schema type"],select[aria-label="选择架构类型"]').length > 0
       if (/html/i.test(document.contentType) && markdownRepresentation && (unresolvedStaticControls(document.body) || hasSchemaChoice)) {
         // Lazy API fields cannot be proven from the collapsed DOM. A declared
@@ -857,7 +952,10 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
           const path = `openapi/migration-${sha256}.json`
           record.apiSpecification = { path, sha256, document: fragment.document }
           page.openapi = `${path} ${fragment.method} ${fragment.path}`
+          schemaOperation = fragment
           coveredSchemaGroups = apiSchemaTabGroups(document.body, fragment.document, fragment)
+          coveredSchemaDisclosures = apiSchemaDisclosureGroups(document.body, fragment.document, fragment)
+          coveredCodeControls = apiOperationCodeControls(document.body, fragment.document, fragment)
         }
       }
       const states = document.states ?? []
@@ -881,14 +979,15 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
       record.assets = []
       record.issues = []
       record.warnings = []
-      if (/html/i.test(document.contentType)) {
-        const { $, root } = migrationHtmlArticle(document.body)
+      for (const captured of [document, ...states.map(state => state.response)]) {
+        if (!/html/i.test(captured.contentType)) continue
+        const { $, root } = migrationHtmlArticle(captured.body)
         root.find('nav,footer,aside,.theme-doc-breadcrumbs,.theme-doc-toc-mobile,.table-of-contents,.hash-link').remove()
         root.find('button svg,a.hash-link svg,[aria-hidden="true"] svg,svg[aria-hidden="true"],svg[data-lucide],svg[data-icon]').remove()
         root.find('video,iframe').each((_index, node) => {
           // Only the exact media projection used by conversion proves support.
           // Unknown embeds and custom controls must still block silent loss.
-          if (projectMigrationMedia($.html(node), document.finalUrl) !== null) {
+          if (projectMigrationMedia($.html(node), captured.finalUrl) !== null) {
             record.warnings!.push({ code: 'source-asset-warning', source: record.url, message: 'Embedded video is preserved at its original public media URL; playback depends on the original host.' })
             $(node).remove()
           }
@@ -901,9 +1000,19 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
         }
         const unsupported = [...new Set(root.find('iframe,object,embed,canvas,svg,form,input,textarea,select,math,video,audio').toArray().map((node) => node.tagName))]
         if (unsupported.length) record.issues.push({ code: 'unsupported-component', source: record.url, message: `Rendered content requires explicit review for: ${unsupported.join(', ')}.` })
-        if (!states.length && unresolvedStaticControls(document.body, Boolean(record.apiSpecification), coveredSchemaGroups)) record.issues.push({ code: 'unsupported-component', source: record.url, message: 'An interactive alternative has no complete captured panel or disclosure content.' })
+        const groups = captured === document ? coveredSchemaGroups : record.apiSpecification && schemaOperation ? apiSchemaTabGroups(captured.body, record.apiSpecification.document, schemaOperation) : []
+        const disclosures = captured === document ? coveredSchemaDisclosures : record.apiSpecification && schemaOperation ? apiSchemaDisclosureGroups(captured.body, record.apiSpecification.document, schemaOperation) : []
+        const codeControls = captured === document ? coveredCodeControls : record.apiSpecification && schemaOperation ? apiOperationCodeControls(captured.body, record.apiSpecification.document, schemaOperation) : []
+        if (unresolvedStaticControls(captured.body, groups, disclosures, codeControls)) record.issues.push({ code: 'unsupported-component', source: record.url, message: 'An interactive alternative has no complete captured panel or disclosure content.' })
       }
-      const suppliedAssets = new Map((document.assets ?? []).map((asset) => [canonical(asset.url, final), asset]))
+      // Passive inline vectors are projected by the shared article extractor,
+      // so evidence and conversion reference these exact local binary bytes.
+      const inlineAssets = [document, ...states.map(state => state.response)].flatMap(captured => /html/i.test(captured.contentType)
+        ? migrationHtmlArticle(captured.body).assets.map(asset => ({
+          url: new URL(`/${asset.path}`, captured.finalUrl).href, contentType: 'image/svg+xml',
+          content: typeof asset.content === 'string' ? Buffer.from(asset.content) : asset.content,
+        })) : [])
+      const suppliedAssets = new Map([...(document.assets ?? []), ...inlineAssets].map((asset) => [canonical(asset.url, final), asset]))
       const assetUrls = [...new Set([...assetReferences(document), ...states.flatMap((state) => assetReferences(state.response))].map((url) => canonical(url, final)).filter((url): url is string => Boolean(url)))]
       if (assetUrls.length > 256 || (document.assets?.length ?? 0) > 256) throw new Error('Capture exceeds the 256 assets per page safety bound.')
       for (const url of assetUrls) {
@@ -913,7 +1022,7 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
             assetRequest = assetRequests.load(url, () => assetFetcher(new URL(url), options.signal).then(retainAsset))
           }
           const supplied = suppliedAssets.get(url)
-          const asset = supplied ? retainAsset(supplied) : (assetRequest ? await assetRequest : null)
+          const asset = supplied ? await retainAsset(supplied) : (assetRequest ? await assetRequest : null)
           if (!asset) throw new Error('Capture host did not supply asset bytes or a binary fetch boundary.')
           if (asset.unavailable && [404, 410].includes(asset.unavailable.status) && asset.content.byteLength === 0) {
             record.warnings.push({ code: 'asset-failed', source: record.url, message: `The original source asset is unavailable (HTTP ${asset.unavailable.status}); its original URL was retained: ${url}` })
@@ -929,7 +1038,7 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
             if (totalBytes > (options.maxTotalBytes ?? 500_000_000)) { budgetExhausted = true; throw new Error('Migration exceeded its content and asset byte budget.') }
           }
           const path = `migration-assets/${sha256}.${extension}`
-          const receipt = { url, path, sha256, contentType: asset.contentType, base64: existing?.base64 ?? Buffer.from(asset.content).toString('base64') }
+          const receipt = { url, path, sha256, contentType: asset.contentType, base64: existing?.base64 ?? Buffer.from(asset.content).toString('base64'), ...(asset.derivedFromSha256 ? { derivedFromSha256: asset.derivedFromSha256 } : {}) }
           record.assets.push(receipt)
           if (!existing) assetPayloads.set(sha256, receipt)
           if (!assetRequests.has(url)) assetRequests.remember(url, asset)
@@ -955,6 +1064,7 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
       record.pageSha256 = pageHash(page)
       record.outcome = 'imported'
       imported++
+      if (exactKey) exactCaptures.set(exactKey, record.url)
       enqueueArticleLinks(evidence.links, final, record.url)
     } catch (error) {
       if (options.signal?.aborted) return
@@ -979,6 +1089,35 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
       }
     }
   }
+  const settleArticleIdentities = (): void => {
+    const groups = new Map<string, Array<UrlMigrationRecord>>()
+    for (const record of records.values()) {
+      const identity = record.evidence?.articleIdentity
+      if (record.outcome !== 'imported' || !identity) continue
+      const key = JSON.stringify([identity.canonicalUrl, identity.articleSha256])
+      const group = groups.get(key) ?? []
+      group.push(record); groups.set(key, group)
+    }
+    for (const group of groups.values()) {
+      if (group.length < 2) continue
+      const canonicalUrl = group[0].evidence!.articleIdentity!.canonicalUrl
+      const winner = group.find(record => record.url === canonicalUrl) ?? group[0]
+      const winnerAnchor = winner.evidence!.articleIdentity!.sectionAnchor
+      if (winnerAnchor && winner.aliasAnchor !== winnerAnchor) {
+        winner.aliasAnchor = winnerAnchor; changed.push(winner)
+      }
+      for (const alternate of group) {
+        if (alternate === winner) continue
+        imported--
+        if (alternate.page && usedIds.get(alternate.page.id) === alternate.url) usedIds.delete(alternate.page.id)
+        alternate.outcome = 'alias'; alternate.aliasOf = winner.url
+        alternate.aliasAnchor = alternate.evidence!.articleIdentity!.sectionAnchor
+        delete alternate.page; delete alternate.pageSha256; delete alternate.assets; delete alternate.apiSpecification
+        delete alternate.issues; delete alternate.warnings; delete alternate.reason
+        changed.push(alternate)
+      }
+    }
+  }
   const settleRepresentations = (): void => {
     for (const record of records.values()) {
       if (!record.representationOf) continue
@@ -998,6 +1137,7 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
     }
   }
   settleRepresentations()
+  settleArticleIdentities()
   while (cursor < pending.length && !options.signal?.aborted && !budgetExhausted && cursor < (options.maxCaptures ?? Infinity)) {
     if (imported >= maxPages) {
       const index = pending.findIndex((record, position) => position >= cursor && isDiscoveryIndex(new URL(record.url), source))
@@ -1008,6 +1148,7 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
     cursor += batch.length
     await Promise.all(batch.map(process))
     settleRepresentations()
+    settleArticleIdentities()
     if (changed.length >= batchSize) await flush()
   }
   await flush()
@@ -1028,7 +1169,7 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
     for (const node of nodes) {
       const entry = node.url ? records.get(canonical(node.url, sourceUrl) ?? '') : undefined
       const target = resolveMigrationRecord(records, entry)
-      if (target?.page && node.label && !node.children?.length) {
+      if (target?.page && node.label && !node.children?.length && !entry?.aliasAnchor) {
         const previous = navigationLabels.get(target.url)
         if (previous && previous !== node.label) navigationIssues.push({ code: 'unsupported-component', source: target.url, message: `This page has multiple source navigation labels (${previous}, ${node.label}); review the shared sidebar title.` })
         else navigationLabels.set(target.url, node.label)
@@ -1050,9 +1191,10 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
     // Keep its original href in the report, but make the imported link usable
     // by opening the proven page. Valid source anchors must survive unchanged;
     // validation still blocks any anchor that conversion itself lost.
+    const effectiveHash = url.hash || (records.get(identity)?.aliasAnchor ? `#${encodeURIComponent(records.get(identity)!.aliasAnchor!)}` : '')
     const hasBrokenSourceAnchor = Boolean(url.hash && destination?.outcome === 'imported'
       && destination.evidence && !destination.evidence.anchors.includes(anchor))
-    return `${route}${hasBrokenSourceAnchor ? '' : url.hash}`
+    return `${route}${hasBrokenSourceAnchor ? '' : effectiveHash}`
   }) }] : [])
   const validation = validateUrlMigration(checkpoint, Boolean(options.signal?.aborted))
   validation.issues.push(...navigationIssues)
