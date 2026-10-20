@@ -250,3 +250,82 @@ describe('local source-document link materialization', () => {
     expect(linkWarnings[0].message).not.toContain('/quickstart')
   })
 })
+
+describe('rendered URL runner combined with onboarding materialization', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    validateMigrationMock.mockResolvedValue({ content: 'passed', build: 'passed', messages: [] })
+  })
+
+  it('enriches a declared Markdown operation from the complete explicit spec as one HTML-backed page without duplicate endpoint navigation', async () => {
+    const projectDir = mkdtempSync(join(tmpdir(), 'thally-runner-openapi-onboarding-'))
+    writeFileSync(join(projectDir, 'docs.json'), JSON.stringify({ tabs: [{ tab: 'Existing', pages: ['existing'] }] }))
+    const origin = 'https://docs.example.com'
+    const path = '/docs/api-reference/users/list-users'
+    const specUrl = 'https://specs.example.com/openapi.json'
+    const schema = { openapi: '3.0.3', info: { title: 'Example', version: '1' }, paths: { '/users': { get: { summary: 'List users', tags: ['Users'], responses: { 200: { description: 'OK', content: { 'application/json': { schema: { type: 'object', properties: { ready: { type: 'object', description: 'Complete nested field', properties: { value: { type: 'boolean' } } } } } } } } } } } } }
+    const complete = { ...schema, paths: { '/users': { get: { ...schema.paths['/users'].get, parameters: [{ name: 'cursor', in: 'query', description: 'Only present in the complete explicitly selected schema', schema: { type: 'string' } }] } } } }
+    const markdown = `# List users\n\n\`\`\`yaml get /users\n${JSON.stringify(schema)}\n\`\`\``
+    const html = `<html><head><link rel="alternate" type="text/markdown" href="${path}.md"></head><body><main><article><h1>List users</h1><p>Original endpoint prose stays visible.</p><pre><code>GET /users</code></pre><div id="api-playground-2-operation-page"><div class="method-pill">GET</div><div data-component-part="scroll-area-content">/users</div><section class="api-section"><div class="api-section-heading"><button aria-haspopup="menu">200</button><span>application/json</span></div><div class="object-param-field"><p data-component-part="field-name">ready</p><details class="expandable" data-component-part="expandable"><summary data-component-part="expandable-button" aria-controls="ready-panel" aria-expanded="false"><p>Attributes</p></summary><div id="ready-panel" data-component-part="expandable-content"></div></details></div></section></div></article></main></body></html>`
+    const fetcher: MigrationFetcher = vi.fn(async (url) => {
+      if (url.href !== specUrl) throw new Error('Unexpected specification fetch')
+      return { finalUrl: url, contentType: 'application/json', body: JSON.stringify(complete) }
+    })
+    const result = await migrateDocs({ sourceUrl: `${origin}${path}`, projectDir, into: true, yes: true, openapiUrl: specUrl, fetcher, urlMigration: {
+      scopePath: '/docs', concurrency: 1,
+      captureProvider: { capture: async ({ url }) => {
+        if (url.pathname === path) return { finalUrl: url, contentType: 'text/html', body: html }
+        if (url.pathname === `${path}.md`) return { finalUrl: url, contentType: 'text/markdown', body: markdown }
+        throw new Error('No discovery index')
+      } },
+    } })
+    const report = JSON.parse(readFileSync(result.reportPath, 'utf8'))
+    expect(report.sourceValidation.status).toBe('passed')
+    expect(result.pagesWritten).toBe(1)
+    const page = readFileSync(join(projectDir, 'src/content/api-reference/users/list-users.mdx'), 'utf8')
+    expect(page).toContain('Original endpoint prose stays visible.')
+    expect(page).toContain('GET /users')
+    expect(page).toMatch(/openapi: "openapi\/openapi-[a-f0-9]+\.json GET \/users"/)
+    expect(existsSync(join(projectDir, 'src/content/api-reference/users/list-users.md.mdx'))).toBe(false)
+    const config = JSON.parse(readFileSync(join(projectDir, 'docs.json'), 'utf8'))
+    expect(config.tabs.filter((tab: { api?: { navigation?: boolean }; hidden?: boolean }) => tab.api && !tab.hidden && tab.api.navigation !== false)).toEqual([])
+    const bindings = config.tabs.filter((tab: { api?: { source: string } }) => tab.api)
+    expect(bindings).toHaveLength(1)
+    expect(page).toContain(`openapi: "${bindings[0].api.source} GET /users"`)
+    expect(JSON.parse(readFileSync(join(projectDir, bindings[0].api.source), 'utf8'))).toEqual(complete)
+    expect(fetcher).toHaveBeenCalledOnce()
+  })
+
+  it('retains distinct sidebar aliases, noindex and their redirect alongside an existing owner redirect after config merge', async () => {
+    const projectDir = mkdtempSync(join(tmpdir(), 'thally-runner-alias-onboarding-'))
+    writeFileSync(join(projectDir, 'docs.json'), JSON.stringify({ tabs: [{ tab: 'Existing', pages: ['existing'] }], redirects: [{ source: '/old-guide', destination: '/existing', permanent: true }] }))
+    const origin = 'https://docs.example.com'
+    const primary = '/docs/dashboard/domains/tracking'
+    const alias = '/docs/knowledge-base/why-open-rates'
+    const navigation = [
+      { label: 'Dashboard', children: [{ label: 'Tracking', url: `${origin}${primary}` }] },
+      { label: 'Knowledge base', children: [{ label: 'Why are my open rates not accurate', url: `${origin}${alias}` }] },
+    ]
+    const result = await migrateDocs({ sourceUrl: `${origin}${primary}`, projectDir, into: true, yes: true, urlMigration: {
+      scopePath: '/docs', concurrency: 1,
+      captureProvider: { capture: async ({ url }) => {
+        if ([primary, alias].includes(url.pathname)) return { finalUrl: new URL(primary, origin), contentType: 'text/html', body: '<article><h1>Tracking</h1><p>Original article about domain tracking.</p></article>', navigation }
+        throw new Error('No discovery index')
+      } },
+    } })
+    expect(result.pagesWritten).toBe(2)
+    const aliasPage = readFileSync(join(projectDir, 'src/content/knowledge-base/why-open-rates.mdx'), 'utf8')
+    expect(aliasPage).toContain('noindex: true')
+    expect(aliasPage).toContain('navTitle: "Why are my open rates not accurate"')
+    expect(aliasPage).toContain('Original article about domain tracking.')
+    const primaryPage = readFileSync(join(projectDir, 'src/content/dashboard/domains/tracking.mdx'), 'utf8')
+    expect(primaryPage).not.toContain('noindex: true')
+    const config = JSON.parse(readFileSync(join(projectDir, 'docs.json'), 'utf8'))
+    expect(config.redirects).toEqual(expect.arrayContaining([
+      { source: '/old-guide', destination: '/existing', permanent: true },
+      { source: '/knowledge-base/why-open-rates', destination: '/dashboard/domains/tracking', permanent: true },
+    ]))
+    expect(JSON.stringify(config.tabs)).toContain('knowledge-base/why-open-rates')
+    expect(JSON.parse(readFileSync(result.reportPath, 'utf8')).sourceValidation.status).toBe('passed')
+  })
+})

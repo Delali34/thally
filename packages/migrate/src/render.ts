@@ -1,5 +1,6 @@
 /** Render canonical migration bundles into a portable Thally repository tree. */
 
+import { destinationRoute, literalRoute } from './redirects.js'
 import { mergeComponentRegistry } from './components.js'
 
 import type {
@@ -47,6 +48,33 @@ function renderPage(bundle: MigrationBundle, page: MigrationBundle['pages'][numb
 
 function isIntegrationsObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+/** Owner redirect sources win; distinct imported aliases survive without introducing literal cycles. */
+function mergeRedirects(existing: MigrationDocsConfig['redirects'] = [], incoming: MigrationDocsConfig['redirects'] = []): NonNullable<MigrationDocsConfig['redirects']> {
+  const redirects = [...existing]
+  const key = (source: string): string => literalRoute(source) ?? source.replace(/\/+$/, '').toLowerCase()
+  // Use the same browser normalization as migration's final redirect guard:
+  // raw/encoded dot segments and queries must not disguise a cycle edge.
+  const destinationKey = (destination: string): string | null => literalRoute(destinationRoute(destination) ?? '')
+  const sources = new Set(existing.map((redirect) => key(redirect.source)))
+  for (const redirect of incoming) {
+    const source = key(redirect.source)
+    if (sources.has(source)) continue
+    const visited = new Set([source])
+    let destination = destinationKey(redirect.destination)
+    let cycle = false
+    while (destination) {
+      if (visited.has(destination)) { cycle = true; break }
+      visited.add(destination)
+      const next = redirects.find((candidate) => literalRoute(candidate.source) === destination)
+      destination = next ? destinationKey(next.destination) : null
+    }
+    if (cycle) continue
+    redirects.push(redirect)
+    sources.add(source)
+  }
+  return redirects
 }
 
 /** Merge imported tabs into an existing site without duplicating changelog tabs. */
@@ -132,6 +160,7 @@ export function mergeMigrationConfig(
     ...incoming,
     ...existing,
     tabs,
+    ...((existing.redirects || incoming.redirects) ? { redirects: mergeRedirects(existing.redirects, incoming.redirects) } : {}),
     // A starter's primary action must not discard a newly imported logo.
     // Owner-authored fields, including an explicit null logo, remain authoritative.
     ...((incoming.navbar || existing.navbar) ? { navbar: { ...incoming.navbar, ...existing.navbar } } : {}),

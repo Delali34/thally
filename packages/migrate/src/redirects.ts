@@ -48,7 +48,7 @@ function resolveDotSegments(route: string): string {
  * for a pattern and for an address off the site (`//host/x`; `https://host/x`
  * already fails `exactRoute`'s leading slash).
  */
-function destinationRoute(destination: string): string | null {
+export function destinationRoute(destination: string): string | null {
   const route = destination.startsWith('//') ? null : exactRoute(destination.split(/[?#]/, 1)[0])
   return route === null ? null : resolveDotSegments(route)
 }

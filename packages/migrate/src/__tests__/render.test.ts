@@ -128,3 +128,30 @@ describe('in-place imported navbar branding', () => {
     expect(config.navbar.primary).toBeNull()
   })
 })
+
+describe('in-place redirect preservation', () => {
+  it('merges imported aliases while preserving owner precedence for equivalent sources', () => {
+    const merged = mergeMigrationConfig({ tabs: [], redirects: [{ source: '/Owner-Alias/', destination: '/owner-target', permanent: false }] }, { tabs: [], redirects: [{ source: '/owner-alias', destination: '/imported-target', permanent: true }, { source: '/new-alias', destination: '/canonical', permanent: true }] })
+    expect(merged.redirects).toEqual([{ source: '/Owner-Alias/', destination: '/owner-target', permanent: false }, { source: '/new-alias', destination: '/canonical', permanent: true }])
+  })
+  it('does not introduce an alias cycle through an existing owner redirect', () => {
+    const merged = mergeMigrationConfig({ tabs: [], redirects: [{ source: '/canonical', destination: '/alias', permanent: false }] }, { tabs: [], redirects: [{ source: '/alias', destination: '/canonical', permanent: true }] })
+    expect(merged.redirects).toEqual([{ source: '/canonical', destination: '/alias', permanent: false }])
+  })
+  it.each(['/x/../canonical', '/%2e%2e/canonical', '/x/%2E%2e/canonical?lang=go#response', '/canonical?lang=go#response'])('rejects imported cycles after browser destination normalization: %s', (destination) => {
+    const owner = [{ source: '/canonical', destination: '/alias', permanent: false }]
+    const merged = mergeMigrationConfig({ tabs: [], redirects: owner }, { tabs: [], redirects: [{ source: '/alias', destination, permanent: true }] })
+    expect(merged.redirects).toEqual(owner)
+  })
+  it.each(['/x/../alias', '/%2e%2e/alias', '/x/%2E%2e/alias?lang=go#response'])('normalizes an existing owner destination when checking imported cycles: %s', (destination) => {
+    const owner = [{ source: '/canonical', destination, permanent: false }]
+    const merged = mergeMigrationConfig({ tabs: [], redirects: owner }, { tabs: [], redirects: [{ source: '/alias', destination: '/canonical', permanent: true }] })
+    expect(merged.redirects).toEqual(owner)
+  })
+  it('retains safe imported destinations verbatim, including external addresses and normalized paths', () => {
+    const owner = [{ source: '/canonical', destination: '/alias', permanent: false }]
+    const incoming = [{ source: '/new', destination: '/x/../guide?lang=go#response', permanent: true }, { source: '/alias', destination: 'https://example.com/canonical', permanent: true }, { source: '/other', destination: '//example.com/canonical', permanent: true }]
+    const merged = mergeMigrationConfig({ tabs: [], redirects: owner }, { tabs: [], redirects: incoming })
+    expect(merged.redirects).toEqual([...owner, ...incoming])
+  })
+})

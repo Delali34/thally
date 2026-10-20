@@ -124,6 +124,17 @@ describe("generated workflow shell-safety (Thally Track injection hardening)", (
     );
   });
 
+  it("revises receiver installation separately from the broker protocol", async () => {
+    const { DOCS_AGENT_WORKFLOW, DOCS_AGENT_WORKFLOW_CONTRACT, DOCS_AGENT_WORKFLOW_REVISION } =
+      await import("../scaffold.js");
+    expect(DOCS_AGENT_WORKFLOW_CONTRACT).toBe("thally-track/v4");
+    expect(DOCS_AGENT_WORKFLOW_REVISION).toBe("thally-track-receiver/v1");
+    expect(DOCS_AGENT_WORKFLOW.split("\n").slice(0, 2)).toEqual([
+      `# Contract: ${DOCS_AGENT_WORKFLOW_CONTRACT}`,
+      `# Receiver: ${DOCS_AGENT_WORKFLOW_REVISION}`,
+    ]);
+  });
+
   it("brokers readiness PR creation through GitHub OIDC without an App token", async () => {
     const { DOCS_AGENT_WORKFLOW } = await import("../scaffold.js");
 
@@ -156,9 +167,9 @@ describe("generated workflow shell-safety (Thally Track injection hardening)", (
 
   it("docs-agent workflow resolves the CLI in both standalone sites and the source monorepo", async () => {
     const { DOCS_AGENT_WORKFLOW } = await import("../scaffold.js");
-    expect(DOCS_AGENT_WORKFLOW).toContain("[ -x node_modules/.bin/thally ]");
+    expect(DOCS_AGENT_WORKFLOW).toContain('root.workspaces.includes("packages/*")');
     expect(DOCS_AGENT_WORKFLOW).toContain(
-      "npm install --no-save --package-lock=false --ignore-scripts @thallylabs/cli@0.5.3",
+      "npx --yes --ignore-scripts --package=@thallylabs/cli@0.8.122 thally",
     );
     expect(DOCS_AGENT_WORKFLOW).toContain("node packages/cli/dist/index.js");
   });

@@ -10,6 +10,12 @@ ordered navigation and binary assets), or uses ordinary local fetching. Hosted
 callers must inject their own network-safe text/capture and binary boundaries.
 No browser, model, credentials, sandbox or publishing provider is bundled here.
 
+Default page requests advertise HTML to retain rendered content and declared
+alternates. An explicit same-origin, same-route Markdown alternate shares the
+article's destination; the rendered article takes precedence even when the
+Markdown URL was discovered first or restored from an interrupted checkpoint.
+Independent pages still report destination collisions.
+
 Server applications should import `@thallylabs/migrate/svg-policy` for the passive
 SVG validator, or `@thallylabs/migrate/url-migration` for the URL runner, renderer
 and their types. These independent entries avoid tracing repository cloning and
@@ -99,8 +105,13 @@ Missing primary counterparts and projected path collisions require review; the
 engine does not invent translations. Fresh HTML captures also observe `html lang`; conflicting or unsupported
 language evidence requires review. Capture adapters can supply `locale` when
 no language is declared in HTML or identified by the scoped URL path.
-The `url-evidence-v6` converter rejects earlier journals: replay retained raw
+The `url-evidence-v7` converter rejects earlier journals: replay retained raw
 captures into a new journal rather than relabelling previously hashed pages.
+Distinct observed redirect routes can retain their own sidebar titles through
+noindex page metadata and portable internal redirects to the captured article.
+Conflicting labels on the same route still require review. Markdown image and
+link destinations are localized by source spans, including escaped query strings,
+without changing matching labels, titles, or fenced examples.
 
 `stopReason` distinguishes a resumable `capture-limit` from hard `page-limit`
 or `byte-limit` outcomes. Hosts must not automatically retry a hard limit as an

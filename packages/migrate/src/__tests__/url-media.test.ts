@@ -26,6 +26,29 @@ describe('rendered media projection', () => {
     await compile(projected)
   })
 
+  it('projects rendered publisher videos without copying passive asset provenance', async () => {
+    const source = 'https://mintcdn.com/docs/images/exports.mp4?fit=max&auto=format'
+    const markup = `<video autoplay="" muted="" loop="" class="mint-w-full mint-aspect-video" src="${source}" data-path="images/exports.mp4" playsinline=""></video>`
+    const projected = projectMigrationMedia(markup, base)!
+    expect(projected).toBe(`<Video src="https://mintcdn.com/docs/images/exports.mp4?fit=max&amp;auto=format" controls={true} muted={true} loop={true} playsInline={true} autoPlay={true} />`)
+    expect(projected).not.toContain('data-path')
+    expect(sanitizeRemoteMarkdown(projected)).toBe(projected)
+    const page = htmlPage({ body: `<article><h1>Export</h1><p>Export instructions.</p>${markup}</article>`, finalUrl: base, contentType: 'text/html' }, 'export', { omitDocumentHeading: true }).page!
+    expect(page.body).toContain(projected)
+    await compile(projected)
+  })
+
+  it.each([
+    'src="javascript:execute()" muted autoplay',
+    'src="java&#x73;cript:execute()" muted autoplay',
+    'src="data:video/mp4,bad" muted autoplay',
+    'src="/clip.mp4" muted autoplay onplay="execute()"',
+    'src="/clip.mp4" muted autoplay data-controls="custom"',
+    'src="/clip.mp4" autoplay',
+  ])('does not let passive publisher metadata relax media checks: %s', attributes => {
+    expect(projectMigrationMedia(`<video ${attributes} data-path="images/exports.mp4"></video>`, base)).toBeNull()
+  })
+
   it.each(['www.youtube.com', 'youtube.com', 'www.youtube-nocookie.com', 'youtube-nocookie.com'])('projects a recognized %s embed and removes its sharing token', async (host) => {
     const projected = projectMigrationMedia(`<iframe src="https://${host}/embed/abcdefghijk?si=share-token" title="Walkthrough" width="100%" height="315" allow="accelerometer; clipboard-write" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>`, base)!
     expect(projected).toBe('<Video src="https://www.youtube-nocookie.com/embed/abcdefghijk" title="Walkthrough" />')

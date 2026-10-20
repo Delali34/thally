@@ -1167,3 +1167,99 @@ describe('explicit URL OpenAPI import', () => {
     expect(result.pages[0].openapi).toBeUndefined()
   })
 })
+
+describe('publisher-bound URL operations during explicit hydration', () => {
+  const originalPath = 'openapi/migration-publisher.json'
+  function input(): MigrationBundle {
+    const original = bundle()
+    original.sourceKind = 'url'
+    original.remoteApiSpecs = undefined
+    original.assets = [{ path: originalPath, projectRelative: true, content: Buffer.from(spec) }]
+    original.docsConfig.tabs = [{ tab: 'API Reference', hidden: true, api: { source: originalPath, navigation: false } }]
+    original.pages = [{ ...original.pages[0], openapi: `${originalPath} GET /api/v1/scim/v2/Users`, public: true, hidden: true, noindex: true, authMethod: 'key', playground: 'none' }]
+    return original
+  }
+  it('enriches publisher-proven partial bindings from the selected complete document without duplicate spec ids or changing visibility/auth', async () => {
+    const { hydrateUrlOpenApi } = await import('../remote-api.js')
+    const original = input()
+    const complete = JSON.parse(spec)
+    complete.paths['/api/v1/scim/v2/Users'].get.responses['200'].content = { 'application/json': { schema: { type: 'object', properties: { ready: { type: 'boolean', description: 'Complete selected schema' } } } } }
+    const hydrated = await hydrateUrlOpenApi(original, SPEC_URL, async (url) => ({ finalUrl: url, body: JSON.stringify(complete), contentType: 'application/json' }))
+    expect(hydrated.assets).toHaveLength(2)
+    expect(hydrated.docsConfig.tabs).toHaveLength(1)
+    const selected = hydrated.docsConfig.tabs[0].api!
+    expect(selected.navigation).toBe(false)
+    expect(hydrated.pages[0]).toEqual({ ...original.pages[0], openapi: `${selected.source} GET /api/v1/scim/v2/Users` })
+    expect(Buffer.from(hydrated.assets.find((asset) => asset.path === selected.source)!.content).toString('utf8')).toContain('Complete selected schema')
+  })
+  it.each(['missing', 'hidden', 'unresolved path ref'])('does not let a %s source binding suppress a selected visible operation', async (kind) => {
+    const { hydrateUrlOpenApi } = await import('../remote-api.js')
+    const original = input()
+    if (kind === 'missing') original.pages[0].openapi = 'openapi/missing.json GET /api/v1/scim/v2/Users'
+    else if (kind === 'hidden') {
+      const hidden = JSON.parse(spec)
+      hidden.paths['/api/v1/scim/v2/Users'].get['x-hidden'] = true
+      original.assets[0].content = Buffer.from(JSON.stringify(hidden))
+    } else {
+      const unresolved = JSON.parse(spec)
+      unresolved.paths['/api/v1/scim/v2/Users'] = { $ref: '#/components/pathItems/Users' }
+      original.assets[0].content = Buffer.from(JSON.stringify(unresolved))
+    }
+    const hydrated = await hydrateUrlOpenApi(original, SPEC_URL, async (url) => ({ finalUrl: url, body: spec, contentType: 'application/json' }))
+    expect(hydrated.pages[0]).toEqual(original.pages[0])
+    expect(hydrated.docsConfig.tabs).toHaveLength(2)
+    expect(hydrated.docsConfig.tabs[1].tab).toBe('API Reference 2')
+    expect(hydrated.docsConfig.tabs[1].api?.navigation).not.toBe(false)
+  })
+  it('keeps only added operations in generated navigation and remains idempotent across hydration retries', async () => {
+    const { hydrateUrlOpenApi } = await import('../remote-api.js')
+    const original = input()
+    const expanded = JSON.parse(spec)
+    expanded.paths['/health'] = { get: { summary: 'Health', tags: ['System'], responses: { 200: { description: 'OK' } } } }
+    expanded.paths['/hidden'] = { get: { 'x-hidden': true, summary: 'Hidden', tags: ['System'], responses: {} } }
+    const fetcher: MigrationFetcher = async (url) => ({ finalUrl: url, body: JSON.stringify(expanded), contentType: 'application/json' })
+    const once = await hydrateUrlOpenApi(original, SPEC_URL, fetcher)
+    const twice = await hydrateUrlOpenApi(once, SPEC_URL, fetcher)
+    expect(twice.docsConfig.tabs).toHaveLength(1)
+    expect(twice.docsConfig.tabs[0].api?.groups).toEqual([{ group: 'Endpoints', pages: ['GET /health'] }])
+    expect(twice.assets).toHaveLength(2)
+    expect(twice.pages[0]).toEqual({ ...original.pages[0], openapi: `${twice.docsConfig.tabs[0].api!.source} GET /api/v1/scim/v2/Users` })
+    expect(twice).toEqual(once)
+  })
+  it('localizes an operation that explicitly names the selected remote spec without inventing another binding', async () => {
+    const { hydrateUrlOpenApi } = await import('../remote-api.js')
+    const original = input()
+    original.assets = []
+    original.docsConfig.tabs = []
+    original.pages[0].openapi = `${SPEC_URL} GET /api/v1/scim/v2/Users`
+    const hydrated = await hydrateUrlOpenApi(original, SPEC_URL, async (url) => ({ finalUrl: url, body: spec, contentType: 'application/json' }))
+    expect(hydrated.pages[0].openapi).toBe(`${hydrated.assets[0].path} GET /api/v1/scim/v2/Users`)
+    expect(hydrated.docsConfig.tabs[0].api?.navigation).toBe(false)
+    expect(hydrated.pages[0].public).toBe(true)
+  })
+  it('preserves restricted page metadata and withholds its operation from the selected public spec on retries', async () => {
+    const { hydrateUrlOpenApi } = await import('../remote-api.js')
+    const original = input()
+    Object.assign(original.pages[0], { groups: ['staff'], public: false })
+    const fetcher: MigrationFetcher = async (url) => ({ finalUrl: url, body: spec, contentType: 'application/json' })
+    const once = await hydrateUrlOpenApi(original, SPEC_URL, fetcher)
+    const twice = await hydrateUrlOpenApi(once, SPEC_URL, fetcher)
+    expect(twice.docsConfig.tabs).toHaveLength(1)
+    const selected = twice.docsConfig.tabs[0].api!
+    expect(twice.pages[0]).toEqual({ ...original.pages[0], openapi: `${selected.source} GET /api/v1/scim/v2/Users` })
+    expect(JSON.parse(Buffer.from(twice.assets.find((asset) => asset.path === selected.source)!.content).toString('utf8')).paths['/api/v1/scim/v2/Users'].get['x-excluded']).toBe(true)
+    expect(twice.warnings.some((warning) => warning.code === 'gated-page')).toBe(true)
+    expect(selected.navigation).toBe(false)
+    expect(twice).toEqual(once)
+  })
+  it('keeps an operation published when a public page also documents it, without relaxing restricted page metadata', async () => {
+    const { hydrateUrlOpenApi } = await import('../remote-api.js')
+    const original = input()
+    original.pages.push({ ...original.pages[0], id: 'private', navigationId: 'private', groups: ['staff'], public: false })
+    const hydrated = await hydrateUrlOpenApi(original, SPEC_URL, async (url) => ({ finalUrl: url, body: spec, contentType: 'application/json' }))
+    const selected = hydrated.docsConfig.tabs[0].api!
+    expect(hydrated.pages[1]).toMatchObject({ groups: ['staff'], public: false, authMethod: 'key', openapi: `${selected.source} GET /api/v1/scim/v2/Users` })
+    expect(JSON.parse(Buffer.from(hydrated.assets.find((asset) => asset.path === selected.source)!.content).toString('utf8')).paths['/api/v1/scim/v2/Users'].get['x-excluded']).toBeUndefined()
+    expect(hydrated.warnings.filter((warning) => warning.code === 'gated-page')).toEqual([])
+  })
+})

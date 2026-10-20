@@ -6,14 +6,16 @@ Create a docs site, write and publish content, and prepare updates from product
 changes for your team to review.
 
 ```bash
-npx @thallylabs/cli init my-docs --yes
+npx --yes --package=@thallylabs/cli@latest thally init my-docs --yes
 cd my-docs
-npx thally dev
+npm run dev
 ```
 
-`init` installs dependencies by default (`--no-install` skips it), and new
-sites include `@thallylabs/cli` as a dev dependency, so `npx thally` runs the
-project's own CLI. Once the preview is ready, `thally dev` prints the local
+`init` installs dependencies by default (`--no-install` skips it). New sites
+provide `npm run dev`, `npm run check`, and `npm run starter:update`; the latter
+two explicitly invoke the current official CLI without installing it in the site.
+For other commands, use `npx --yes --package=@thallylabs/cli@latest thally` followed
+by the command and its arguments. The CLI's `dev` command also prints the local
 `llms.txt` and `/api/mcp` endpoints and a `claude mcp add --transport http`
 command for connecting Claude Code.
 
