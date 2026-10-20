@@ -54,16 +54,21 @@ describe('bounded deployment assets', () => {
   })
 
   it.each([
-    '<svg><!-- Ordinary export comment --><path d="M0 0"/></svg>',
     '<svg><!-- <!-- nested --> comment --></svg>',
     '<svg><!----><!-->',
+    '<svg><!-- trailing hyphen---></svg>',
+    '<svg><!-- forbidden -- internal hyphens --></svg>',
     '<svg><scr<!-- comment -->ipt>alert(1)</scr<!-- comment -->ipt></svg>',
     '<svg><path o<!-- comment -->nload="alert(1)"/></svg>',
     '<svg><path fill="u<!-- comment -->rl(https://evil.example/a)"/></svg>',
+    '<svg><path label="> <!-- comment -->"/></svg>',
+    "<svg><path label='> <!-- comment -->'/></svg>",
     '<svg><image hr<!-- comment -->ef="https://evil.example/a"/></svg>',
     '<svg><!-- unterminated comment</svg>',
-    '<?xml version="1.0"?><!-- comment before root --><svg/>',
-  ])('rejects comment-bearing SVG without joining or rewriting source tokens: %s', async svg => {
+    '<!-- <svg/> -->',
+    '<svg><!-- <!DOCTYPE svg> --></svg>',
+    '<svg><!-- <script>alert(1)</script> --></svg>',
+  ])('rejects malformed or unsafe commented SVG without joining or rewriting source tokens: %s', async svg => {
     setContentAssetFetcher(async () => new Response(svg))
     expect(await publicBrandImageDataUri('/logo.svg')).toBeNull()
   })
@@ -81,13 +86,20 @@ describe('bounded deployment assets', () => {
   })
 
   it('renders accepted original SVG bytes with a complete XML declaration into a PNG', async () => {
-    const svg = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>${safeSvg}`
+    const commentedSvg = safeSvg.replace('<path', '<!-- Artwork exported from our design tool --><path')
+    const svg = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<!-- Generator: product artwork exporter -->\n${commentedSvg}\n<!-- End artwork -->`
     setContentAssetFetcher(async () => new Response(svg))
     const uri = await publicBrandImageDataUri('/logo.svg')
     expect(uri).toBe(`data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`)
     const response = new ImageResponse(createElement('img', { src: uri, width: 20, height: 20 }), { width: 20, height: 20 })
     const png = Buffer.from(await response.arrayBuffer())
     expect(png.subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a')
+  })
+
+  it('preserves empty and adjacent valid comments without changing XML bytes', async () => {
+    const svg = `<!----><!-- Exported artwork -->${safeSvg}`
+    setContentAssetFetcher(async () => new Response(svg))
+    expect(await publicBrandImageDataUri('/logo.svg')).toBe(`data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`)
   })
 
   it('does not follow asset redirects or trust oversized bodies', async () => {

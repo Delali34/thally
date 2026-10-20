@@ -104,3 +104,27 @@ describe('migration config merge', () => {
     }])
   })
 })
+
+describe('in-place imported navbar branding', () => {
+  function importedBrand() {
+    const root = mkdtempSync(join(tmpdir(), 'thally-render-brand-'))
+    roots.push(root)
+    mkdirSync(join(root, 'images'))
+    writeFileSync(join(root, 'docs.json'), JSON.stringify({ name: 'Imported Docs', logo: { light: '/images/logo.svg', dark: '/images/logo-dark.svg' }, navigation: { groups: [{ group: 'Guide', pages: ['intro'] }] } }))
+    writeFileSync(join(root, 'intro.mdx'), '# Intro\n\nImported documentation.')
+    for (const name of ['logo.svg', 'logo-dark.svg']) writeFileSync(join(root, 'images', name), '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0"/></svg>')
+    return migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/example/docs' })
+  }
+  it('retains light/dark imported logo paths and their emitted assets when the starter only supplied a primary action', () => {
+    const rendered = renderMigrationFiles(importedBrand(), { existingConfig: { tabs: [], navbar: { primary: { label: 'Start', href: '/quickstart' } } } })
+    const config = JSON.parse(String(rendered.find((file) => file.path === 'docs.json')!.content))
+    expect(config.navbar).toEqual({ primary: { label: 'Start', href: '/quickstart' }, logo: { light: '/images/logo.svg', dark: '/images/logo-dark.svg', showTitle: false } })
+    for (const mode of ['light', 'dark']) expect(rendered.some((file) => file.path === `public${config.navbar.logo[mode]}`)).toBe(true)
+  })
+  it.each([null, { light: '/owner/light.svg', dark: '/owner/dark.svg', showTitle: true }])('preserves the owner explicit navbar logo %j', (logo) => {
+    const rendered = renderMigrationFiles(importedBrand(), { existingConfig: { tabs: [], navbar: { primary: null, logo } } })
+    const config = JSON.parse(String(rendered.find((file) => file.path === 'docs.json')!.content))
+    expect(config.navbar.logo).toEqual(logo)
+    expect(config.navbar.primary).toBeNull()
+  })
+})

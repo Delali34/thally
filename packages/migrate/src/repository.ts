@@ -1992,12 +1992,15 @@ export function migrationApiRoutes(bundle: Pick<MigrationBundle, 'docsConfig' | 
     if (!asset) continue
     const document = readSpecDocument(Buffer.from(asset.content))
     if (!isRecord(document)) continue
-    routes.add('/api')
-    routes.add(`/api/${specId}`)
-    for (const operation of visibleOperations(document, document.paths)) {
+    const operations = visibleOperations(document, document.paths)
+    const webhooks = visibleOperations(document, document.webhooks)
+    // The optional catch-all redirects /api to its first default operation.
+    // A spec id alone is not an operation slug and has no landing-page route.
+    if (specId === 'default' && (operations.length || webhooks.length)) routes.add('/api')
+    for (const operation of operations) {
       routes.add(`/api/${specId}/${thallyOperationSlugSegments(operation.path, operation.method).join('/')}`)
     }
-    for (const operation of visibleOperations(document, document.webhooks)) {
+    for (const operation of webhooks) {
       const segments = thallyOperationSlugSegments(operation.path, operation.method)
       if (segments[0] !== 'webhooks') segments.unshift('webhooks')
       routes.add(`/api/${specId}/${segments.join('/')}`)

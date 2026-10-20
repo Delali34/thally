@@ -183,3 +183,18 @@ describe('Mintlify source document links', () => {
     expect(body).toContain('[Unknown](/missing.mdx)')
   })
 })
+
+describe('generated API route inventory matches runtime catch-all routing', () => {
+  it('lists actual operation routes and /api redirect, without inventing spec-root landing pages', async () => {
+    const { migrationApiRoutes } = await import('../repository.js')
+    const bundle = {
+      docsConfig: { tabs: [{ tab: 'API', api: { source: 'openapi/first.json' } }, { tab: 'Secondary', api: { source: 'openapi/second.json' } }] },
+      assets: ['first', 'second'].map((name) => ({ path: `openapi/${name}.json`, projectRelative: true, content: Buffer.from(JSON.stringify({ openapi: '3.0.0', paths: { '/users': { get: { responses: {} } } } })) })),
+    }
+    expect(migrationApiRoutes(bundle).sort()).toEqual(['/api', '/api/default/users/get', '/api/secondary/users/get'])
+  })
+  it('does not advertise /api when the default spec has no operations to redirect to', async () => {
+    const { migrationApiRoutes } = await import('../repository.js')
+    expect(migrationApiRoutes({ docsConfig: { tabs: [{ tab: 'API', api: { source: 'openapi/empty.json' } }] }, assets: [{ path: 'openapi/empty.json', content: Buffer.from('{"openapi":"3.0.0","paths":{}}'), projectRelative: true }] })).toEqual([])
+  })
+})

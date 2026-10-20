@@ -132,6 +132,9 @@ export function mergeMigrationConfig(
     ...incoming,
     ...existing,
     tabs,
+    // A starter's primary action must not discard a newly imported logo.
+    // Owner-authored fields, including an explicit null logo, remain authoritative.
+    ...((incoming.navbar || existing.navbar) ? { navbar: { ...incoming.navbar, ...existing.navbar } } : {}),
     // Collection presentation belongs to the imported information
     // architecture; starter defaults must not coerce source dropdowns to tabs.
     navigation: incoming.navigation ?? existing.navigation,
