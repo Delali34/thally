@@ -7,11 +7,11 @@ import { runUrlMigration } from '../url-run.js'
 describe('URL migration Markdown destination localization', () => {
   it('localizes escaped and entity destinations while preserving matching titles, labels and code', async () => {
     const url = 'https://docs.test/image.png?a=1&b=2'
-    const escaped = url.replace('&', '\\&')
+    const escaped = url.replaceAll('&', '\\&')
     const source = [
       '# Guide', '', 'Original documentation prose.', '',
       `![${url}](${escaped} "${url}")`, '',
-      `![Reference][image]`, '', `[image]: <${url.replace('&', '&amp;')}> "${url}"`, '',
+      `![Reference][image]`, '', `[image]: <${url.replaceAll('&', '&amp;')}> "${url}"`, '',
       '[Next](https://docs.test/next?a=1\\&b=2 "https://docs.test/next?a=1&b=2")', '',
       '```md', `![Example](${escaped})`, '```', '',
     ].join('\n')
