@@ -5,6 +5,8 @@
  * can always be loaded again from its authoritative release source.
  */
 
+import { isPromise } from 'node:util/types'
+
 interface BoundedCacheOptions {
   maxEntries: number
   maxBytes: number
@@ -28,6 +30,13 @@ export function estimateRetainedPayloadBytes(value: unknown, limit = 8 * 1024 * 
     if (typeof current !== 'object') { bytes += typeof current === 'function' ? 128 : 16; continue }
     if (seen.has(current)) continue
     seen.add(current)
+    // Promise settlement retains an opaque payload which own properties cannot
+    // measure. In development React owner graphs also reach Next's instrumented
+    // request promises: enumerating them performs forbidden synchronous access.
+    // Reject cache admission without reading `.then`, awaiting request data, or
+    // pretending the eventual payload fits a fixed bookkeeping allowance.
+    // isPromise covers other realms; instanceof also covers Next's Proxy wrapper.
+    if (isPromise(current) || current instanceof Promise) return limit + 1
     bytes += 128
     if (ArrayBuffer.isView(current)) { bytes += current.byteLength; continue }
     if (current instanceof ArrayBuffer) { bytes += current.byteLength; continue }

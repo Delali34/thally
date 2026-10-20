@@ -13,6 +13,7 @@ import { isThallyBuiltinComponent } from './builtin-components.js'
 import { pageScopeNames, unresolvedExpressionNames } from './inline-extraction.js'
 import { playgroundDisplay } from './mintlify-extras.js'
 import { parseFrontmatter } from './frontmatter.js'
+import { normalizeMintlifyCodeFences } from './fence-meta.js'
 import type { MigrationPage, MigrationPlatform } from './types.js'
 
 export interface MarkdownPageIdentity {
@@ -2387,13 +2388,25 @@ export function parseMarkdownPage(input: {
   warn?: (message: string) => void
 }): MigrationPage | null {
   const parsed = parseFrontmatter(input.raw)
+  if (input.platform === 'mintlify') {
+    const supported = new Set([
+      'title', 'description', 'sidebarTitle', 'navTitle', 'icon', 'iconType', 'tag', 'badge',
+      'keywords', 'mode', 'hidden', 'noindex', 'url', 'openapi', 'api', 'authMethod', 'playground',
+      // Access settings are enforced by the repository classifier, never lost here.
+      'groups', 'public', ...PAGE_META_FIELDS.map(([field]) => field),
+    ])
+    const dropped = Object.keys(parsed.data).filter((key) => !supported.has(key))
+    if (dropped.length) input.warn?.(`Unsupported Mintlify frontmatter fields were omitted: ${dropped.join(', ')}. Review their behavior before publishing.`)
+
+  }
   const fallbackIdentity: MarkdownPageIdentity = {
     id: input.id,
     navigationId: input.navigationId ?? input.id,
     ...(input.locale ? { locale: input.locale } : {}),
   }
   const identity = input.resolveIdentity?.(parsed.data, fallbackIdentity) ?? fallbackIdentity
-  const body = removeUndefinedExpressions(injectReactHookImports(normalizeMdx(parsed.content, input.platform)), input.warn).trim()
+  const normalized = normalizeMdx(parsed.content, input.platform)
+  const body = removeUndefinedExpressions(injectReactHookImports(input.platform === 'mintlify' ? normalizeMintlifyCodeFences(normalized, input.warn) : normalized), input.warn).trim()
   const keywords = Array.isArray(parsed.data.keywords)
     ? parsed.data.keywords.filter((value): value is string => typeof value === 'string')
     : []

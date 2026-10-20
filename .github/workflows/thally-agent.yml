@@ -1,4 +1,5 @@
 # Contract: thally-track/v4
+# Receiver: thally-track-receiver/v1
 name: Thally docs agent
 
 on:
@@ -68,16 +69,16 @@ jobs:
             echo "::add-mask::$THALLY_PR_GRANT"
           fi
           run_thally() {
-            if [ -x node_modules/.bin/thally ]; then
-              # Existing sites may pin an older CLI that cannot consume the
-              # App-resolved private PR context. Keep Track's receiver pinned
-              # to the workflow contract version without editing package.json.
-              npm install --no-save --package-lock=false --ignore-scripts @thallylabs/cli@0.5.3
-              node_modules/.bin/thally "$@"
-              return
+            # Only the source workspace has the package build command. A missing local
+            # CLI is normal in standalone sites, including the lean starter.
+            if node -e 'const fs = require("node:fs"); try { const root = JSON.parse(fs.readFileSync("package.json", "utf8")); const cli = JSON.parse(fs.readFileSync("packages/cli/package.json", "utf8")); if (!Array.isArray(root.workspaces) || !root.workspaces.includes("packages/*") || typeof root.scripts?.["packages:build"] !== "string" || cli.name !== "@thallylabs/cli") process.exit(1); } catch { process.exit(1); }'; then
+              npm run packages:build
+              node packages/cli/dist/index.js "$@"
+            else
+              # Pin the receiver contract, including for sites with an older local CLI.
+              # npm's execution cache leaves the owner's manifest and lockfile unchanged.
+              npx --yes --ignore-scripts --package=@thallylabs/cli@0.8.122 thally "$@"
             fi
-            npm run packages:build
-            node packages/cli/dist/index.js "$@"
           }
           REQUESTER_ARGS=()
           if [ -n "$REQUESTER" ]; then
@@ -141,9 +142,16 @@ jobs:
       - run: npm ci
       - name: Check for stale docs
         run: |
-          if [ -x node_modules/.bin/thally ]; then
-            node_modules/.bin/thally check --drift --ci
-          else
-            npm run packages:build
-            node packages/cli/dist/index.js check --drift --ci
-          fi
+          run_thally() {
+            # Only the source workspace has the package build command. A missing local
+            # CLI is normal in standalone sites, including the lean starter.
+            if node -e 'const fs = require("node:fs"); try { const root = JSON.parse(fs.readFileSync("package.json", "utf8")); const cli = JSON.parse(fs.readFileSync("packages/cli/package.json", "utf8")); if (!Array.isArray(root.workspaces) || !root.workspaces.includes("packages/*") || typeof root.scripts?.["packages:build"] !== "string" || cli.name !== "@thallylabs/cli") process.exit(1); } catch { process.exit(1); }'; then
+              npm run packages:build
+              node packages/cli/dist/index.js "$@"
+            else
+              # Pin the receiver contract, including for sites with an older local CLI.
+              # npm's execution cache leaves the owner's manifest and lockfile unchanged.
+              npx --yes --ignore-scripts --package=@thallylabs/cli@0.8.122 thally "$@"
+            fi
+          }
+          run_thally check --drift --ci

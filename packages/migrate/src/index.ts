@@ -6,8 +6,10 @@ export {
   detectRepositoryPlatform,
   gitmodulePaths,
   migrateRepository,
+  migrationApiRoutes,
   parseGitHubRepositoryUrl,
 } from './repository.js'
+export { literalRoute, pageEntryRoutes } from './redirects.js'
 export { addMintlifyDirectoryRedirects, buildNavigationFromPages, projectMintlifyNavigation, pruneMissingNavigationPages, readMintlifyConfig } from './navigation.js'
 export { importSourceRef, parseSourceRefFlags, SOURCE_REF_MAX_BYTES, SOURCE_REF_MAX_FILES, SOURCE_REF_MAX_REPOSITORY_KB, sourceRefOversizeReason } from './source-refs.js'
 export type { SourceRefImport, SourceRefMapping } from './source-refs.js'
@@ -24,7 +26,7 @@ export type {
   UrlMigrationCheckpoint, UrlMigrationCheckpointDelta, UrlMigrationIssue,
   UrlMigrationRecord, UrlMigrationRun, UrlMigrationRunOptions, UrlMigrationValidation,
 } from './url-run-types.js'
-export { hydrateRemoteApiSpecs } from './remote-api.js'
+export { hydrateRemoteApiSpecs, hydrateUrlOpenApi } from './remote-api.js'
 export type {
   GitHubRepositorySource,
   RepositoryMigrationOptions,

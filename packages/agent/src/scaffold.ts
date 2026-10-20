@@ -1,3 +1,4 @@
+/** Generate review-gated Track workflows while keeping receiver tooling out of owner dependencies. */
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -7,8 +8,25 @@ import {
 } from "@thallylabs/mcp/track";
 import { DEFAULT_AGENT_MODEL } from "./model.js";
 
-/** Version marker used by Cloud Track to offer reviewable workflow upgrades. */
+/** Broker protocol marker; receiver implementation updates do not change grants. */
 export const DOCS_AGENT_WORKFLOW_CONTRACT = "thally-track/v4";
+
+/** Receiver implementation revision used to offer existing sites a reviewed upgrade. */
+export const DOCS_AGENT_WORKFLOW_REVISION = "thally-track-receiver/v1";
+
+/** One resolution policy for dispatches and drift; lean sites have no local CLI. */
+const DOCS_AGENT_CLI_RUNNER = `run_thally() {
+  # Only the source workspace has the package build command. A missing local
+  # CLI is normal in standalone sites, including the lean starter.
+  if node -e 'const fs = require("node:fs"); try { const root = JSON.parse(fs.readFileSync("package.json", "utf8")); const cli = JSON.parse(fs.readFileSync("packages/cli/package.json", "utf8")); if (!Array.isArray(root.workspaces) || !root.workspaces.includes("packages/*") || typeof root.scripts?.["packages:build"] !== "string" || cli.name !== "@thallylabs/cli") process.exit(1); } catch { process.exit(1); }'; then
+    npm run packages:build
+    node packages/cli/dist/index.js "$@"
+  else
+    # Pin the receiver contract, including for sites with an older local CLI.
+    # npm's execution cache leaves the owner's manifest and lockfile unchanged.
+    npx --yes --ignore-scripts --package=@thallylabs/cli@0.8.122 thally "$@"
+  fi
+}`;
 
 /**
  * The docs-repo "hub" workflow: it listens for a dispatched docs task (from a
@@ -17,6 +35,7 @@ export const DOCS_AGENT_WORKFLOW_CONTRACT = "thally-track/v4";
  * ANTHROPIC_API_KEY lives; product repos never see it.
  */
 const DOCS_AGENT_WORKFLOW_TEMPLATE = `# Contract: ${DOCS_AGENT_WORKFLOW_CONTRACT}
+# Receiver: ${DOCS_AGENT_WORKFLOW_REVISION}
 name: Thally docs agent
 
 on:
@@ -85,18 +104,7 @@ jobs:
           if [ -n "\${THALLY_PR_GRANT:-}" ]; then
             echo "::add-mask::$THALLY_PR_GRANT"
           fi
-          run_thally() {
-            if [ -x node_modules/.bin/thally ]; then
-              # Existing sites may pin an older CLI that cannot consume the
-              # App-resolved private PR context. Keep Track's receiver pinned
-              # to the workflow contract version without editing package.json.
-              npm install --no-save --package-lock=false --ignore-scripts @thallylabs/cli@0.5.3
-              node_modules/.bin/thally "$@"
-              return
-            fi
-            npm run packages:build
-            node packages/cli/dist/index.js "$@"
-          }
+          ${DOCS_AGENT_CLI_RUNNER.replaceAll("\n", "\n          ")}
           REQUESTER_ARGS=()
           if [ -n "$REQUESTER" ]; then
             REQUESTER_ARGS=(--requester "$REQUESTER")
@@ -166,12 +174,8 @@ jobs:
       - run: npm ci
       - name: Check for stale docs
         run: |
-          if [ -x node_modules/.bin/thally ]; then
-            node_modules/.bin/thally check --drift --ci
-          else
-            npm run packages:build
-            node packages/cli/dist/index.js check --drift --ci
-          fi
+          ${DOCS_AGENT_CLI_RUNNER.replaceAll("\n", "\n          ")}
+          run_thally check --drift --ci
 `;
 
 export interface DocsAgentWorkflowOptions {

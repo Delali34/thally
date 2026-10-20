@@ -4,6 +4,7 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react'
 import NextImage from 'next/image'
+import { SiteBrandMark } from '@/components/layout/site-brand-mark'
 import { X, ArrowUp, Square, Maximize2, Minimize2, BookOpen, ChevronDown, ArrowUpRight, Paperclip, Copy, ThumbsUp, ThumbsDown, RefreshCw } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import { DEFAULT_AI_DISCLAIMER } from '@/lib/ai-defaults'
@@ -38,21 +39,6 @@ interface Message {
 interface ChatImage extends AiChatImage {
   id: string
   name: string
-}
-
-/** The assistant identity is a Thally-owned surface, so its leaf never adopts
- * a customer's accent or a configurable assistant glyph. */
-function ThallyBrandMark({ className }: { className?: string }) {
-  return (
-    <NextImage
-      src="/brand/default-favicon-light.svg"
-      alt=""
-      width={24}
-      height={24}
-      className={className}
-      aria-hidden="true"
-    />
-  )
 }
 
 const SCREENSHOT_ACCEPT = 'image/png,image/jpeg,image/gif,image/webp'
@@ -438,7 +424,7 @@ export function DocsChat({
           {/* Header */}
           <div className="flex h-14 shrink-0 items-center justify-between border-b border-border/60 px-5">
             <div className="flex items-center gap-2.5">
-              <ThallyBrandMark className="thally-docs-chat-brand h-5 w-5" />
+              <SiteBrandMark size={20} className="thally-docs-chat-brand h-5 w-5" />
               <span className="text-sm font-semibold">{liveLabel}</span>
               <span className="text-[10px] font-medium text-muted-foreground">
                 Beta
@@ -473,7 +459,7 @@ export function DocsChat({
               /* Welcome state */
               <div className="flex h-full flex-col items-center justify-center gap-6 pb-4">
                 <div className="flex flex-col items-center gap-3 text-center">
-                  <ThallyBrandMark className="thally-docs-chat-brand h-8 w-8" />
+                  <SiteBrandMark size={32} className="thally-docs-chat-brand h-8 w-8" />
                   <div>
                     <p className="font-semibold">How can I help?</p>
                     <p className="mt-1 text-sm text-muted-foreground">
@@ -488,7 +474,7 @@ export function DocsChat({
                 {messages.map((msg, i) => (
                   <div key={i} className={`flex min-w-0 gap-3 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                     {msg.role === 'assistant' && (
-                      <ThallyBrandMark className="thally-docs-chat-brand mt-0.5 h-6 w-6 shrink-0" />
+                      <SiteBrandMark className="thally-docs-chat-brand mt-0.5 h-6 w-6 shrink-0" />
                     )}
 
                     {msg.role === 'user' ? (

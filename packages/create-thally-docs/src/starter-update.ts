@@ -297,7 +297,7 @@ export async function resolveStarterUpdateBase(options: ResolveStarterUpdateBase
       assertRecoveryPackages(options.targetDir, baselineDir, baseline.packages)
       return { release, recoveredProvenance: true, manifestSha256 }
     }
-    throw new Error('The project starter manifest is edited, unknown, or has no verified published framework baseline; refusing to update.')
+    throw new Error('The project starter manifest is edited, unknown, or has no verified published framework baseline; refusing to update. If this project was created by a newer release, retry with npx --yes --package=@thallylabs/cli@latest thally starter update. Keep starter-release.json unchanged.')
   } finally {
     rmSync(workspace, { recursive: true, force: true })
   }
@@ -316,7 +316,7 @@ function assertForwardRelease(
   }
   if (previous.source.commitSha === target.source.commitSha) return
   if (previous.starterVersion > target.starterVersion) {
-    throw new Error('The installed CLI does not contain a newer starter release.')
+    throw new Error('The installed CLI does not contain a newer starter release. Retry with npx --yes --package=@thallylabs/cli@latest thally starter update.')
   }
   if (previous.starterVersion === target.starterVersion) {
     // A starterVersion can receive multiple promoted releases. Promotion
@@ -330,7 +330,7 @@ function assertForwardRelease(
       (release) => release.source.commitSha === previous.source.commitSha,
     )
     if (targetIndex === -1 || previousIndex === -1 || previousIndex <= targetIndex) {
-      throw new Error('The installed CLI does not contain a newer starter release.')
+      throw new Error('The installed CLI does not contain a newer starter release. Retry with npx --yes --package=@thallylabs/cli@latest thally starter update.')
     }
   }
 }

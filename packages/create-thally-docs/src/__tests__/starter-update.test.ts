@@ -529,6 +529,16 @@ describe('verified published recovery bases', () => {
     expect(result.previousRelease).toEqual(old.release)
   })
 
+  it('recovers a Windows CRLF manifest only after proving its trusted framework baseline', async () => {
+    const { old, target, options } = setup()
+    write(target, 'starter-release.json', old.manifestSource.replace(/\n/g, '\r\n'))
+    const runtimePath = 'framework/runtime.ts'
+    write(target, runtimePath, readFileSync(join(old.tree, runtimePath), 'utf8').replace(/\n/g, '\r\n'))
+    const result = await updateStarterProject({ ...options, resolveReleaseHint: async () => { throw new Error('unexpected hint lookup') } })
+    expect(result.recoveredProvenance).toBe(true)
+    expect(result.previousRelease).toEqual(old.release)
+  })
+
   it.each(['changed', 'missing', 'extra'])('rejects %s framework inventory without writes', async (change) => {
     const { target, options } = setup()
     if (change === 'missing') rmSync(join(target, 'framework/runtime.ts'))
@@ -663,5 +673,49 @@ describe('release provider failures', () => {
     await expect(updateStarterProject({ targetDir: target, targetRelease: old.release, releases: [old.release] })).rejects.toMatchObject({
       code: 'STARTER_RELEASE_PROVIDER_UNAVAILABLE',
     })
+  })
+})
+
+describe('removing the frozen CLI from the default starter', () => {
+  function setup() {
+    const ownership = { ...oldOwnership, manualReview: ['package.json', 'package-lock.json'] }
+    const old = releaseFixture(2, ownership)
+    const next = releaseFixture(3, ownership)
+    for (const [fixture, hasCli] of [[old, true], [next, false]] as const) {
+      const manifest = JSON.parse(readFileSync(join(fixture.tree, 'package.json'), 'utf8'))
+      manifest.devDependencies = { typescript: '5.9.3', ...(hasCli ? { '@thallylabs/cli': '0.8.120' } : {}) }
+      write(fixture.tree, 'package.json', JSON.stringify(manifest))
+      write(fixture.tree, 'package-lock.json', JSON.stringify({ lockfileVersion: 3, packages: {
+        '': { dependencies: manifest.dependencies, devDependencies: manifest.devDependencies },
+        'node_modules/@thallylabs/core': { version: `${fixture.release.starterVersion}.0.0` },
+        'node_modules/typescript': { version: '5.9.3' },
+        ...(hasCli ? { 'node_modules/@thallylabs/cli': { version: '0.8.120' } } : {}),
+      } }))
+    }
+    const target = directory('thally-cli-removal-')
+    copyTree(old.tree, target)
+    return { target, options: { targetDir: target, targetRelease: next.release, releases: [next.release, old.release],
+      download: fixtureDownload(new Map([[old.release.source.commitSha, old.tree], [next.release.source.commitSha, next.tree]])) } }
+  }
+
+  it('removes only unchanged CLI declarations and lock entries during a v2 to v3 update', async () => {
+    const { target, options } = setup()
+    const result = await updateStarterProject({ ...options, apply: true, confirmed: true })
+    expect(result.applied).toBe(true)
+    const manifest = JSON.parse(readFileSync(join(target, 'package.json'), 'utf8'))
+    const lock = JSON.parse(readFileSync(join(target, 'package-lock.json'), 'utf8'))
+    expect(manifest.devDependencies).toEqual({ typescript: '5.9.3' })
+    expect(lock.packages[''].devDependencies).toEqual({ typescript: '5.9.3' })
+    expect(lock.packages['node_modules/@thallylabs/cli']).toBeUndefined()
+  })
+
+  it('keeps an owner-selected CLI version as a conflict requiring review', async () => {
+    const { target, options } = setup()
+    const manifest = JSON.parse(readFileSync(join(target, 'package.json'), 'utf8'))
+    manifest.devDependencies['@thallylabs/cli'] = '0.8.99'
+    write(target, 'package.json', JSON.stringify(manifest))
+    const result = await updateStarterProject(options)
+    expect(result.manualConflicts).toContainEqual({ path: 'package.json', fields: ['/devDependencies/@thallylabs~1cli'] })
+    expect(JSON.parse(readFileSync(join(target, 'package.json'), 'utf8')).devDependencies['@thallylabs/cli']).toBe('0.8.99')
   })
 })

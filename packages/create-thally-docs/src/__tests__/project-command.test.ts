@@ -1,7 +1,10 @@
 /** Quiet subprocesses retain bounded failure diagnostics and enforce build timeouts. */
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { terminal } from '../terminal.js'
-import { previewCommand, quoteDirectory, runProjectCommand } from '../utils.js'
+import { installDeps, assertProjectNodeVersion, dependencyInstallArguments, detectPackageManager, previewCommand, quoteDirectory, runProjectCommand } from '../utils.js'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -11,6 +14,7 @@ describe('project subprocess output', () => {
     expect(previewCommand(directory)).toBe(`cd ${quoteDirectory(directory)} && npm run dev`)
     expect(previewCommand(directory, true)).toBe(`cd ${quoteDirectory(directory)} && npm install && npm run dev`)
     expect(previewCommand(directory)).not.toContain('\n')
+    expect(previewCommand(directory, true, 'pnpm')).toBe(`cd ${quoteDirectory(directory)} && pnpm install && pnpm run dev`)
   })
 
   it('retains both streams from a failed quiet command', async () => {
@@ -50,4 +54,48 @@ describe('project subprocess output', () => {
   it('quotes an absolute destination with spaces and apostrophes for the current shell', () => {
     if (process.platform !== 'win32') expect(quoteDirectory("/tmp/docs owner's site")).toBe("'/tmp/docs owner'\\''s site'")
   })
+})
+
+it('uses npm ci for a pinned site and honors pnpm, Yarn and explicit selection', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'thally-package-manager-'))
+  try {
+    expect(dependencyInstallArguments(directory, 'npm')[0]).toBe('install')
+    writeFileSync(join(directory, 'package-lock.json'), '{}')
+    expect(dependencyInstallArguments(directory, 'npm')[0]).toBe('ci')
+    expect(detectPackageManager(directory, undefined, 'pnpm/10.0.0')).toBe('pnpm')
+    writeFileSync(join(directory, 'yarn.lock'), '')
+    expect(detectPackageManager(directory, undefined, 'npm/10.9.0')).toBe('yarn')
+    expect(detectPackageManager(directory, 'npm', 'pnpm/10.0.0')).toBe('npm')
+    expect(dependencyInstallArguments(directory, 'pnpm')).toEqual(['install'])
+  } finally { rmSync(directory, { recursive: true, force: true }) }
+})
+
+it('checks the generated site engine before installation without mutating files', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'thally-site-engine-'))
+  const manifest = JSON.stringify({ engines: { node: '^20.19.0 || ^22.14.0 || >=24.0.0' } })
+  try {
+    writeFileSync(join(directory, 'package.json'), manifest)
+    for (const version of ['20.19.0', '20.20.0', '22.14.0', '22.18.0', '24.1.0']) {
+      expect(() => assertProjectNodeVersion(directory, version)).not.toThrow()
+    }
+    for (const version of ['18.20.0', '20.9.0', '22.0.0', '23.0.0']) {
+      expect(() => assertProjectNodeVersion(directory, version)).toThrow(`you are using ${version}`)
+    }
+    expect(readFileSync(join(directory, 'package.json'), 'utf8')).toBe(manifest)
+    expect(existsSync(join(directory, 'node_modules'))).toBe(false)
+  } finally { rmSync(directory, { recursive: true, force: true }) }
+})
+
+it('prints the required and current Node versions before a scaffold install can fail generically', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'thally-engine-diagnostic-'))
+  const manifest = JSON.stringify({ engines: { node: '<1.0.0' } })
+  const errorOutput = vi.spyOn(terminal, 'error').mockImplementation(() => {})
+  vi.spyOn(terminal, 'warn').mockImplementation(() => {})
+  try {
+    writeFileSync(join(directory, 'package.json'), manifest)
+    await expect(installDeps(directory, 'npm')).rejects.toThrow('requires Node.js <1.0.0')
+    expect(errorOutput).toHaveBeenCalledWith(expect.stringContaining(`requires Node.js <1.0.0; you are using ${process.versions.node}`))
+    expect(existsSync(join(directory, 'node_modules'))).toBe(false)
+    expect(readFileSync(join(directory, 'package.json'), 'utf8')).toBe(manifest)
+  } finally { rmSync(directory, { recursive: true, force: true }) }
 })

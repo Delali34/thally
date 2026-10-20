@@ -83,7 +83,7 @@ describe('create-thally-docs help', () => {
   })
 
   it.each([
-    ['migrate', '<github-or-docs-url>', '--max-pages <count>'],
+    ['migrate', '<github-or-docs-url-or-directory>', '--max-pages <count>'],
     ['check', '[project-dir]', '--external'],
     ['translate', '--locale <code>', '--pages <ids>'],
   ])('prints scoped %s help without prompting', (command, usage, option) => {
@@ -104,6 +104,12 @@ describe('create-thally-docs help', () => {
     expect(result.stderr).toContain('Unknown option "--unknown"')
     expect(result.stderr).toContain('create-thally-docs --help')
     expect(result.stdout).not.toContain('Project directory:')
+  })
+  it('documents an explicit website OpenAPI source in migration help', () => {
+    const result = runCli('migrate', '--help')
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('--openapi <https-url>')
+    expect(result.stdout).toContain('Import an explicit OpenAPI spec for a docs website')
   })
   it('requires no additional source-trust option for migration', () => {
     const result = runCli('migrate', '--help')

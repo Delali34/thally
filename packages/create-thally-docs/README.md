@@ -13,13 +13,13 @@ cd my-docs
 npm run dev
 ```
 
-Sites created from a starter that includes the `thally` CLI
-(`@thallylabs/cli`) as a dev dependency can run `npx thally dev` instead, which
-also prints the local `llms.txt` and MCP endpoints once the server is ready.
-The completion message prints the right command for the project you created.
+The default site does not bundle the Thally CLI or deployment tooling. Run
+`npm run check` to validate documentation, or `npm run starter:update` to preview
+a framework update using the current official CLI. Legacy sites that explicitly
+install a local CLI retain their existing preview command.
 
-The dev server starts at [http://localhost:3040](http://localhost:3040) and
-automatically uses the next available port when needed. A freshly scaffolded
+The dev server starts at [http://localhost:3040](http://localhost:3040). If that
+port is occupied, run `npm run dev -- --port 3041`. A freshly scaffolded
 site is agent-ready out of the box and scores 100/A on the built-in
 [Agent Readiness Score](https://github.com/thallylabs/thally).
 
@@ -74,7 +74,7 @@ runs retain subprocess output for scripts and CI. These options also work with
 | Command | What it does |
 | --- | --- |
 | `create-thally-docs <dir>` | Scaffold a new project |
-| `create-thally-docs migrate <github-or-docs-url> [dir]` | Import a docs repository or public docs site through the shared migration engine |
+| `create-thally-docs migrate <github-or-docs-url-or-directory> [dir]` | Import a docs repository or public docs site through the shared migration engine |
 | `create-thally-docs check [dir] [--fix] [--ci] [--drift] [--external]` | Lint content for broken links, orphan pages, and missing frontmatter; `--external` also checks links to public hosts (bounded, warnings only) |
 | `create-thally-docs translate --locale <code>` | Translate content into another locale |
 
@@ -87,6 +87,36 @@ destination runtime still apply. For example:
 ```bash
 npx create-thally-docs migrate https://docs.example.com my-docs --max-pages 1500 --yes
 ```
+
+A local checkout works without making a private repository public:
+
+```bash
+npx create-thally-docs migrate "../private docs" my-docs --platform mintlify --yes
+npx create-thally-docs migrate https://docs.example.com my-docs --openapi https://docs.example.com/openapi.json --yes
+```
+
+Local sources are supported by the local CLI (`thally migrate` forwards the same
+arguments). The selected input and output must be separate directories. The
+importer snapshots documentation inputs without executing configuration; it skips
+hidden files, dependency directories and symlinks that escape the selected root.
+The Cloud and MCP URL adapters do not gain access to local paths or `file://` URLs.
+
+Website migration restores publisher-provided embedded OpenAPI operations and
+can discover a single linked `openapi.json`/`openapi.yaml` specification. Supply
+`--openapi <https-url>` when the source does not expose one, or links several.
+Only unambiguous operation routes are bound to crawled pages; their original
+prose and URLs stay intact, and generated API navigation excludes those operations.
+Markdown mirror links retain `.md`; machine indexes and spec links use the new
+site's equivalent routes. The migration report identifies unresolved internal links
+and unsupported frontmatter that need review. Supported code-fence labels,
+line numbers, wrapping, focus and highlights remain portable.
+
+An in-place import (`--into <dir>`) preserves authored files that conflict with
+incoming content and lists them in `migration-report.json`; validation fails until
+you resolve those conflicts. Authored navigation is merged. Untouched sample
+navigation is replaced only after comparison with the project's verified immutable
+starter archive and unchanged sample content. If provenance cannot be proved, the
+existing navigation is preserved and the report explains why.
 
 Interactive migrations ask whether the source is Mintlify, Docusaurus, Fern, or
 another auto-detected platform. When automatic detection receives a live
@@ -111,7 +141,7 @@ embedded by Mintlify when it is available, with bounded same-site crawling as a
 fallback.
 
 Migrated OpenAPI specs are written to `openapi/`, not `public/` (which the host
-serves as-is). `--into` never deletes files: an older copy of a spec already in
+serves as-is). `--into` never deletes authored files; only verified unchanged starter samples may be removed: an older copy of a spec already in
 `public/` stays publicly downloadable (a `public/openapi.json` even answers
 `/openapi.json` in place of the filtered spec), so the migration lists such files and
 `thally check` warns about them until you delete them manually.

@@ -161,3 +161,40 @@ describe('Mintlify repository route identity', () => {
     expect(bundle.docsConfig.redirects).toEqual([{ source: '/', destination: '/introduction', permanent: true }])
   })
 })
+
+
+describe('Mintlify mounted machine links', () => {
+  it('retains the Markdown mirror format while removing a proven source mount', () => {
+    const root = repository({ navigation: { groups: [{ group: 'Guide', pages: ['introduction', 'guide'] }] } }, { introduction: '# Welcome\n\n[Mirror](/docs/guide.md#example)\n', guide: '# Guide\n\nExample.' })
+    const bundle = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/example/docs' })
+    expect(bundle.pages.find((page) => page.id === 'introduction')?.body).toContain('[Mirror](/guide.md#example)')
+  })
+})
+
+
+describe('Mintlify source document links', () => {
+  it('maps proven MDX filenames to HTML while retaining Markdown mirror requests', () => {
+    const root = repository({ navigation: { groups: [{ group: 'Guide', pages: ['introduction', 'quickstart'] }] } }, { introduction: '# Welcome\n\n[HTML](/quickstart.mdx#run) [Mounted HTML](/docs/quickstart.mdx) [Mirror](/quickstart.md) [Unknown](/missing.mdx)', quickstart: '# Quickstart\n\nRun the example.' })
+    const bundle = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/example/docs' })
+    const body = bundle.pages.find((page) => page.id === 'introduction')?.body
+    expect(body).toContain('[HTML](/quickstart#run)')
+    expect(body).toContain('[Mounted HTML](/quickstart)')
+    expect(body).toContain('[Mirror](/quickstart.md)')
+    expect(body).toContain('[Unknown](/missing.mdx)')
+  })
+})
+
+describe('generated API route inventory matches runtime catch-all routing', () => {
+  it('lists actual operation routes and /api redirect, without inventing spec-root landing pages', async () => {
+    const { migrationApiRoutes } = await import('../repository.js')
+    const bundle = {
+      docsConfig: { tabs: [{ tab: 'API', api: { source: 'openapi/first.json' } }, { tab: 'Secondary', api: { source: 'openapi/second.json' } }] },
+      assets: ['first', 'second'].map((name) => ({ path: `openapi/${name}.json`, projectRelative: true, content: Buffer.from(JSON.stringify({ openapi: '3.0.0', paths: { '/users': { get: { responses: {} } } } })) })),
+    }
+    expect(migrationApiRoutes(bundle).sort()).toEqual(['/api', '/api/default/users/get', '/api/secondary/users/get'])
+  })
+  it('does not advertise /api when the default spec has no operations to redirect to', async () => {
+    const { migrationApiRoutes } = await import('../repository.js')
+    expect(migrationApiRoutes({ docsConfig: { tabs: [{ tab: 'API', api: { source: 'openapi/empty.json' } }] }, assets: [{ path: 'openapi/empty.json', content: Buffer.from('{"openapi":"3.0.0","paths":{}}'), projectRelative: true }] })).toEqual([])
+  })
+})

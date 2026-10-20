@@ -224,6 +224,8 @@ describe("starter runtime contract", () => {
       refreshLockfile: writeCoreLock,
     });
 
+    expect(JSON.parse(readFileSync(join(starterDirectory, "starter-release.json"), "utf8")).starterVersion).toBe(3);
+
     expect(
       checkStarterRuntimeContract({
         starterDirectory,
@@ -271,6 +273,29 @@ describe("starter runtime contract", () => {
     expect(lock.packages["node_modules/@thallylabs/core"].version).toBe(
       "0.2.3",
     );
+  });
+
+  it("preserves exact test-bearing v2 snapshots while requiring a lean v3 tree", () => {
+    const runtime = createRuntime();
+    const testPath = "src/lib/runtime.test.ts";
+    write(runtime.directory, testPath, "export const reviewedLegacyTest = true\n");
+    execFileSync("git", ["add", "."], { cwd: runtime.directory });
+    execFileSync("git", ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: retain historical suite"], { cwd: runtime.directory });
+    const starterDirectory = createStarter(runtime);
+    syncStarterRuntimeContract({starterDirectory, runtimeDirectory: runtime.directory, refreshLockfile: writeCoreLock});
+    const manifestPath = join(starterDirectory, "starter-release.json");
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    expect(manifest.starterVersion).toBe(3);
+    expect(() => readFileSync(join(starterDirectory, testPath))).toThrow();
+    manifest.starterVersion = 2;
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+    write(starterDirectory, testPath, "export const reviewedLegacyTest = true\n");
+    expect(checkStarterRuntimeContract({starterDirectory, runtimeDirectory: runtime.directory}).differences).toEqual([]);
+    write(starterDirectory, testPath, "changed legacy suite\n");
+    expect(checkStarterRuntimeContract({starterDirectory, runtimeDirectory: runtime.directory}).differences).toContain(`${testPath} bytes differ`);
+    manifest.starterVersion = 3;
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+    expect(checkStarterRuntimeContract({starterDirectory, runtimeDirectory: runtime.directory}).differences).toContain(`${testPath} is source-only but exists in starter`);
   });
 
   it("rejects a stale dependency lock even when package metadata is current", () => {

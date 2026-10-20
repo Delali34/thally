@@ -3,6 +3,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { createContext, Script } from 'node:vm'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { mergeMigrationConfig } from '../index.js'
@@ -102,5 +103,66 @@ describe('migration config merge', () => {
         { group: 'Reference', pages: ['reference/api'] },
       ],
     }])
+  })
+})
+
+describe('in-place imported navbar branding', () => {
+  function importedBrand() {
+    const root = mkdtempSync(join(tmpdir(), 'thally-render-brand-'))
+    roots.push(root)
+    mkdirSync(join(root, 'images'))
+    writeFileSync(join(root, 'docs.json'), JSON.stringify({ name: 'Imported Docs', logo: { light: '/images/logo.svg', dark: '/images/logo-dark.svg' }, navigation: { groups: [{ group: 'Guide', pages: ['intro'] }] } }))
+    writeFileSync(join(root, 'intro.mdx'), '# Intro\n\nImported documentation.')
+    for (const name of ['logo.svg', 'logo-dark.svg']) writeFileSync(join(root, 'images', name), '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0"/></svg>')
+    return migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/example/docs' })
+  }
+  it('retains light/dark imported logo paths and their emitted assets when the starter only supplied a primary action', () => {
+    const rendered = renderMigrationFiles(importedBrand(), { existingConfig: { tabs: [], navbar: { primary: { label: 'Start', href: '/quickstart' } } } })
+    const config = JSON.parse(String(rendered.find((file) => file.path === 'docs.json')!.content))
+    expect(config.navbar).toEqual({ primary: { label: 'Start', href: '/quickstart' }, logo: { light: '/images/logo.svg', dark: '/images/logo-dark.svg', showTitle: false } })
+    for (const mode of ['light', 'dark']) expect(rendered.some((file) => file.path === `public${config.navbar.logo[mode]}`)).toBe(true)
+  })
+  it.each([null, { light: '/owner/light.svg', dark: '/owner/dark.svg', showTitle: true }])('preserves the owner explicit navbar logo %j', (logo) => {
+    const rendered = renderMigrationFiles(importedBrand(), { existingConfig: { tabs: [], navbar: { primary: null, logo } } })
+    const config = JSON.parse(String(rendered.find((file) => file.path === 'docs.json')!.content))
+    expect(config.navbar.logo).toEqual(logo)
+    expect(config.navbar.primary).toBeNull()
+  })
+})
+
+describe('in-place redirect preservation', () => {
+  it('merges imported aliases while preserving owner precedence for equivalent sources', () => {
+    const merged = mergeMigrationConfig({ tabs: [], redirects: [{ source: '/Owner-Alias/', destination: '/owner-target', permanent: false }] }, { tabs: [], redirects: [{ source: '/owner-alias', destination: '/imported-target', permanent: true }, { source: '/new-alias', destination: '/canonical', permanent: true }] })
+    expect(merged.redirects).toEqual([{ source: '/Owner-Alias/', destination: '/owner-target', permanent: false }, { source: '/new-alias', destination: '/canonical', permanent: true }])
+  })
+  it('does not introduce an alias cycle through an existing owner redirect', () => {
+    const merged = mergeMigrationConfig({ tabs: [], redirects: [{ source: '/canonical', destination: '/alias', permanent: false }] }, { tabs: [], redirects: [{ source: '/alias', destination: '/canonical', permanent: true }] })
+    expect(merged.redirects).toEqual([{ source: '/canonical', destination: '/alias', permanent: false }])
+  })
+  it.each(['/x/../canonical', '/%2e%2e/canonical', '/x/%2E%2e/canonical?lang=go#response', '/canonical?lang=go#response'])('rejects imported cycles after browser destination normalization: %s', (destination) => {
+    const owner = [{ source: '/canonical', destination: '/alias', permanent: false }]
+    const merged = mergeMigrationConfig({ tabs: [], redirects: owner }, { tabs: [], redirects: [{ source: '/alias', destination, permanent: true }] })
+    expect(merged.redirects).toEqual(owner)
+  })
+  it.each(['/x/../alias', '/%2e%2e/alias', '/x/%2E%2e/alias?lang=go#response'])('normalizes an existing owner destination when checking imported cycles: %s', (destination) => {
+    const owner = [{ source: '/canonical', destination, permanent: false }]
+    const merged = mergeMigrationConfig({ tabs: [], redirects: owner }, { tabs: [], redirects: [{ source: '/alias', destination: '/canonical', permanent: true }] })
+    expect(merged.redirects).toEqual(owner)
+  })
+  it('retains safe imported destinations verbatim, including external addresses and normalized paths', () => {
+    const owner = [{ source: '/canonical', destination: '/alias', permanent: false }]
+    const incoming = [{ source: '/new', destination: '/x/../guide?lang=go#response', permanent: true }, { source: '/alias', destination: 'https://example.com/canonical', permanent: true }, { source: '/other', destination: '//example.com/canonical', permanent: true }]
+    const merged = mergeMigrationConfig({ tabs: [], redirects: owner }, { tabs: [], redirects: incoming })
+    expect(merged.redirects).toEqual([...owner, ...incoming])
+  })
+  it('bounds long literal and pattern source slash runs while preserving owner precedence', () => {
+    const sources = ['/' + '/'.repeat(250_000) + 'tail', '/:path/' + '/'.repeat(250_000) + 'tail']
+    for (const source of sources) {
+      const owner = { source, destination: '/owner', permanent: false }
+      const incoming = { source: source + '////', destination: '/imported', permanent: true }
+      const context = createContext({ merge: mergeMigrationConfig, existing: { tabs: [], redirects: [owner] }, incoming: { tabs: [], redirects: [incoming] } })
+      new Script('result = merge(existing, incoming)').runInContext(context, { timeout: 1000 })
+      expect(context.result.redirects).toEqual([owner])
+    }
   })
 })

@@ -195,7 +195,7 @@ describe('public URL migration', () => {
       'api/auth',
     ])
     expect(bundle.pages.some((page) => page.source.includes('/blog/'))).toBe(false)
-    expect(bundle.pages[0].body).toContain('[Install](/guides/install#run)')
+    expect(bundle.pages[0].body).toContain('[Install](/guides/install.md#run)')
     expect(bundle.docsConfig.tabs[0].groups?.map((group) => group.group)).toEqual([
       'Overview',
       'Guides',
@@ -740,5 +740,29 @@ describe('public URL migration', () => {
     expect(guide?.body).toContain('<Tab title="npm">')
     expect(guide?.body).toContain('| Option | Value |')
     expect(guide?.body).toContain(String.raw`https://&lt;host&gt;/C:\\docs\\\|&#123;project&#125;`)
+  })
+})
+
+describe('website API and machine-readable migration', () => {
+  const schema = JSON.stringify({ openapi: '3.0.0', info: { title: 'Example', version: '1' }, paths: { '/users': { get: { tags: ['Users'], summary: 'List users', responses: { 200: { description: 'OK' } } } } } })
+  function sourceFetcher(linkSpec: boolean): MigrationFetcher {
+    return async (url) => {
+      if (url.pathname === '/openapi.json') return response(url.toString(), schema, 'application/json')
+      if (url.pathname === '/docs') return response(url.toString(), `<html><head>${linkSpec ? '<link rel="service-desc" href="/openapi.json">' : ''}<title>Docs</title></head><body><main><h1>Docs</h1><p>A useful documentation overview with enough material for the importer to retain.</p><a href="/docs/api-reference/users/list-users">List users</a></main></body></html>`, 'text/html')
+      if (url.pathname === '/docs.md') return response(url.toString(), '# Docs\n\n[Users](/docs/api-reference/users/list-users)\n[Markdown](/docs/guide.md)\n[Index](/llms.txt)\n[Spec](/openapi.json)\n', 'text/markdown')
+      if (url.pathname === '/docs/api-reference/users/list-users') return response(url.toString(), '<html><body><main><h1>List users</h1><p>Endpoint-specific prose stays here.</p></main></body></html>', 'text/html')
+      if (url.pathname === '/docs/api-reference/users/list-users.md') return response(url.toString(), '# List users\n\nEndpoint-specific prose stays here.', 'text/markdown')
+      if (url.pathname === '/docs/guide.md') return response(url.toString(), '# Guide\n\nA guide for readers.', 'text/markdown')
+      throw new Error('not found')
+    }
+  }
+  it.each([true, false])('restores an interactive endpoint with publisher discovery=%s and preserves machine link formats', async (automatic) => {
+    const bundle = await migrateUrl({ sourceUrl: 'https://docs.example.com/docs', platform: 'mintlify', fetcher: sourceFetcher(automatic), ...(automatic ? {} : { openapiUrl: 'https://docs.example.com/openapi.json' }) })
+    const endpoint = bundle.pages.find((page) => page.navigationId === 'api-reference/users/list-users')
+    expect(endpoint).toMatchObject({ openapi: expect.stringContaining('GET /users'), body: expect.stringContaining('Endpoint-specific prose') })
+    expect(bundle.docsConfig.tabs.find((tab) => tab.api)?.api?.navigation).toBe(false)
+    expect(bundle.pages.find((page) => page.id === 'introduction')?.body).toContain('(/guide.md)')
+    expect(bundle.pages.find((page) => page.id === 'introduction')?.body).toContain('(/llms.txt)')
+    expect(bundle.pages.find((page) => page.id === 'introduction')?.body).toContain('(/openapi.json)')
   })
 })

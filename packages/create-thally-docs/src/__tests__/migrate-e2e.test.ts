@@ -182,3 +182,150 @@ describe('CLI migration flow', () => {
     expect(scaffoldMock).toHaveBeenCalledWith(expect.objectContaining({ repoUrl: '' }))
   })
 })
+
+describe('trusted local repository materialization', () => {
+  it('imports local Mintlify prose and an interactive API without cloning, running config, or publishing secrets', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'thally-local-e2e-'))
+    const source = join(root, 'private docs')
+    const output = join(root, 'site')
+    mkdirSync(source)
+    mkdirSync(output)
+    writeFileSync(join(output, 'docs.json'), JSON.stringify({ tabs: [] }))
+    writeFileSync(join(source, 'docs.json'), JSON.stringify({ $schema: 'https://mintlify.com/docs.json', navigation: { tabs: [{ tab: 'Guide', groups: [{ group: 'Basics', pages: ['introduction'] }] }, { tab: 'API', openapi: { source: 'openapi.json', directory: 'api-reference' } }] } }))
+    writeFileSync(join(source, 'introduction.mdx'), '---\ntitle: Welcome\nsidebarTitle: Start\nhidden: true\nlayout: vendor-layout\n---\n\n[API](/api-reference/users/list-users)\n[Machine index](/llms.txt)\n\n```ts client.ts lines wrap\nconst value = "safe"\n```\n')
+    writeFileSync(join(source, '.env'), 'TOP_SECRET=never-import')
+    writeFileSync(join(source, 'docusaurus.config.js'), 'throw new Error("must not execute")')
+    writeFileSync(join(source, 'openapi.json'), JSON.stringify({ openapi: '3.0.0', info: { title: 'Example', version: '1' }, paths: { '/users': { get: { summary: 'List users', tags: ['Users'], responses: { 200: { description: 'OK' } } } } } }))
+    const result = await migrateDocs({ sourceUrl: source, sourceDirectory: source, projectDir: output, into: true, yes: true, platform: 'mintlify', skipValidation: true })
+    expect(result.pagesWritten).toBe(1)
+    const page = readFileSync(join(output, 'src/content/introduction.mdx'), 'utf8')
+    expect(page).toContain('hidden: true')
+    expect(page).toContain('navTitle: "Start"')
+    expect(page).toContain('```ts client.ts lines wrap')
+    expect(page).toContain('[API](/api/default/users/get)')
+    expect(page).toContain('[Machine index](/llms.txt)')
+    expect(page).not.toContain('layout:')
+    expect(JSON.parse(readFileSync(join(output, 'docs.json'), 'utf8')).tabs.find((tab: { api?: unknown }) => tab.api)).toBeDefined()
+    expect(result.warnings.some((warning) => warning.message.includes('layout'))).toBe(true)
+    expect(existsSync(join(output, '.env'))).toBe(false)
+    expect(readFileSync(result.reportPath, 'utf8')).not.toContain(source)
+  })
+
+  it('preserves an authored file on collision and records an actionable failed validation', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'thally-local-conflict-'))
+    const source = join(root, 'source')
+    const output = join(root, 'site')
+    mkdirSync(source)
+    mkdirSync(join(output, 'src/content'), { recursive: true })
+    writeFileSync(join(output, 'docs.json'), JSON.stringify({ tabs: [{ tab: 'Authored', pages: ['introduction'] }] }))
+    writeFileSync(join(output, 'src/content/introduction.mdx'), '# My own introduction')
+    writeFileSync(join(source, 'docs.json'), JSON.stringify({ $schema: 'https://mintlify.com/docs.json', navigation: { groups: [{ group: 'Docs', pages: ['introduction'] }] } }))
+    writeFileSync(join(source, 'introduction.mdx'), '# Incoming introduction\n\nImported prose.')
+    const result = await migrateDocs({ sourceUrl: source, sourceDirectory: source, projectDir: output, into: true, yes: true, skipValidation: true })
+    expect(readFileSync(join(output, 'src/content/introduction.mdx'), 'utf8')).toBe('# My own introduction')
+    expect(result.validation.content).toBe('failed')
+    expect(JSON.parse(readFileSync(result.reportPath, 'utf8')).conflicts).toEqual(['src/content/introduction.mdx'])
+    expect(JSON.parse(readFileSync(join(output, 'docs.json'), 'utf8')).tabs[0].tab).toBe('Authored')
+  })
+})
+
+
+describe('local source-document link materialization', () => {
+  it('imports known MDX links as HTML links and preserves machine Markdown links', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'thally-local-mdx-links-'))
+    const source = join(root, 'source')
+    const output = join(root, 'site')
+    mkdirSync(source)
+    mkdirSync(output)
+    writeFileSync(join(output, 'docs.json'), '{"tabs":[]}')
+    writeFileSync(join(source, 'docs.json'), JSON.stringify({ $schema: 'https://mintlify.com/docs.json', navigation: { groups: [{ group: 'Guide', pages: ['introduction', 'quickstart'] }] } }))
+    writeFileSync(join(source, 'introduction.mdx'), '# Welcome\n\n[HTML](/quickstart.mdx#run) [Mirror](/quickstart.md) [Unknown](/missing.mdx)')
+    writeFileSync(join(source, 'quickstart.mdx'), '# Quickstart\n\nRun the example.')
+    const result = await migrateDocs({ sourceUrl: source, sourceDirectory: source, projectDir: output, into: true, yes: true, skipValidation: true })
+    const page = readFileSync(join(output, 'src/content/introduction.mdx'), 'utf8')
+    expect(page).toContain('[HTML](/quickstart#run)')
+    expect(page).toContain('[Mirror](/quickstart.md)')
+    const linkWarnings = result.warnings.filter((warning) => warning.message.includes('Internal links have no imported destination'))
+    expect(linkWarnings).toEqual([expect.objectContaining({ message: expect.stringContaining('/missing.mdx') })])
+    expect(linkWarnings[0].message).not.toContain('/quickstart')
+  })
+})
+
+describe('rendered URL runner combined with onboarding materialization', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    validateMigrationMock.mockResolvedValue({ content: 'passed', build: 'passed', messages: [] })
+  })
+
+  it('enriches a declared Markdown operation from the complete explicit spec as one HTML-backed page without duplicate endpoint navigation', async () => {
+    const projectDir = mkdtempSync(join(tmpdir(), 'thally-runner-openapi-onboarding-'))
+    writeFileSync(join(projectDir, 'docs.json'), JSON.stringify({ tabs: [{ tab: 'Existing', pages: ['existing'] }] }))
+    const origin = 'https://docs.example.com'
+    const path = '/docs/api-reference/users/list-users'
+    const specUrl = 'https://specs.example.com/openapi.json'
+    const schema = { openapi: '3.0.3', info: { title: 'Example', version: '1' }, paths: { '/users': { get: { summary: 'List users', tags: ['Users'], responses: { 200: { description: 'OK', content: { 'application/json': { schema: { type: 'object', properties: { ready: { type: 'object', description: 'Complete nested field', properties: { value: { type: 'boolean' } } } } } } } } } } } } }
+    const complete = { ...schema, paths: { '/users': { get: { ...schema.paths['/users'].get, parameters: [{ name: 'cursor', in: 'query', description: 'Only present in the complete explicitly selected schema', schema: { type: 'string' } }] } } } }
+    const markdown = `# List users\n\n\`\`\`yaml get /users\n${JSON.stringify(schema)}\n\`\`\``
+    const html = `<html><head><link rel="alternate" type="text/markdown" href="${path}.md"></head><body><main><article><h1>List users</h1><p>Original endpoint prose stays visible.</p><pre><code>GET /users</code></pre><div id="api-playground-2-operation-page"><div class="method-pill">GET</div><div data-component-part="scroll-area-content">/users</div><section class="api-section"><div class="api-section-heading"><button aria-haspopup="menu">200</button><span>application/json</span></div><div class="object-param-field"><p data-component-part="field-name">ready</p><details class="expandable" data-component-part="expandable"><summary data-component-part="expandable-button" aria-controls="ready-panel" aria-expanded="false"><p>Attributes</p></summary><div id="ready-panel" data-component-part="expandable-content"></div></details></div></section></div></article></main></body></html>`
+    const fetcher: MigrationFetcher = vi.fn(async (url) => {
+      if (url.href !== specUrl) throw new Error('Unexpected specification fetch')
+      return { finalUrl: url, contentType: 'application/json', body: JSON.stringify(complete) }
+    })
+    const result = await migrateDocs({ sourceUrl: `${origin}${path}`, projectDir, into: true, yes: true, openapiUrl: specUrl, fetcher, urlMigration: {
+      scopePath: '/docs', concurrency: 1,
+      captureProvider: { capture: async ({ url }) => {
+        if (url.pathname === path) return { finalUrl: url, contentType: 'text/html', body: html }
+        if (url.pathname === `${path}.md`) return { finalUrl: url, contentType: 'text/markdown', body: markdown }
+        throw new Error('No discovery index')
+      } },
+    } })
+    const report = JSON.parse(readFileSync(result.reportPath, 'utf8'))
+    expect(report.sourceValidation.status).toBe('passed')
+    expect(result.pagesWritten).toBe(1)
+    const page = readFileSync(join(projectDir, 'src/content/api-reference/users/list-users.mdx'), 'utf8')
+    expect(page).toContain('Original endpoint prose stays visible.')
+    expect(page).toContain('GET /users')
+    expect(page).toMatch(/openapi: "openapi\/openapi-[a-f0-9]+\.json GET \/users"/)
+    expect(existsSync(join(projectDir, 'src/content/api-reference/users/list-users.md.mdx'))).toBe(false)
+    const config = JSON.parse(readFileSync(join(projectDir, 'docs.json'), 'utf8'))
+    expect(config.tabs.filter((tab: { api?: { navigation?: boolean }; hidden?: boolean }) => tab.api && !tab.hidden && tab.api.navigation !== false)).toEqual([])
+    const bindings = config.tabs.filter((tab: { api?: { source: string } }) => tab.api)
+    expect(bindings).toHaveLength(1)
+    expect(page).toContain(`openapi: "${bindings[0].api.source} GET /users"`)
+    expect(JSON.parse(readFileSync(join(projectDir, bindings[0].api.source), 'utf8'))).toEqual(complete)
+    expect(fetcher).toHaveBeenCalledOnce()
+  })
+
+  it('retains distinct sidebar aliases, noindex and their redirect alongside an existing owner redirect after config merge', async () => {
+    const projectDir = mkdtempSync(join(tmpdir(), 'thally-runner-alias-onboarding-'))
+    writeFileSync(join(projectDir, 'docs.json'), JSON.stringify({ tabs: [{ tab: 'Existing', pages: ['existing'] }], redirects: [{ source: '/old-guide', destination: '/existing', permanent: true }] }))
+    const origin = 'https://docs.example.com'
+    const primary = '/docs/dashboard/domains/tracking'
+    const alias = '/docs/knowledge-base/why-open-rates'
+    const navigation = [
+      { label: 'Dashboard', children: [{ label: 'Tracking', url: `${origin}${primary}` }] },
+      { label: 'Knowledge base', children: [{ label: 'Why are my open rates not accurate', url: `${origin}${alias}` }] },
+    ]
+    const result = await migrateDocs({ sourceUrl: `${origin}${primary}`, projectDir, into: true, yes: true, urlMigration: {
+      scopePath: '/docs', concurrency: 1,
+      captureProvider: { capture: async ({ url }) => {
+        if ([primary, alias].includes(url.pathname)) return { finalUrl: new URL(primary, origin), contentType: 'text/html', body: '<article><h1>Tracking</h1><p>Original article about domain tracking.</p></article>', navigation }
+        throw new Error('No discovery index')
+      } },
+    } })
+    expect(result.pagesWritten).toBe(2)
+    const aliasPage = readFileSync(join(projectDir, 'src/content/knowledge-base/why-open-rates.mdx'), 'utf8')
+    expect(aliasPage).toContain('noindex: true')
+    expect(aliasPage).toContain('navTitle: "Why are my open rates not accurate"')
+    expect(aliasPage).toContain('Original article about domain tracking.')
+    const primaryPage = readFileSync(join(projectDir, 'src/content/dashboard/domains/tracking.mdx'), 'utf8')
+    expect(primaryPage).not.toContain('noindex: true')
+    const config = JSON.parse(readFileSync(join(projectDir, 'docs.json'), 'utf8'))
+    expect(config.redirects).toEqual(expect.arrayContaining([
+      { source: '/old-guide', destination: '/existing', permanent: true },
+      { source: '/knowledge-base/why-open-rates', destination: '/dashboard/domains/tracking', permanent: true },
+    ]))
+    expect(JSON.stringify(config.tabs)).toContain('knowledge-base/why-open-rates')
+    expect(JSON.parse(readFileSync(result.reportPath, 'utf8')).sourceValidation.status).toBe('passed')
+  })
+})

@@ -18,6 +18,8 @@ jobs:
   verify:
     name: Test · Build
     runs-on: ubuntu-latest
+    outputs:
+      full: ${{ steps.plan.outputs.full }}
     env:
       # Reused only in this job; no build outputs are restored from a cache.
       THALLY_CI_PACKAGE_BUILD_PROOF: 'true'
@@ -71,3 +73,34 @@ jobs:
           # Keep the build deterministic and offline — embeddings fall back to the
           # local hash provider when no key is present.
           THALLY_SITE_URL: https://example.com
+
+  windows-updates:
+    name: Windows · Starter updates
+    needs: verify
+    if: needs.verify.outputs.full == 'true'
+    runs-on: windows-latest
+    steps:
+      - name: Use Windows line endings
+        run: git config --global core.autocrlf true
+
+      - name: Checkout with Windows line endings
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build workspace packages
+        run: npm run packages:build
+
+      # Exercise native filesystem paths as well as CRLF equivalence. The
+      # updater must preserve authored bytes and exact mutation preconditions.
+      - name: Verify safe starter updates
+        run: npx vitest run packages/create-thally-docs/src/__tests__/starter-file-comparison.test.ts packages/create-thally-docs/src/__tests__/starter-update.test.ts

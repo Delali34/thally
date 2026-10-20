@@ -18,10 +18,52 @@ function unquote(value: string): string {
 /** Split `openapi: "[spec] METHOD /path"` or `openapi: "[spec] webhook name"`. */
 export function splitOpenApiRef(raw: string): OpenApiPageRef | null {
   const value = unquote(raw)
-  const match = /^(?:(.+?)\s+)?((?:webhook\s+[^\s/]\S*)|(?:[A-Za-z]+\s+\/.*))$/i.exec(value)
-  if (!match) return null
-  const specRef = match[1] ? unquote(match[1]) : undefined
-  return { ...(specRef ? { specRef } : {}), operation: match[2] }
+  // Scan tokens once rather than backtracking over every possible spec prefix
+  // and whitespace split. Frontmatter is untrusted and may be arbitrarily long.
+  let firstLineBreak = -1
+  let lastLineBreak = -1
+  let lastWhitespace = -1
+  for (let index = 0; index < value.length; index++) {
+    const character = value[index]
+    if (/\s/.test(character)) lastWhitespace = index
+    if (character === '\n' || character === '\r' || character === '\u2028' || character === '\u2029') {
+      if (firstLineBreak < 0) firstLineBreak = index
+      lastLineBreak = index
+    }
+  }
+  let bare: OpenApiPageRef | null = null
+  let previousEnd = 0
+  let start = 0
+  while (start < value.length) {
+    let end = start
+    let letters = true
+    while (end < value.length && !/\s/.test(value[end])) {
+      const code = value.charCodeAt(end)
+      if (!(code >= 65 && code <= 90) && !(code >= 97 && code <= 122)) letters = false
+      end++
+    }
+    let argument = end
+    while (argument < value.length && /\s/.test(value[argument])) argument++
+    const hasArgument = argument > end && argument < value.length
+    const method = letters && value[argument] === '/' && lastLineBreak < argument
+    const webhook = end - start === 7 && value.slice(start, end).toLowerCase() === 'webhook'
+      && value[argument] !== '/' && lastWhitespace < argument
+    if (hasArgument && (method || webhook)) {
+      if (start === 0) bare = { operation: value }
+      else {
+        const specRef = unquote(value.slice(0, previousEnd))
+        return { ...(specRef ? { specRef } : {}), operation: value.slice(start) }
+      }
+    }
+    previousEnd = end
+    // The spec prefix formerly matched `.`, so a line break inside it cannot
+    // be accepted; line breaks in the separating whitespace remain supported.
+    if (firstLineBreak >= 0 && firstLineBreak < previousEnd) break
+    start = argument
+  }
+  // Preserve prefix-first matching: a later valid operation belongs to the
+  // optional spec prefix before a bare METHOD /path interpretation is tried.
+  return bare
 }
 
 /**
