@@ -1,4 +1,5 @@
 /** Cache budgets bound retained ownership without changing authoritative load results. */
+import { runInNewContext } from 'node:vm'
 import { describe, expect, it, vi } from 'vitest'
 import { createBoundedCache, createBoundedPromiseCache, estimateRetainedPayloadBytes } from '../bounded-cache'
 
@@ -93,5 +94,39 @@ describe('bounded LRU ownership', () => {
     expect(estimateRetainedPayloadBytes(object)).toBeGreaterThan(40)
     expect(getter).not.toHaveBeenCalled()
     expect(estimateRetainedPayloadBytes({ text: 'x'.repeat(1000) }, 100)).toBe(101)
+  })
+
+  it('rejects native and cross-realm promises whose retained results cannot be measured', () => {
+    const promises = [Promise.resolve('x'.repeat(10_000)), runInNewContext('Promise.resolve("payload")')]
+    for (const promise of promises) {
+      expect(estimateRetainedPayloadBytes({ content: { owner: { searchParams: promise } } }, 1000)).toBe(1001)
+    }
+  })
+
+  it('never enumerates or reads request promises nested in a React owner graph', () => {
+    const ownKeys = vi.fn(() => { throw new Error('Object.keys(searchParams) is synchronous dynamic access') })
+    const get = vi.fn(() => { throw new Error('request data must not be inspected') })
+    const searchParams = new Proxy(Promise.resolve({ query: 'value' }), { ownKeys, get })
+    const content = { _owner: { pendingProps: { searchParams } } }
+
+    expect(estimateRetainedPayloadBytes({ content }, 1000)).toBe(1001)
+    expect(ownKeys).not.toHaveBeenCalled()
+    expect(get).not.toHaveBeenCalled()
+  })
+
+  it('returns successful owner-bearing content uncached without inspecting dynamic request data', async () => {
+    const ownKeys = vi.fn(() => { throw new Error('synchronous dynamic access') })
+    const result = { content: { _owner: { searchParams: new Proxy(Promise.resolve({}), { ownKeys }) } } }
+    const cache = createBoundedPromiseCache<typeof result>({
+      maxEntries: 2,
+      maxBytes: 1000,
+      sizeOf: value => estimateRetainedPayloadBytes(value, 1000),
+    })
+    const load = vi.fn(async () => result)
+    expect(await cache.getOrLoad('doc', load)).toBe(result)
+    expect(cache.snapshot()).toEqual({ entries: 0, bytes: 0 })
+    expect(await cache.getOrLoad('doc', load)).toBe(result)
+    expect(load).toHaveBeenCalledTimes(2)
+    expect(ownKeys).not.toHaveBeenCalled()
   })
 })

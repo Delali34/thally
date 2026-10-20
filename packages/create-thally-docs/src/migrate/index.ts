@@ -7,8 +7,7 @@
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { setImmediate } from 'node:timers/promises'
-import { basename, dirname, join, resolve } from 'node:path'
+import { basename, join, resolve } from 'node:path'
 
 import {
   cloneGitHubRepository,
@@ -38,6 +37,7 @@ import { convertRepository, discoverUrl, renderFiles } from '../migration-work.j
 import { validateMigration, type MigrationValidation } from './validate.js'
 import { assertMigrationDestination, assertSeparateMigrationDirectories, snapshotLocalMigration } from './local-source.js'
 import { migrationExistingConfig } from './into.js'
+import { materializeMigration } from './materialize.js'
 import { reportUnresolvedMigrationLinks } from './links.js'
 
 export interface MigrateOptions {
@@ -86,7 +86,7 @@ function projectPath(projectDir: string, candidate: string): string {
  * committed by `initGit`, and a public push must not publish them. Appends to
  * (never replaces) an existing .gitignore, once.
  */
-function ignoreQuarantineDirectory(projectDir: string): void {
+function quarantineIgnoreFile(projectDir: string): { path: string; content: string } | undefined {
   const ignorePath = projectPath(projectDir, '.gitignore')
   const existing = existsSync(ignorePath) ? readFileSync(ignorePath, 'utf8') : ''
   // The last matching rule wins in .gitignore: an existing entry only counts if
@@ -94,7 +94,7 @@ function ignoreQuarantineDirectory(projectDir: string): void {
   const rules = existing.split(/\r?\n/).map((line) => line.trim()).filter((line) => /^!?\/?migration-quarantine(?:\/(?:\*\*?)?)?$/.test(line))
   if (rules.length > 0 && !rules[rules.length - 1].startsWith('!')) return
   const separator = existing === '' || existing.endsWith('\n') ? '' : '\n'
-  writeFileSync(ignorePath, `${existing}${separator}\n# Access-restricted pages withheld by migration: local only, never commit or deploy\n/migration-quarantine/\n`)
+  return { path: '.gitignore', content: `${existing}${separator}\n# Access-restricted pages withheld by migration: local only, never commit or deploy\n/migration-quarantine/\n` }
 }
 
 function readExistingConfig(projectDir: string): MigrationDocsConfig | undefined {
@@ -270,19 +270,24 @@ export async function migrateDocs(options: MigrateOptions): Promise<MigrateResul
     if (stale) bundle.warnings.unshift(stale)
   }
 
+  const existingPlan = options.into ? await migrationExistingConfig(projectDir, readExistingConfig(projectDir), bundle.warnings) : undefined
+  const registryPath = projectPath(projectDir, 'src/mdx/custom-components.tsx')
+  const registryBytes = existsSync(registryPath) ? readFileSync(registryPath) : undefined
+  existingPlan?.preconditions.set('src/mdx/custom-components.tsx', registryBytes)
   const rendered = await terminal.step('Rendering documentation', async () => renderFiles(bundle, {
-      existingConfig: options.into ? await migrationExistingConfig(projectDir, readExistingConfig(projectDir), bundle.warnings) : undefined,
-      existingComponentRegistry: existsSync(projectPath(projectDir, 'src/mdx/custom-components.tsx'))
-        ? readFileSync(projectPath(projectDir, 'src/mdx/custom-components.tsx'), 'utf8')
-        : undefined,
+      existingConfig: existingPlan?.config,
+      existingComponentRegistry: registryBytes?.toString('utf8'),
   }), 'Documentation rendered')
   const conflicts: string[] = []
+  const writePreconditions = new Map<string, Buffer | undefined>(existingPlan?.preconditions)
   const writable = rendered.filter((file) => {
     const path = projectPath(projectDir, file.path)
+    const current = existsSync(path) ? readFileSync(path) : undefined
+    if (!writePreconditions.has(file.path)) writePreconditions.set(file.path, current)
     // Config and the component registry use explicit merge policies. All other
     // owner files need a conflict report, never an unconditional replacement.
-    if (!options.into || file.path === 'docs.json' || file.path === 'src/mdx/custom-components.tsx' || !existsSync(path)) return true
-    if (Buffer.from(readFileSync(path)).equals(Buffer.from(file.content))) return true
+    if (!options.into || file.path === 'docs.json' || file.path === 'src/mdx/custom-components.tsx' || !current) return true
+    if (current.equals(Buffer.from(file.content)) || existingPlan?.seedFiles.get(file.path)?.equals(current)) return true
     conflicts.push(file.path)
     return false
   })
@@ -290,24 +295,20 @@ export async function migrateDocs(options: MigrateOptions): Promise<MigrateResul
   const pagesWritten = bundle.pages.filter((page) => !conflictPaths.has(`src/content/${page.id}.mdx`)).length
   const assetsWritten = bundle.assets.filter((asset) => !conflictPaths.has(asset.projectRelative ? asset.path : `public/${asset.path}`)).length
   if (conflicts.length) bundle.warnings.push({ code: 'unsupported-config', message: `Existing authored files were preserved because imported content conflicts: ${conflicts.join(', ')}. Resolve these files before publishing.` })
-  await terminal.step('Writing documentation', async (update) => {
-    // Preflight every path before the first write: a late symlink must not leave a partial import.
-    for (const file of writable) projectPath(projectDir, file.path)
+  const incomingPaths = new Set(rendered.map((file) => file.path))
+  const removedSeedPaths = [...(existingPlan?.seedFiles.keys() ?? [])].filter((path) => !incomingPaths.has(path))
+  const quarantineIgnore = bundle.quarantinedFiles?.length ? quarantineIgnoreFile(projectDir) : undefined
+  if (quarantineIgnore) {
+    writable.push(quarantineIgnore)
+    const ignorePath = projectPath(projectDir, '.gitignore')
+    writePreconditions.set('.gitignore', existsSync(ignorePath) ? readFileSync(ignorePath) : undefined)
+  }
+  await terminal.step('Writing documentation', async () => {
+    // Archive verification/rendering finishes before staging or mutation. The
+    // transaction rechecks exact seed/config/manifest bytes and rolls back all
+    // writes and obsolete-seed deletions if any application step fails.
     projectPath(projectDir, 'migration-report.json')
-    if (bundle.quarantinedFiles?.length) projectPath(projectDir, '.gitignore')
-    let written = 0
-    for (const file of writable) {
-      const destination = projectPath(projectDir, file.path)
-      mkdirSync(dirname(destination), { recursive: true })
-      writeFileSync(destination, file.content)
-      written += 1
-      if (written % 32 === 0) {
-        update(`Writing documentation (${written}/${writable.length} files)`)
-        await setImmediate()
-      }
-    }
-
-    if (bundle.quarantinedFiles?.length) ignoreQuarantineDirectory(projectDir)
+    materializeMigration(projectDir, writable, removedSeedPaths, { preconditions: writePreconditions })
   }, `Imported ${pagesWritten} pages and ${assetsWritten} assets from ${bundle.platform}`)
 
   const format = (warning: MigrationWarning): string => `${warning.message}${warning.source ? ` (${warning.source})` : ''}`
@@ -371,6 +372,8 @@ export async function migrateDocs(options: MigrateOptions): Promise<MigrateResul
     droppedGatedPages: bundle.droppedGatedPages ?? 0,
     warnings: bundle.warnings,
     conflicts,
+    removedSeedPaths,
+    ...(existingPlan?.seedRelease ? { replacedSeedRelease: existingPlan.seedRelease } : {}),
     validation,
     ...(bundle.urlMigrationValidation ? { sourceValidation: bundle.urlMigrationValidation } : {}),
   }, null, 2)}\n`)

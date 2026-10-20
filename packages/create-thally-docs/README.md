@@ -141,7 +141,7 @@ embedded by Mintlify when it is available, with bounded same-site crawling as a
 fallback.
 
 Migrated OpenAPI specs are written to `openapi/`, not `public/` (which the host
-serves as-is). `--into` never deletes files: an older copy of a spec already in
+serves as-is). `--into` never deletes authored files; only verified unchanged starter samples may be removed: an older copy of a spec already in
 `public/` stays publicly downloadable (a `public/openapi.json` even answers
 `/openapi.json` in place of the filtered spec), so the migration lists such files and
 `thally check` warns about them until you delete them manually.
