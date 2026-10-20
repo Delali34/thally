@@ -10,6 +10,12 @@ ordered navigation and binary assets), or uses ordinary local fetching. Hosted
 callers must inject their own network-safe text/capture and binary boundaries.
 No browser, model, credentials, sandbox or publishing provider is bundled here.
 
+Default page requests advertise HTML to retain rendered content and declared
+alternates. An explicit same-origin, same-route Markdown alternate shares the
+article's destination; the rendered article takes precedence even when the
+Markdown URL was discovered first or restored from an interrupted checkpoint.
+Independent pages still report destination collisions.
+
 Server applications should import `@thallylabs/migrate/svg-policy` for the passive
 SVG validator, or `@thallylabs/migrate/url-migration` for the URL runner, renderer
 and their types. These independent entries avoid tracing repository cloning and

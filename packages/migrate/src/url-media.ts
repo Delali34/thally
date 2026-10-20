@@ -7,6 +7,9 @@ import { migrationImageAttribute, migrationImageUrl } from './url-images.js'
 const VIDEO_ATTRIBUTES = new Set([
   'src', 'title', 'poster', 'controls', 'muted', 'autoplay', 'loop', 'playsinline',
   'class', 'id', 'width', 'height', 'preload', 'aria-label',
+  // Publisher asset provenance does not change playback and is never emitted.
+  // Keep this explicit: arbitrary data attributes may drive custom controls.
+  'data-path',
 ])
 const YOUTUBE_ATTRIBUTES = new Set([
   'src', 'title', 'width', 'height', 'allow', 'allowfullscreen', 'referrerpolicy',

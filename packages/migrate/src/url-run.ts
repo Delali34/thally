@@ -33,7 +33,10 @@ import type {
 // recaptured rather than reusing page hashes produced by the previous rules.
 const CONVERTER_VERSION = 'url-evidence-v6'
 const parser = unified().use(remarkParse).use(remarkMdx)
-const ACCEPT = 'text/markdown,text/html,application/xhtml+xml;q=0.9'
+// Some publishers treat any Markdown Accept token as an explicit opt-in, even
+// with a lower quality value. Capture the interactive article; declared .md
+// URLs remain available separately for complete machine-readable API schemas.
+const ACCEPT = 'text/html,application/xhtml+xml'
 const MAX_RESPONSE_BYTES = 8_000_000
 const MAX_ASSET_BYTES = 10_000_000
 const MAX_RECORDS = 100_000
@@ -79,6 +82,14 @@ function canonical(value: string, base: string): string | null {
     url.pathname = url.pathname.replace(/\/+$/, '') || '/'
     return url.toString()
   } catch { return null }
+}
+
+/** A filename match is only admissible after the publisher declares an alternate. */
+function sameRouteMarkdownRepresentation(alternate: string, primary: string): boolean {
+  const target = new URL(alternate), source = new URL(primary)
+  const directory = (path: string) => path.replace(/\.mdx?$/i, '').replace(/\/index\/?$/i, '').replace(/\/$/, '')
+  return target.origin === source.origin && target.search === source.search
+    && directory(target.pathname) === directory(source.pathname) && /\.mdx?$/i.test(target.pathname)
 }
 
 /** Classify using the final response; an index must never become article text. */
@@ -721,8 +732,20 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
     if (!record.evidence) continue
     const final = canonical(record.evidence.finalUrl, sourceUrl)
     if (!final) continue
-    if (record.outcome === 'imported') enqueueArticleLinks(record.evidence.links, final, record.url)
-    else if (record.outcome === 'excluded') {
+    if (record.outcome === 'imported') {
+      enqueueArticleLinks(record.evidence.links, final, record.url)
+      // The primary delta can commit before the newly discovered sibling's
+      // chunk. Keep the explicit declaration as evidence on both sides.
+      for (const reference of record.evidence.markdownRepresentations ?? []) {
+        const alternate = canonical(reference, final)
+        if (!alternate || !sameRouteMarkdownRepresentation(alternate, final)) continue
+        enqueue(alternate, final, 'declared-markdown-representation')
+        const sibling = records.get(alternate)
+        if (sibling && sibling.representationOf !== record.url) {
+          sibling.representationOf = record.url; changed.push(sibling)
+        }
+      }
+    } else if (record.outcome === 'excluded') {
       if (classifyMigrationResponse({ finalUrl: new URL(final), contentType: record.evidence.contentType, body: '' }) === 'index') {
         for (const link of record.evidence.links) enqueue(link, final, record.url)
       }
@@ -815,6 +838,7 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
     let claimedId: string | undefined
     let claimedFinal: string | undefined
     let markdownRepresentation: string | undefined
+    const markdownRepresentations: Array<string> = []
     let exactKey: string | undefined
     try {
       delete record.reason
@@ -892,15 +916,13 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
         $('link[rel="alternate"][type="text/markdown"][href]').each((_index, node) => {
           const alternate = canonical($(node).attr('href')!, final)
           if (!alternate) return
-          const target = new URL(alternate), primary = new URL(final)
-          const directory = (path: string) => path.replace(/\.mdx?$/i, '').replace(/\/index\/?$/i, '').replace(/\/$/, '')
-          if (target.origin !== primary.origin || target.search !== primary.search
-            || directory(target.pathname) !== directory(primary.pathname)
-            || !/\.mdx?$/i.test(target.pathname)) return
+          if (!sameRouteMarkdownRepresentation(alternate, final)) return
           enqueue(alternate, final, 'declared-markdown-representation')
-          const sibling = records.get(alternate)!
+          const sibling = records.get(alternate)
+          if (!sibling) return
           sibling.representationOf = record.url
           markdownRepresentation ??= alternate
+          markdownRepresentations.push(alternate)
           changed.push(sibling)
         })
       }
@@ -912,7 +934,8 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
         }
         enqueueNavigation(observedNavigation, final)
       }
-      if (imported >= maxPages) { record.outcome = 'excluded'; record.reason = 'A discovery endpoint resolved to an article after the selected page limit.'; return }
+      const replacesRepresentation = imported >= maxPages && markdownRepresentations.some(url => records.get(url)?.page)
+      if (imported >= maxPages && !replacesRepresentation) { record.outcome = 'excluded'; record.reason = 'A discovery endpoint resolved to an article after the selected page limit.'; return }
       const already = finalUrls.get(final)
       if (already && already !== record.url) { record.outcome = 'alias'; record.aliasOf = already; return }
       // Claim final identity before conversion can yield to asset acquisition.
@@ -924,10 +947,16 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
       const locale = language.locale
       const navigationId = locale ? id.split('/').filter(segment => segment.toLowerCase() !== locale.toLowerCase()).join('/') || 'introduction' : id
       const identityId = locale ? `${locale}/${navigationId}` : id
-      if (usedIds.has(identityId) && usedIds.get(identityId) !== record.url) { record.outcome = 'failed'; record.reason = `Destination collision for ${identityId}.`; return }
-      usedIds.set(identityId, record.url)
+      const owner = records.get(usedIds.get(identityId) ?? '')
+      const sharesDeclaredRepresentation = owner && (owner.representationOf === record.url || record.representationOf === owner.url)
+      if (owner && owner !== record && !sharesDeclaredRepresentation) { record.outcome = 'failed'; record.reason = `Destination collision for ${identityId}.`; return }
+      // A declared Markdown sibling may already be imported or awaiting assets.
+      // Let both conversions finish so genuine HTML failures retain the inert
+      // fallback, but reserve the shared route for the richer primary article.
+      if (!owner || owner === record || owner.representationOf === record.url) usedIds.set(identityId, record.url)
       claimedId = identityId
       const evidence = evidenceOf(document)
+      if (markdownRepresentations.length) evidence.markdownRepresentations = markdownRepresentations
       const page = convert(document, id)
       if (!page) { record.outcome = 'failed'; record.reason = 'Content could not be represented as safe inert MDX.'; return }
       let coveredSchemaGroups: number[] = []
@@ -1125,6 +1154,7 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
       if (!primary || primary === record) continue
       const winner = primary.outcome === 'imported' ? primary : record.outcome === 'imported' && primary.outcome === 'failed' ? record : undefined
       if (!winner) continue
+      if (winner.page) usedIds.set(winner.page.id, winner.url)
       const alternate = winner === primary ? record : primary
       if (alternate.outcome === 'alias' && alternate.aliasOf === winner.url) continue
       if (alternate.outcome === 'imported') {
@@ -1140,7 +1170,20 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
   settleArticleIdentities()
   while (cursor < pending.length && !options.signal?.aborted && !budgetExhausted && cursor < (options.maxCaptures ?? Infinity)) {
     if (imported >= maxPages) {
-      const index = pending.findIndex((record, position) => position >= cursor && isDiscoveryIndex(new URL(record.url), source))
+      const index = pending.findIndex((record, position) => {
+        if (position < cursor || record.outcome !== 'pending') return false
+        const url = new URL(record.url)
+        if (isDiscoveryIndex(url, source)) return true
+        if (/\.mdx?$/i.test(url.pathname)) return false
+        // A full page budget must still permit upgrading an already counted
+        // Markdown page. This only schedules a capture: the HTML must prove its
+        // explicit alternate before it may share that destination reservation.
+        return ['.md', '.mdx', '/index.md', '/index.mdx'].some(extension => {
+          const alternate = new URL(url)
+          alternate.pathname = alternate.pathname.replace(/\/index$/i, '') + extension
+          return records.get(alternate.href)?.outcome === 'imported'
+        })
+      })
       if (index < 0) break
       pending.splice(cursor, 0, pending.splice(index, 1)[0])
     }
