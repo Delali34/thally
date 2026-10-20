@@ -433,3 +433,33 @@ describe('atomic owner-reviewed configuration updates', () => {
     expect(readFileSync(join(target, 'starter-release.json'), 'utf8')).toBe('old provenance')
   })
 })
+
+describe('Windows runtime checkout line endings', () => {
+  it('updates unchanged CRLF text while keeping exact mutation preconditions', () => {
+    const old = directory('thally-old-crlf-')
+    const next = directory('thally-next-crlf-')
+    const target = directory('thally-target-crlf-')
+    write(old, 'src/components/card.tsx', 'export const version = 1\n')
+    write(next, 'src/components/card.tsx', 'export const version = 2\n')
+    write(target, 'src/components/card.tsx', 'export const version = 1\r\n')
+    const plan = planStarterRuntimeSync(old, next, target, OWNERSHIP)
+    expect(plan.copyPaths).toEqual(['src/components/card.tsx'])
+    expect(plan.conflictPaths).toEqual([])
+    // A change after planning still fails, even if it changes only line endings.
+    write(target, 'src/components/card.tsx', 'export const version = 1\n')
+    expect(() => applyStarterRuntimeSyncPlan(next, target, plan, OWNERSHIP, { confirmed: true })).toThrow('changed')
+  })
+
+  it('preserves substantive CRLF edits and binary differences as conflicts', () => {
+    const old = directory('thally-old-edited-')
+    const next = directory('thally-next-edited-')
+    const target = directory('thally-target-edited-')
+    for (const path of ['src/components/card.tsx', 'src/components/image.png']) {
+      write(old, path, 'old\n')
+      write(next, path, 'new\n')
+      write(target, path, path.endsWith('.png') ? 'old\r\n' : 'owner edit\r\n')
+    }
+    expect(planStarterRuntimeSync(old, next, target, OWNERSHIP).conflictPaths)
+      .toEqual(['src/components/card.tsx', 'src/components/image.png'])
+  })
+})

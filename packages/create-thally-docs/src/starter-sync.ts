@@ -8,6 +8,7 @@
  */
 
 import { createHash } from 'node:crypto'
+import { areStarterFileContentsEquivalent } from './starter-file-comparison.js'
 import {
   copyFileSync,
   existsSync,
@@ -391,7 +392,7 @@ function collectFiles(
 
 function sameFile(left?: string, right?: string): boolean {
   if (!left || !right) return left === right
-  return readFileSync(left).equals(readFileSync(right))
+  return areStarterFileContentsEquivalent(left, readFileSync(left), readFileSync(right))
 }
 
 function fileSha256(path: string): string {

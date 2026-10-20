@@ -9,6 +9,17 @@
 
 import { spawnSync } from 'node:child_process'
 import { mkdirSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { resolve } from 'node:path'
+
+// Resolve from the project so trusted managed tooling and an owner's explicit
+// provider profile obey the same package boundary. Never fall back to npx.
+const requireFromProject = createRequire(resolve('package.json'))
+for (const dependency of ['@opennextjs/cloudflare', 'wrangler']) {
+  try { requireFromProject.resolve(dependency) } catch {
+    throw new Error(`Missing optional Cloudflare tooling (${dependency}). Run npm run setup:cloudflare before building for Cloudflare.`)
+  }
+}
 
 const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm'
 const environment = {

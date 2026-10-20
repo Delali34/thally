@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { FRAMEWORK_SYNC_ELIGIBLE, checkStarterRuntimeContract } from "./starter-runtime-contract.mjs";
+import { FRAMEWORK_SYNC_ELIGIBLE, checkStarterRuntimeContract, isSourceOnlyPath } from "./starter-runtime-contract.mjs";
 
 test("rejects monorepo integration tests already present in a standalone snapshot", () => {
   const runtimeDirectory = fileURLToPath(new URL("../../", import.meta.url));
@@ -40,5 +40,15 @@ test("rejects monorepo integration tests already present in a standalone snapsho
     );
   } finally {
     rmSync(starterDirectory, { recursive: true, force: true });
+  }
+});
+
+// Test coverage stays with the engine, including new suites added in the future.
+test("excludes every framework test and fixture without excluding runtime modules", () => {
+  for (const path of ["src/app/route.test.ts", "src/components/card.spec.tsx", "src/lib/__tests__/helper.ts", "src/lib/__fixtures__/doc.mdx", "src/test/server-only.ts", "scripts/lib/build.test.mts"]) {
+    assert.equal(isSourceOnlyPath(path), true, path);
+  }
+  for (const path of ["src/lib/testing.ts", "src/lib/runtime.ts", "scripts/build-runtime-sources.mts"]) {
+    assert.equal(isSourceOnlyPath(path), false, path);
   }
 });

@@ -18,7 +18,7 @@ export interface DocsOgImageOptions {
   crumb?: string
   url: string
   brandName: string
-  logoUri: string
+  logoUri?: string
   logoIsSquare: boolean
   palette: {
     background: string
@@ -113,14 +113,16 @@ export function renderDocsOgImage({
           color: palette.muted,
         }}
       >
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          src={logoUri}
-          alt=""
-          height={26}
-          {...(logoIsSquare ? { width: 26 } : {})}
-          style={{ width: logoIsSquare ? 26 : 'auto', height: 26, objectFit: 'contain' }}
-        />
+        {logoUri ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={logoUri}
+            alt=""
+            height={26}
+            {...(logoIsSquare ? { width: 26 } : {})}
+            style={{ ...(logoIsSquare ? { width: 26 } : {}), height: 26, objectFit: 'contain' }}
+          />
+        ) : null}
         <div style={{ display: 'flex' }}>
           <span style={{ color: palette.foreground, fontWeight: 700 }}>{brandName}</span>
           <span>&nbsp;Docs</span>

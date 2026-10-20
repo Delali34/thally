@@ -71,10 +71,14 @@ export const FRAMEWORK_SYNC_ELIGIBLE = Object.freeze([
   "scripts/mint-reader-token.ts",
 ]);
 
-// These tests intentionally inspect the public monorepo and its independently
-// published packages. They remain in `thally`; the standalone starter cannot
-// execute them because it has no `packages/` workspace.
-const SOURCE_ONLY_PATHS = new Set([
+// The standalone snapshot contains executable runtime only. Keep the broad
+// ownership rules above so an update can remove tests shipped by older releases;
+// narrowing ownership would strand those files in customer production builds.
+// Version 3 changes the distributed source profile. Preserve the reviewed
+// legacy exclusions when validating retained v1/v2 archives: promotion and
+// rollback use the current verifier and must still accept their exact trees.
+export const LEAN_STARTER_VERSION = 3;
+const LEGACY_SOURCE_ONLY_PATHS = new Set([
   "src/lib/__tests__/frontmatter.test.ts",
   "src/lib/__tests__/frontmatter-parity.test.ts",
   "src/components/mdx/client-registry.test.ts",
@@ -87,6 +91,13 @@ const SOURCE_ONLY_PATHS = new Set([
   // Drives /api/mcp with @modelcontextprotocol/sdk, a packages/mcp dependency.
   "src/app/api/mcp/sdk-client.test.ts",
 ]);
+
+export function isSourceOnlyPath(projectPath, starterVersion = LEAN_STARTER_VERSION) {
+  if (starterVersion < LEAN_STARTER_VERSION) return LEGACY_SOURCE_ONLY_PATHS.has(projectPath);
+  return /(?:^|\/)(?:__tests__|__fixtures__|fixtures)(?:\/|$)/.test(projectPath) ||
+    projectPath.startsWith("src/test/") ||
+    /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(projectPath);
+}
 
 function invariant(condition, message) {
   if (!condition) throw new Error(message);
@@ -277,10 +288,6 @@ function fileMode(filePath) {
   return statSync(filePath).mode & 0o111;
 }
 
-function isSourceOnlyPath(projectPath) {
-  return SOURCE_ONLY_PATHS.has(projectPath);
-}
-
 function comparePath(starterDirectory, runtimeDirectory, projectPath) {
   const starterPath = inside(starterDirectory, projectPath);
   const runtimePath = inside(runtimeDirectory, projectPath);
@@ -382,7 +389,7 @@ export function checkStarterRuntimeContract({
     runtimeRoot,
     manifest.ownership.frameworkSyncEligible,
   )) {
-    if (isSourceOnlyPath(projectPath)) {
+    if (isSourceOnlyPath(projectPath, manifest.starterVersion)) {
       if (existsSync(inside(starterRoot, projectPath))) {
         differences.push(`${projectPath} is source-only but exists in starter`);
       }
@@ -409,6 +416,7 @@ export function syncStarterRuntimeContract({
   const { manifest: starterPackage, packagePath: starterPackagePath } =
     readStarterPackage(starterRoot);
   manifest.ownership.frameworkSyncEligible = [...FRAMEWORK_SYNC_ELIGIBLE];
+  manifest.starterVersion = LEAN_STARTER_VERSION;
   const identity = runtimeIdentity(runtimeRoot);
   const rules = FRAMEWORK_SYNC_ELIGIBLE.map(parseRule);
 

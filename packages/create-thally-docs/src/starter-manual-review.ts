@@ -1,6 +1,7 @@
 /** Safe structural three-way merges for owner-reviewed starter configuration.
  * Arrays and overlapping edits stay atomic; JSON pointers report conflicts. */
 import { isDeepStrictEqual } from "node:util";
+import { areStarterFileContentsEquivalent } from "./starter-file-comparison.js";
 
 /** File-level and JSON-pointer conflict details without customer file contents. */
 export interface StarterManualConflict { path: string; fields: string[] }
@@ -32,10 +33,6 @@ interface JsonMergeResult {
   conflicts: Array<string>;
 }
 
-function hasSameBytes(left: Buffer | undefined, right: Buffer | undefined) {
-  if (!left || !right) return left === right;
-  return left.equals(right);
-}
 
 function isJsonObject(
   value: JsonMergeValue,
@@ -172,10 +169,10 @@ export function resolveManualReviewMutations(
     const previous = previousReleaseFiles.get(path);
     const target = targetReleaseFiles.get(path);
 
-    if (hasSameBytes(previous, target) || hasSameBytes(downstream, target)) {
+    if (areStarterFileContentsEquivalent(path, previous, target) || areStarterFileContentsEquivalent(path, downstream, target)) {
       continue;
     }
-    if (hasSameBytes(downstream, previous)) {
+    if (areStarterFileContentsEquivalent(path, downstream, previous)) {
       if (target) mutations.writeFiles.set(path, target);
       else mutations.deletePaths.push(path);
       continue;
@@ -193,7 +190,7 @@ export function resolveManualReviewMutations(
         target,
       });
       if (merged.content) {
-        if (!hasSameBytes(downstream, merged.content)) {
+        if (!areStarterFileContentsEquivalent(path, downstream, merged.content)) {
           mutations.writeFiles.set(path, merged.content);
         }
         continue;

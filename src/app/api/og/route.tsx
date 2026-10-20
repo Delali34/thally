@@ -4,33 +4,31 @@
 import { type NextRequest } from 'next/server'
 import { renderDocsOgImage, type OgImageFont } from '@/lib/og-image'
 import { resolveOgConfig } from '@/lib/og'
-import { getBrandAsset } from '@/lib/admin/settings'
+import { resolveBrandAsset } from '@/lib/brand-assets'
+import { publicBrandImageDataUri, readPublicAsset } from '@/lib/public-asset-data'
 import { resolveSiteConfig } from '@/lib/site-config'
 
 // Node is required because the admin storage adapter may use Node facilities.
 export const runtime = 'nodejs'
 
-async function loadFont(requestUrl: string, path: string, name: string, weight: 400 | 700): Promise<OgImageFont> {
-  const response = await fetch(new URL(path, requestUrl))
-  if (!response.ok) {
+async function loadFont(path: string, name: string, weight: 400 | 700): Promise<OgImageFont> {
+  const bytes = await readPublicAsset(path, 2 * 1024 * 1024)
+  if (!bytes) {
     throw new Error(`Unable to load OG font: ${path}`)
   }
 
   return {
     name,
-    data: await response.arrayBuffer(),
+    data: Uint8Array.from(bytes).buffer,
     weight,
     style: 'normal',
   }
 }
 
-async function buildLeafDataUri(requestUrl: string, color: string) {
-  const response = await fetch(new URL('/brand/default-logo-light.svg', requestUrl))
-  if (!response.ok) {
-    throw new Error('Unable to load the bundled default brand mark')
-  }
-
-  const svg = (await response.text()).replace(/fill="[^"]+"/, `fill="${color}"`)
+async function buildLeafDataUri(color: string): Promise<string | undefined> {
+  const bytes = await readPublicAsset('/brand/default-logo-light.svg', 512 * 1024)
+  if (!bytes) return undefined
+  const svg = bytes.toString('utf8').replace(/fill="[^"]+"/, `fill="${color}"`)
   return `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`
 }
 
@@ -49,16 +47,14 @@ export async function GET(request: NextRequest) {
   const crumb = searchParams.get('crumb') || 'Documentation'
   const url = searchParams.get('url') || og.domain
 
-  const requestedLogo =
-    theme === 'dark'
-      ? ((await getBrandAsset('logo-dark')) ?? (await getBrandAsset('logo')))
-      : await getBrandAsset('logo')
-  const logoUri = requestedLogo ?? (await buildLeafDataUri(request.url, og.leaf))
+  const brand = await resolveBrandAsset('logo', theme, request.nextUrl.origin)
+  const requestedLogo = brand?.dataUri ?? (brand?.path ? await publicBrandImageDataUri(brand.path) : null)
+  const logoUri = brand?.disabled ? undefined : requestedLogo ?? (await buildLeafDataUri(og.leaf))
 
   const fonts = await Promise.all([
-    loadFont(request.url, '/fonts/og/PlusJakartaSans-700.ttf', 'Jakarta', 700),
-    loadFont(request.url, '/fonts/og/Inter-400.woff', 'Inter', 400),
-    loadFont(request.url, '/fonts/og/JetBrainsMono-400.woff', 'Mono', 400),
+    loadFont('/fonts/og/PlusJakartaSans-700.ttf', 'Jakarta', 700),
+    loadFont('/fonts/og/Inter-400.woff', 'Inter', 400),
+    loadFont('/fonts/og/JetBrainsMono-400.woff', 'Mono', 400),
   ])
 
   return renderDocsOgImage({

@@ -475,7 +475,7 @@ describe('documentation visual system', () => {
     expect(markup).toContain('href="/support"')
   })
 
-  it('docks chat below the top bar with the fixed Thally identity', async () => {
+  it('docks chat below the top bar while preserving its controls and sizing', async () => {
     const { readFile } = await import('node:fs/promises')
     const [chat, provider, statusRoute] = await Promise.all([
       readFile('src/components/docs/docs-chat.tsx', 'utf8'),
@@ -488,7 +488,6 @@ describe('documentation visual system', () => {
     expect(chat).not.toContain('top-[60px]')
     expect(provider).toContain('<div className="contents" data-docs-layout>')
     expect(chat).toContain("event.key === 'Escape'")
-    expect(chat).toContain('/brand/default-favicon-light.svg')
     expect(chat).toContain("width: expanded ? 'min(680px, 100vw)' : 'min(420px, 100vw)'")
     expect(chat).not.toContain('<FabIcon')
     expect(provider).toContain('icon={chatStatus.icon ?? icon}')

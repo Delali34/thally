@@ -13,11 +13,12 @@ import { migrateDocs } from 'create-thally-docs/migrate'
 
 const migrationSourceShape = {
   sourceUrl: z.string().describe('GitHub repository URL or public documentation URL to migrate'),
+  openapiUrl: z.string().url().optional().describe('Explicit public HTTPS OpenAPI specification for website migration'),
   branch: z.string().optional().describe('Git branch (default: auto-detect)'),
   docsDir: z.string().optional().describe('Docs subdirectory in repo (default: auto-detect)'),
   apiKey: z.string().optional().describe('Anthropic API key for non-Markdown file conversion'),
   maxPages: z.number().int().min(1).max(10000).optional().describe('Maximum public URL pages to import (up to 10000)'),
-  platform: z.enum(['mintlify', 'docusaurus']).optional().describe('Source platform (default: auto-detect)'),
+  platform: z.enum(['mintlify', 'docusaurus', 'fern']).optional().describe('Source platform (default: auto-detect)'),
 }
 
 export const migrateDocsSchema = z.object({
@@ -41,7 +42,8 @@ interface RunMigrationInput {
   docsDir?: string
   apiKey?: string
   maxPages?: number
-  platform?: 'mintlify' | 'docusaurus'
+  openapiUrl?: string
+  platform?: 'mintlify' | 'docusaurus' | 'fern'
 }
 
 async function runMigration(
@@ -60,6 +62,7 @@ async function runMigration(
     branch: input.branch,
     docsDir: input.docsDir,
     maxPages: input.maxPages,
+    openapiUrl: input.openapiUrl,
     platform: input.platform,
     yes: true,
   })

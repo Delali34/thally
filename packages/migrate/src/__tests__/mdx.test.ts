@@ -1662,3 +1662,24 @@ describe('replaceOutsideCodeAndComments', () => {
     }
   })
 })
+
+describe('Mintlify code-fence compatibility', () => {
+  it('preserves portable labels and highlighting without altering code bytes', () => {
+    const source = '```typescript client.ts lines wrap highlight={2} focus={1}\nconst value = "{literal}"\nconsole.log(value)\n```'
+    const normalized = normalizeMdx(source, 'mintlify')
+    expect(normalized).toBe(source)
+    expect(() => compileSync(normalized)).not.toThrow()
+  })
+})
+
+
+describe('Mintlify unsupported fence options', () => {
+  it('reports renderer-only attributes and leaves source code unchanged', () => {
+    const warnings: string[] = []
+    const page = parseMarkdownPage({ id: 'guide', source: 'guide.mdx', platform: 'mintlify', warn: (message) => warnings.push(message), raw: '```ts filename="client.ts" theme={"system"} twoslash\nconst value = "safe"\n```' })
+    expect(page?.body).toContain('const value = "safe"')
+    expect(page?.body).not.toContain('theme=')
+    expect(page?.body).not.toContain('twoslash')
+    expect(warnings).toEqual([expect.stringContaining('theme, twoslash')])
+  })
+})

@@ -14,10 +14,9 @@ npm run dev
 ```
 
 `create-thally-docs` installs dependencies by default (pass `--no-install` to
-skip) and prints the exact preview command. Sites that include the `thally`
-CLI as a dev dependency can also run `npx thally dev`, which prints the local
-`llms.txt` and MCP endpoints plus a `claude mcp add` command once the server is
-ready.
+skip) and prints the exact preview command. The default site runs Next.js
+directly; `npm run check` and `npm run starter:update` explicitly invoke the
+current official CLI without freezing it into your site's dependency graph.
 
 Or clone the dedicated starter directly:
 
@@ -28,8 +27,8 @@ npm install
 npm run dev
 ```
 
-The server starts at [http://localhost:3040](http://localhost:3040), or the next
-available port when 3040 is already in use.
+The server starts at [http://localhost:3040](http://localhost:3040). If that
+port is occupied, run `npm run dev -- --port 3041`.
 
 ## Keep product knowledge aligned
 

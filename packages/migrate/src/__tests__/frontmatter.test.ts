@@ -120,3 +120,12 @@ describe('parseMarkdownPage description', () => {
     expect(parse('openapi: "openapi.json POST /scrape"\ndescription: Authored\n')?.description).toBe('Authored')
   })
 })
+
+describe('Mintlify metadata compatibility', () => {
+  it('reports omitted platform fields while preserving display and visibility metadata', () => {
+    const warnings: string[] = []
+    const page = parseMarkdownPage({ id: 'guide', platform: 'mintlify', source: 'guide.mdx', warn: (message) => warnings.push(message), raw: '---\ntitle: Guide\nsidebarTitle: Short\nhidden: true\nnoindex: true\nmode: frame\nlayout: custom-vendor-layout\n---\nBody.' })
+    expect(page).toMatchObject({ title: 'Guide', navTitle: 'Short', hidden: true, noindex: true, mode: 'wide' })
+    expect(warnings).toEqual([expect.stringContaining('layout')])
+  })
+})

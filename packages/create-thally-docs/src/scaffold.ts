@@ -11,7 +11,7 @@ import {
   personalizeStarter,
   updateEnvExample,
 } from './customize.js'
-import { slugify, installDeps, initGit } from './utils.js'
+import { slugify, installDeps, initGit, type PackageManager } from './utils.js'
 import { terminal } from './terminal.js'
 
 export {
@@ -29,6 +29,8 @@ export interface ScaffoldOptions {
   brandPreset: string
   repoUrl: string
   doInstall: boolean
+  /** Explicitly select npm, pnpm, or Yarn; otherwise infer the invoking manager. */
+  packageManager?: PackageManager
   /**
    * Report a failed install and still finish the project (Git setup included)
    * instead of throwing. Interactive creation opts in; library callers keep
@@ -117,12 +119,12 @@ export async function scaffold(options: ScaffoldOptions): Promise<ScaffoldResult
   let dependenciesInstalled = false
   if (doInstall) {
     try {
-      await installDeps(targetDir)
+      await installDeps(targetDir, options.packageManager)
       dependenciesInstalled = true
     } catch (error) {
       const exitCode = (error as { exitCode?: number }).exitCode
       if (!continueOnInstallFailure || exitCode === 130 || exitCode === 143) throw error
-      terminal.warn('Dependency installation failed. The project was created; run "npm install" in it to finish.')
+      terminal.warn('Dependency installation failed. The project was created; use the recovery command above to finish.')
     }
   }
 

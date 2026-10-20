@@ -2,7 +2,7 @@
 
 import { existsSync, readdirSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { resolve } from 'node:path'
+import { basename, resolve } from 'node:path'
 import { logo, success, slugify, previewCommand } from './utils.js'
 import {
   gatherAnswers,
@@ -32,14 +32,16 @@ const valueFlags = new Set([
   '--into',
   '--locale',
   '--max-pages',
+  '--openapi',
   '--model',
   '--pages',
+  '--package-manager',
   '--platform',
   '--source-ref',
 ])
 
 const commandFlags = {
-  scaffold: new Set(['--help', '-h', '--yes', '-y', '--install', '--no-install', '--verbose']),
+  scaffold: new Set(['--package-manager', '--help', '-h', '--yes', '-y', '--install', '--no-install', '--verbose']),
   migrate: new Set([
     '--help',
     '-h',
@@ -48,6 +50,7 @@ const commandFlags = {
     '--docs-dir',
     '--into',
     '--max-pages',
+    '--openapi',
     '--platform',
     '--skip-validation',
     '--source-ref',
@@ -83,6 +86,7 @@ Scaffold options:
   -y, --yes       Accept defaults and skip interactive prompts
   --install       Install project dependencies (the default)
   --no-install    Skip dependency installation
+  --package-manager <npm|pnpm|yarn>  Select the dependency installer
   --verbose       Show detailed installation and Git output
   -h, --help      Show this help
   -v, -V, --version  Show the installed version
@@ -93,12 +97,13 @@ Run create-thally-docs <command> --help for command-specific options.
 const commandHelp = {
   migrate: `
 Usage:
-  create-thally-docs migrate <github-or-docs-url> [output-dir] [options]
+  create-thally-docs migrate <github-or-docs-url-or-directory> [output-dir] [options]
 
 Options:
   --into <dir>         Migrate into an existing Thally project
   --branch <name>      Override the detected Git branch
   --docs-dir <path>    Override the detected documentation directory
+  --openapi <https-url>  Import an explicit OpenAPI spec for a docs website
   --max-pages <count>  Limit a public URL crawl to 1-10000 pages (default: 1000)
   --platform <name>    Use mintlify, docusaurus, fern, or auto
   --source-ref <owner/repo>=<path>
@@ -181,17 +186,22 @@ function validateFlags(command: keyof typeof commandFlags): void {
 async function runMigrateCommand(): Promise<void> {
   let sourceUrl = positional[1]
   if (!sourceUrl) {
-    console.error('\n  ❌ Source URL is required.')
-    console.error('     Usage: create-thally-docs migrate <github-or-docs-url> [output-dir] [options]')
+    console.error('\n  ❌ A source URL or local directory is required.')
+    console.error('     Usage: create-thally-docs migrate <github-or-docs-url-or-directory> [output-dir] [options]')
     console.error('     Example: create-thally-docs migrate https://docs.example.com my-docs')
     process.exit(1)
   }
 
-  let source: URL
+  let source: URL | undefined
+  const sourceDirectory = (!/^[a-z][a-z0-9+.-]*:/i.test(sourceUrl) || /^[a-z]:[\\/]/i.test(sourceUrl)) ? resolve(sourceUrl) : undefined
   try {
-    source = new URL(sourceUrl)
-    if (!['http:', 'https:'].includes(source.protocol)) throw new Error('Only HTTP and HTTPS sources are supported.')
-    if (source.hostname.toLowerCase() === 'github.com') parseGitHubRepositoryUrl(sourceUrl)
+    if (sourceDirectory) {
+      if (!existsSync(sourceDirectory)) throw new Error(`Local source directory does not exist: ${sourceDirectory}`)
+    } else {
+      source = new URL(sourceUrl)
+      if (!['http:', 'https:'].includes(source.protocol)) throw new Error('Only HTTP and HTTPS sources are supported.')
+      if (source.hostname.toLowerCase() === 'github.com') parseGitHubRepositoryUrl(sourceUrl)
+    }
   } catch (err) {
     console.error(`\n  ❌ ${err instanceof Error ? err.message : err}`)
     process.exit(1)
@@ -203,7 +213,7 @@ async function runMigrateCommand(): Promise<void> {
   terminal.intro('migrate', packageMetadata.version, 'Bring your docs to Thally. Built for people and AI tools.')
   const platformFlag = getFlagValue('--platform')
   const platform = await gatherMigrationPlatform(platformFlag, yes)
-  if (platform === undefined) {
+  if (platform === undefined && !sourceDirectory) {
     const shouldPromptForSource = platformFlag === undefined && !yes && Boolean(process.stdin.isTTY)
     sourceUrl = await resolveAutoDetectedMigrationSource(sourceUrl, shouldPromptForSource)
     source = new URL(sourceUrl)
@@ -224,9 +234,9 @@ async function runMigrateCommand(): Promise<void> {
   } else if (positional[2]) {
     projectDir = resolve(positional[2])
   } else {
-    const sourceName = source.hostname.toLowerCase() === 'github.com'
+    const sourceName = sourceDirectory ? basename(sourceDirectory) : source!.hostname.toLowerCase() === 'github.com'
       ? parseGitHubRepositoryUrl(sourceUrl).repo
-      : source.pathname.split('/').filter(Boolean).at(-1) ?? source.hostname.split('.')[0]
+      : source!.pathname.split('/').filter(Boolean).at(-1) ?? source!.hostname.split('.')[0]
     projectDir = resolve(`${slugify(sourceName)}-docs`)
   }
 
@@ -236,7 +246,7 @@ async function runMigrateCommand(): Promise<void> {
     console.error('\n  ❌ --max-pages must be an integer between 1 and 10000.')
     process.exit(1)
   }
-  terminal.detail('Source', `${source.origin}${source.pathname}`)
+  terminal.detail('Source', sourceDirectory ?? `${source!.origin}${source!.pathname}`)
   terminal.detail('Output', projectDir)
   if (branch) terminal.detail('Branch', branch)
   if (docsDir) terminal.detail('Docs dir', docsDir)
@@ -258,12 +268,14 @@ async function runMigrateCommand(): Promise<void> {
 
   const result = await migrateDocs({
     sourceUrl,
+    sourceDirectory,
     projectDir,
     into: isInto,
     apiKey,
     branch,
     docsDir,
     maxPages,
+    openapiUrl: getFlagValue('--openapi'),
     platform,
     yes,
     skipValidation: flags.includes('--skip-validation'),
@@ -289,6 +301,8 @@ async function runScaffoldCommand(): Promise<void> {
     : flags.includes('--no-install')
       ? false
       : undefined
+  const packageManager = getFlagValue('--package-manager')
+  if (packageManager !== undefined && !['npm', 'pnpm', 'yarn'].includes(packageManager)) throw new Error('--package-manager must be npm, pnpm, or yarn.')
   const dirArg = positional[0]
 
   // Early validation when dir is passed via positional arg
@@ -309,12 +323,13 @@ async function runScaffoldCommand(): Promise<void> {
     brandPreset: answers.brandPreset,
     repoUrl: answers.repoUrl,
     doInstall: answers.doInstall,
+    packageManager: packageManager as 'npm' | 'pnpm' | 'yarn' | undefined,
     continueOnInstallFailure: true,
     i18nLocales: answers.i18nLocales,
     trackRepos: answers.trackRepos,
   })
 
-  success(result.projectDir, answers.projectName, result.dependenciesInstalled)
+  success(result.projectDir, answers.projectName, result.dependenciesInstalled, packageManager as 'npm' | 'pnpm' | 'yarn' | undefined)
   // Installation was requested but failed: the project exists, but automation
   // must not mistake it for a ready-to-run checkout.
   if (answers.doInstall && !result.dependenciesInstalled) process.exitCode = 1

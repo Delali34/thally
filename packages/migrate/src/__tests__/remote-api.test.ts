@@ -1143,3 +1143,27 @@ describe('remote OpenAPI spec whose listed operations Mintlify served as pages',
     expect(result.pages.filter((page) => page.openapi).map((page) => [page.id, page.openapi])).toEqual([['rest/scim/list-users', `${result.assets[0].path} GET /api/v1/scim/v2/Users`]])
   })
 })
+
+describe('explicit URL OpenAPI import', () => {
+  it('restores a crawled endpoint in place and generates navigation only for unrepresented operations', async () => {
+    const { hydrateUrlOpenApi } = await import('../remote-api.js')
+    const input = bundle()
+    input.sourceKind = 'url'
+    input.pages.push({ id: 'api-reference/scim/list-users', navigationId: 'api-reference/scim/list-users', title: 'List users', description: '', keywords: [], body: 'Original operation notes.', source: 'https://docs.example.com/api-reference/scim/list-users' })
+    const schema = JSON.parse(spec)
+    schema.paths['/health'] = { get: { summary: 'Health', tags: ['System'], responses: { 200: { description: 'OK' } } } }
+    const result = await hydrateUrlOpenApi(input, SPEC_URL, async (url) => ({ finalUrl: url, body: JSON.stringify(schema), contentType: 'application/json' }))
+    expect(result.pages.find((page) => page.id === 'api-reference/scim/list-users')).toMatchObject({ body: 'Original operation notes.', openapi: expect.stringContaining('GET /api/v1/scim/v2/Users') })
+    expect(result.docsConfig.tabs.find((tab) => tab.api)?.api?.groups).toEqual([{ group: 'Endpoints', pages: ['GET /health'] }])
+  })
+  it('does not guess between operations sharing the same source route', async () => {
+    const { hydrateUrlOpenApi } = await import('../remote-api.js')
+    const input = bundle()
+    input.sourceKind = 'url'
+    input.pages[0] = { ...input.pages[0], navigationId: 'api-reference/scim/list-users' }
+    const schema = JSON.parse(spec)
+    schema.paths['/other'] = schema.paths['/api/v1/scim/v2/Users']
+    const result = await hydrateUrlOpenApi(input, SPEC_URL, async (url) => ({ finalUrl: url, body: JSON.stringify(schema), contentType: 'application/json' }))
+    expect(result.pages[0].openapi).toBeUndefined()
+  })
+})

@@ -176,39 +176,28 @@ The quickest way to set a logo is the **dashboard**: upload a PNG, JPEG, or WebP
 
 You can upload **separate assets for light and dark mode** — both a logo and a favicon per mode. The site serves the variant that matches the viewer's theme; if you upload only the light-mode asset, dark mode falls back to it, so a single upload still works. This is how a wordmark that reads on a white header can be swapped for a light-on-dark version at night.
 
-Under the hood, the logo component at `src/components/layout/logo.tsx` probes `/api/brand/logo` and swaps in the uploaded logo when one exists. When there's no upload, it falls back to a built-in SVG mark plus your `siteConfig.name`:
+To keep artwork in version control, put your files in `public/` and configure their local paths in `docs.json`:
 
-```tsx
-export function Logo({ className, showText = true }: LogoProps) {
-  const [customOk, setCustomOk] = useState(false)
-  // ...
-  return (
-    <div className={cn('inline-flex items-center gap-2', className)}>
-      {/* Admin-uploaded logo; hidden until it loads successfully */}
-      <img
-        src="/api/brand/logo"
-        alt={siteConfig.name}
-        onLoad={() => setCustomOk(true)}
-        onError={() => setCustomOk(false)}
-        style={{ height: 28, display: customOk ? 'block' : 'none' }}
-      />
-      {!customOk ? (
-        <>
-          {/* Default SVG mark + site name */}
-          <svg /* ... */ />
-          {showText ? (
-            <span className="text-lg font-bold tracking-tight text-foreground">
-              {siteConfig.name}
-            </span>
-          ) : null}
-        </>
-      ) : null}
-    </div>
-  )
+```json
+{
+  "navbar": {
+    "logo": {
+      "light": "/brand/product-logo-light.svg",
+      "dark": "/brand/product-logo-dark.svg"
+    }
+  },
+  "favicon": {
+    "light": "/brand/product-icon-light.svg",
+    "dark": "/brand/product-icon-dark.svg"
+  }
 }
 ```
 
-To change the **default** mark (what renders before any upload), edit the fallback SVG in `logo.tsx`.
+For example, `/brand/product-logo-light.svg` refers to `public/brand/product-logo-light.svg`. Use local files rather than external URLs. Omit `dark` to reuse the light asset in dark mode. You do not need to edit runtime components or replace Thally's bundled default files.
+
+Managed branding takes precedence over dashboard uploads, which take precedence over these file defaults. The header, admin chrome, and social cards use the logo; the browser tab and documentation assistant use the favicon. Setting `navbar.logo` to `null` keeps the header and social cards text-only without disabling the favicon.
+
+Social cards support PNG, JPEG, WebP, GIF, and self-contained SVG logos. SVGs with scripts, event handlers, or external resources fall back to the bundled mark; keep exported SVGs self-contained. Missing artwork also falls back safely.
 
 ## Fonts
 

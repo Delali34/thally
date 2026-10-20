@@ -1983,6 +1983,29 @@ function visibleOperations(document: unknown, entries: unknown): Array<OpenApiOp
   return operations
 }
 
+/** Enumerate generated endpoint routes using the same spec visibility, tab ids and slugs as migration linking. */
+export function migrationApiRoutes(bundle: Pick<MigrationBundle, 'docsConfig' | 'assets'>): Array<string> {
+  const routes = new Set<string>()
+  for (const { tab, specId } of apiTabSpecIds(bundle.docsConfig.tabs)) {
+    const source = tab.api!.source.replace(/^\//, '')
+    const asset = bundle.assets.find((entry) => entry.path.replace(/^\//, '') === source)
+    if (!asset) continue
+    const document = readSpecDocument(Buffer.from(asset.content))
+    if (!isRecord(document)) continue
+    routes.add('/api')
+    routes.add(`/api/${specId}`)
+    for (const operation of visibleOperations(document, document.paths)) {
+      routes.add(`/api/${specId}/${thallyOperationSlugSegments(operation.path, operation.method).join('/')}`)
+    }
+    for (const operation of visibleOperations(document, document.webhooks)) {
+      const segments = thallyOperationSlugSegments(operation.path, operation.method)
+      if (segments[0] !== 'webhooks') segments.unshift('webhooks')
+      routes.add(`/api/${specId}/${segments.join('/')}`)
+    }
+  }
+  return [...routes]
+}
+
 /**
  * Map Mintlify's auto-generated operation page path (e.g.
  * "qstash/api-reference/messages/publish-a-message", from the `directory`
@@ -3129,13 +3152,18 @@ function rewriteMintlifyMountedLinks(body: string, pageIds: ReadonlySet<string>)
     if (!pathname.startsWith('/') || pathname.startsWith('//') || pathname.includes('\\')) return target
     const segments = pathname.slice(1).split('/')
     if (segments.some((segment) => !segment || segment === '.' || segment === '..')) return target
-    if (pageIds.has(segments.join('/'))) return target
+    const markdown = pathname.endsWith('.md')
+    const sourceMdx = pathname.endsWith('.mdx')
+    const routeSegments = markdown || sourceMdx ? [...segments.slice(0, -1), segments.at(-1)!.replace(/\.mdx?$/, '')] : segments
+    // MDX filenames name source documents, whereas .md explicitly requests
+    // the runtime's machine-readable mirror. Preserve that distinction.
+    if (pageIds.has(routeSegments.join('/'))) return sourceMdx ? `/${routeSegments.join('/')}${suffix}` : target
     // A source site may serve its docs below /docs or another mount. Limit
     // removal to a leading path prefix and prove the remaining route exists;
     // this leaves real /docs pages and non-page assets untouched.
     for (let count = 1; count < segments.length && count <= 3; count++) {
-      const candidate = segments.slice(count).join('/')
-      if (pageIds.has(candidate)) return `/${candidate}${suffix}`
+      const candidate = routeSegments.slice(count).join('/')
+      if (pageIds.has(candidate)) return `/${candidate}${markdown ? '.md' : ''}${suffix}`
     }
     return target
   }

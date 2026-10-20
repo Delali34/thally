@@ -7,6 +7,7 @@ import { execFileSync, execSync, spawn } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { terminal } from './terminal.js'
+import semver from 'semver'
 
 /** Convert a display name into a portable package identifier. */
 export function slugify(name: string): string {
@@ -30,7 +31,7 @@ export async function runProjectCommand(command: string, args: Array<string>, cw
       stdio: isQuiet ? ['ignore', 'pipe', 'pipe'] : 'inherit',
       // Windows resolves npm via a .cmd shim; command and arguments here are
       // fixed by the toolchain, never interpolated from imported content.
-      shell: process.platform === 'win32' && command === 'npm',
+      shell: process.platform === 'win32' && ['npm', 'pnpm', 'yarn'].includes(command),
     })
     let tail = Buffer.alloc(0)
     let omitted = false
@@ -116,15 +117,50 @@ export async function initGit(targetDir: string): Promise<void> {
   }
 }
 
-/** Install dependencies with inline progress; failed installation never reports success. */
-export async function installDeps(targetDir: string): Promise<void> {
+export type PackageManager = 'npm' | 'pnpm' | 'yarn'
+
+/** Select explicit tooling, an existing owner lockfile, or the invoking manager. */
+export function detectPackageManager(targetDir: string, requested?: PackageManager, userAgent = process.env.npm_config_user_agent): PackageManager {
+  if (requested) return requested
+  if (existsSync(join(targetDir, 'pnpm-lock.yaml'))) return 'pnpm'
+  if (existsSync(join(targetDir, 'yarn.lock'))) return 'yarn'
+  if (userAgent?.startsWith('pnpm/')) return 'pnpm'
+  if (userAgent?.startsWith('yarn/')) return 'yarn'
+  return 'npm'
+}
+
+/** Return reproducible npm installation arguments without rewriting its lockfile. */
+export function dependencyInstallArguments(targetDir: string, manager: PackageManager): Array<string> {
+  if (manager !== 'npm') return ['install']
+  return [existsSync(join(targetDir, 'package-lock.json')) ? 'ci' : 'install',
+    '--no-audit', '--no-fund', '--progress=false']
+}
+
+/** Reject unsupported site runtimes before npm can create a partial installation. */
+export function assertProjectNodeVersion(targetDir: string, nodeVersion = process.versions.node): void {
+  const manifest = JSON.parse(readFileSync(join(targetDir, 'package.json'), 'utf8')) as { engines?: { node?: unknown } }
+  const range = manifest.engines?.node
+  if (range === undefined) return
+  if (typeof range !== 'string' || !semver.validRange(range)) {
+    throw new Error('The documentation project declares an invalid Node.js engine range.')
+  }
+  if (!semver.satisfies(nodeVersion, range)) {
+    throw new Error(`This documentation project requires Node.js ${range}; you are using ${nodeVersion}. Switch to a supported Node.js version and retry installation. Your project files and lockfile are preserved.`)
+  }
+}
+
+/** Install dependencies; retries rebuild incomplete node_modules from the lock. */
+export async function installDeps(targetDir: string, requested?: PackageManager): Promise<void> {
+  const manager = detectPackageManager(targetDir, requested)
+  const args = dependencyInstallArguments(targetDir, manager)
   try {
-    await terminal.step('Install dependencies', (update) => runProjectCommand('npm', [
-      'install', '--prefer-offline', '--no-audit', '--no-fund', '--progress=false',
-    ], targetDir, undefined, (message) => update(`Install dependencies: ${message}`)), 'Dependencies installed')
+    assertProjectNodeVersion(targetDir)
+    await terminal.step('Install dependencies', (update) => runProjectCommand(manager, args,
+      targetDir, undefined, (message) => update(`Install dependencies: ${message}`)), 'Dependencies installed')
   } catch (error) {
     const failure = error as CommandFailure
     if (failure.output?.trim()) terminal.error(failure.output.trimEnd())
+    terminal.warn(`Installation did not complete. Your content and lockfile were kept. Retry: cd ${quoteDirectory(targetDir)} && ${manager} ${args.join(' ')}. If a package is incomplete, remove only node_modules before retrying.`)
     throw error
   }
 }
@@ -156,17 +192,21 @@ function declaresThallyCli(directory: string): boolean {
  * package named `thally` exists on npm, so `npx thally` must never fall back
  * to a registry lookup. Otherwise the project's `dev` script is used.
  */
-export function devCommand(directory: string, needsInstall = false): string {
+export function devCommand(directory: string, needsInstall = false, requested?: PackageManager): string {
   const binary = join(directory, 'node_modules', '.bin', 'thally')
   const hasLocalCli = needsInstall
     ? declaresThallyCli(directory)
     : existsSync(binary) || existsSync(`${binary}.cmd`)
-  return hasLocalCli ? 'npx thally dev' : 'npm run dev'
+  const manager = detectPackageManager(directory, requested)
+  if (!hasLocalCli) return `${manager} run dev`
+  return manager === 'npm' ? 'npx thally dev' : manager === 'pnpm' ? 'pnpm exec thally dev' : 'yarn thally dev'
 }
 
 /** One copyable command; installation is included when setup skipped it. */
-export function previewCommand(directory: string, needsInstall = false): string {
-  return `cd ${quoteDirectory(directory)} && ${needsInstall ? 'npm install && ' : ''}${devCommand(directory, needsInstall)}`
+export function previewCommand(directory: string, needsInstall = false, requested?: PackageManager): string {
+  const manager = detectPackageManager(directory, requested)
+  const install = manager === 'npm' && existsSync(join(directory, 'package-lock.json')) ? 'npm ci' : `${manager} install`
+  return `cd ${quoteDirectory(directory)} && ${needsInstall ? `${install} && ` : ''}${devCommand(directory, needsInstall, requested)}`
 }
 
 /** Introduce project creation with the shared wordmark and task presentation. */
@@ -175,7 +215,7 @@ export function logo(version?: string): void {
 }
 
 /** Present an actionable completion summary without implying the site is deployed. */
-export function success(projectDir: string, projectName: string, dependenciesInstalled: boolean): void {
+export function success(projectDir: string, projectName: string, dependenciesInstalled: boolean, requested?: PackageManager): void {
   terminal.detail('Project', projectName)
   terminal.detail('Output', projectDir)
   terminal.section('Make it yours', [
@@ -184,5 +224,5 @@ export function success(projectDir: string, projectName: string, dependenciesIns
     'src/data/site.ts  Name, links, and branding',
   ])
   terminal.outro('Your docs project is ready. The dev server will print your preview URL.')
-  terminal.nextAction('Preview locally', previewCommand(projectDir, !dependenciesInstalled))
+  terminal.nextAction('Preview locally', previewCommand(projectDir, !dependenciesInstalled, requested))
 }

@@ -102,3 +102,13 @@ describe('MCP documentation migration modes', () => {
     expect(await handleMigrateDocs({ sourceUrl: 'https://docs.example.com', projectDir: '/tmp/site' })).toContain('Validation is incomplete')
   })
 })
+
+
+describe('MCP migration source boundaries', () => {
+  it('forwards an explicit remote spec but never enables the local CLI capability', async () => {
+    await handleMigrateDocs({ sourceUrl: 'https://docs.example.com', projectDir: '/tmp/site', openapiUrl: 'https://docs.example.com/openapi.json', sourceDirectory: '/private/source' } as unknown as Parameters<typeof handleMigrateDocs>[0])
+    expect(mocks.migrateDocs).toHaveBeenLastCalledWith(expect.objectContaining({ openapiUrl: 'https://docs.example.com/openapi.json' }))
+    expect(mocks.migrateDocs.mock.calls.at(-1)?.[0]).not.toHaveProperty('sourceDirectory')
+    expect('sourceDirectory' in migrateDocsSchema.shape).toBe(false)
+  })
+})

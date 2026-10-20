@@ -723,3 +723,11 @@ initialized one at a time, best-effort,
 after a successful clone — a submodule that can't be fetched (private,
 deleted, network trouble) is named in a warning instead of failing the
 whole migration.
+
+`migrateUrl({ sourceUrl, openapiUrl })` accepts an explicit HTTPS OpenAPI URL,
+using the same bounded specification fetch boundary as repository imports.
+A single publisher-linked `openapi.json` or `openapi.yaml` can also be discovered.
+Crawled endpoint pages with a unique tag/title route become interactive while
+retaining their prose; generated API navigation lists only unrepresented operations.
+This HTTP adapter never reads local paths. Trusted local CLI imports use a separate
+bounded snapshot before calling the existing repository converter.
