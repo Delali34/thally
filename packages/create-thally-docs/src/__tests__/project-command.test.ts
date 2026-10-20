@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { terminal } from '../terminal.js'
-import { assertProjectNodeVersion, dependencyInstallArguments, detectPackageManager, previewCommand, quoteDirectory, runProjectCommand } from '../utils.js'
+import { installDeps, assertProjectNodeVersion, dependencyInstallArguments, detectPackageManager, previewCommand, quoteDirectory, runProjectCommand } from '../utils.js'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -83,5 +83,19 @@ it('checks the generated site engine before installation without mutating files'
     }
     expect(readFileSync(join(directory, 'package.json'), 'utf8')).toBe(manifest)
     expect(existsSync(join(directory, 'node_modules'))).toBe(false)
+  } finally { rmSync(directory, { recursive: true, force: true }) }
+})
+
+it('prints the required and current Node versions before a scaffold install can fail generically', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'thally-engine-diagnostic-'))
+  const manifest = JSON.stringify({ engines: { node: '<1.0.0' } })
+  const errorOutput = vi.spyOn(terminal, 'error').mockImplementation(() => {})
+  vi.spyOn(terminal, 'warn').mockImplementation(() => {})
+  try {
+    writeFileSync(join(directory, 'package.json'), manifest)
+    await expect(installDeps(directory, 'npm')).rejects.toThrow('requires Node.js <1.0.0')
+    expect(errorOutput).toHaveBeenCalledWith(expect.stringContaining(`requires Node.js <1.0.0; you are using ${process.versions.node}`))
+    expect(existsSync(join(directory, 'node_modules'))).toBe(false)
+    expect(readFileSync(join(directory, 'package.json'), 'utf8')).toBe(manifest)
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })

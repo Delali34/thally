@@ -2,6 +2,8 @@
 import { mkdtemp, mkdir, writeFile, rm, symlink } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { createElement } from 'react'
+import { ImageResponse } from 'next/og'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { setContentAssetFetcher } from './content-source/runtime'
 import { publicBrandImageDataUri, readPublicAsset } from './public-asset-data'
@@ -47,7 +49,45 @@ describe('bounded deployment assets', () => {
   it('supports ordinary XML prologs and local paint gradients', async () => {
     const svg = '<?xml version="1.0"?><svg><defs><linearGradient id="a"/></defs><path fill="url(#a)"/></svg>'
     setContentAssetFetcher(async () => new Response(svg))
-    expect(await publicBrandImageDataUri('/logo.svg')).toMatch(/^data:image\/svg\+xml;base64,/)
+    const uri = await publicBrandImageDataUri('/logo.svg')
+    expect(uri).toBe(`data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`)
+  })
+
+  it.each([
+    '<svg><!-- Ordinary export comment --><path d="M0 0"/></svg>',
+    '<svg><!-- <!-- nested --> comment --></svg>',
+    '<svg><!----><!-->',
+    '<svg><scr<!-- comment -->ipt>alert(1)</scr<!-- comment -->ipt></svg>',
+    '<svg><path o<!-- comment -->nload="alert(1)"/></svg>',
+    '<svg><path fill="u<!-- comment -->rl(https://evil.example/a)"/></svg>',
+    '<svg><image hr<!-- comment -->ef="https://evil.example/a"/></svg>',
+    '<svg><!-- unterminated comment</svg>',
+    '<?xml version="1.0"?><!-- comment before root --><svg/>',
+  ])('rejects comment-bearing SVG without joining or rewriting source tokens: %s', async svg => {
+    setContentAssetFetcher(async () => new Response(svg))
+    expect(await publicBrandImageDataUri('/logo.svg')).toBeNull()
+  })
+
+  it.each([
+    '<?xml arbitrary="metadata"?><svg/>',
+    '<?xml version="1.0" encoding="UTF-16"?><svg/>',
+    '<?xml version="1.0"?><!DOCTYPE svg><svg/>',
+    '<?xml version="1.0"?><?xml version="1.0"?><svg/>',
+    '<?xml version="1.0" <?xml version="1.0"?><svg/>',
+    '<?xml version="1.0"?><?xml-stylesheet href="https://evil.example/a"?><svg/>',
+  ])('rejects malformed, repeated, or resource-bearing XML declarations: %s', async svg => {
+    setContentAssetFetcher(async () => new Response(svg))
+    expect(await publicBrandImageDataUri('/logo.svg')).toBeNull()
+  })
+
+  it('renders accepted original SVG bytes with a complete XML declaration into a PNG', async () => {
+    const svg = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>${safeSvg}`
+    setContentAssetFetcher(async () => new Response(svg))
+    const uri = await publicBrandImageDataUri('/logo.svg')
+    expect(uri).toBe(`data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`)
+    const response = new ImageResponse(createElement('img', { src: uri, width: 20, height: 20 }), { width: 20, height: 20 })
+    const png = Buffer.from(await response.arrayBuffer())
+    expect(png.subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a')
   })
 
   it('does not follow asset redirects or trust oversized bodies', async () => {

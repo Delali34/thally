@@ -160,6 +160,7 @@ export async function installDeps(targetDir: string, requested?: PackageManager)
   } catch (error) {
     const failure = error as CommandFailure
     if (failure.output?.trim()) terminal.error(failure.output.trimEnd())
+    else terminal.error(failure.message)
     terminal.warn(`Installation did not complete. Your content and lockfile were kept. Retry: cd ${quoteDirectory(targetDir)} && ${manager} ${args.join(' ')}. If a package is incomplete, remove only node_modules before retrying.`)
     throw error
   }

@@ -53,11 +53,16 @@ export async function publicBrandImageDataUri(assetPath: string): Promise<string
   const bytes = await readPublicAsset(assetPath, 512 * 1024)
   if (!bytes?.length) return null
   if (extension === '.svg') {
-    const svg = bytes.toString('utf8').replace(/^\s*<\?xml\s[^?]*\?>/i, '').replace(/<!--[\s\S]*?-->/g, '')
+    const svg = bytes.toString('utf8')
+    // Permit only an ordinary UTF-8 XML declaration at the start. Admission
+    // inspects the remaining document, but embeds the original bytes unchanged.
+    const declaration = /^\s*<\?xml\s+version\s*=\s*(["'])1\.0\1(?:\s+encoding\s*=\s*(["'])UTF-8\2)?(?:\s+standalone\s*=\s*(["'])(?:yes|no)\3)?\s*\?>/i.exec(svg)
+    const content = declaration ? svg.slice(declaration[0].length) : svg
     // SVG is parsed solely by the image renderer, never evaluated. Refuse even
     // passive references so custom images cannot cause external resource fetches.
-    if (!/<svg[\s>]/i.test(svg) || /<!|<\?|<\s*(?:script|foreignObject|image|use|style|animate\w*|set)\b|\bon[a-z]+\s*=|\b(?:href|src)\s*=|[\\&]|url\s*\((?!\s*['"]?#[\w.-]+['"]?\s*\))/i.test(svg)) return null
-    return `data:${mime};base64,${Buffer.from(svg).toString('base64')}`
+    // Comments are rejected rather than stripped: removing a comment can join
+    // previously separate text into new markup or another comment delimiter.
+    if (!/<svg[\s>]/i.test(content) || /<!|<\?|<\s*(?:script|foreignObject|image|use|style|animate\w*|set)\b|\bon[a-z]+\s*=|\b(?:href|src)\s*=|[\\&]|url\s*\((?!\s*['"]?#[\w.-]+['"]?\s*\))/i.test(content)) return null
   }
   return `data:${mime};base64,${bytes.toString('base64')}`
 }
