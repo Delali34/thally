@@ -6,6 +6,7 @@
  */
 import { createHash } from 'node:crypto'
 import { load } from 'cheerio'
+import { parse, postprocess, preprocess } from 'micromark'
 import remarkParse from 'remark-parse'
 import remarkMdx from 'remark-mdx'
 import { unified } from 'unified'
@@ -31,9 +32,12 @@ import type {
 
 // Conversion and navigation evidence changed together. Older journals must be
 // recaptured rather than reusing page hashes produced by the previous rules.
-const CONVERTER_VERSION = 'url-evidence-v6'
+const CONVERTER_VERSION = 'url-evidence-v7'
 const parser = unified().use(remarkParse).use(remarkMdx)
-const ACCEPT = 'text/markdown,text/html,application/xhtml+xml;q=0.9'
+// Some publishers treat any Markdown Accept token as an explicit opt-in, even
+// with a lower quality value. Capture the interactive article; declared .md
+// URLs remain available separately for complete machine-readable API schemas.
+const ACCEPT = 'text/html,application/xhtml+xml'
 const MAX_RESPONSE_BYTES = 8_000_000
 const MAX_ASSET_BYTES = 10_000_000
 const MAX_RECORDS = 100_000
@@ -79,6 +83,14 @@ function canonical(value: string, base: string): string | null {
     url.pathname = url.pathname.replace(/\/+$/, '') || '/'
     return url.toString()
   } catch { return null }
+}
+
+/** A filename match is only admissible after the publisher declares an alternate. */
+function sameRouteMarkdownRepresentation(alternate: string, primary: string): boolean {
+  const target = new URL(alternate), source = new URL(primary)
+  const directory = (path: string) => path.replace(/\.mdx?$/i, '').replace(/\/index\/?$/i, '').replace(/\/$/, '')
+  return target.origin === source.origin && target.search === source.search
+    && directory(target.pathname) === directory(source.pathname) && /\.mdx?$/i.test(target.pathname)
 }
 
 /** Classify using the final response; an index must never become article text. */
@@ -392,7 +404,7 @@ function resolveMigrationRecord(records: Map<string, UrlMigrationRecord>, record
   return record
 }
 
-function navigationConfig(checkpoint: UrlMigrationCheckpoint, records: Map<string, UrlMigrationRecord>): MigrationBundle['docsConfig'] | null {
+function navigationConfig(checkpoint: UrlMigrationCheckpoint, records: Map<string, UrlMigrationRecord>, occurrencePages: ReadonlyMap<MigrationNavigationOccurrence, MigrationPage> = new Map()): MigrationBundle['docsConfig'] | null {
   const navigation = checkpoint.navigation
   // External source entries remain real links. They never authorize capturing
   // another origin; portable sidebar shortcuts retain every label/destination.
@@ -419,7 +431,7 @@ function navigationConfig(checkpoint: UrlMigrationCheckpoint, records: Map<strin
   const project = (nodes: Array<MigrationNavigationOccurrence>): Array<string | MigrationNavigationGroup> => nodes.flatMap<string | MigrationNavigationGroup>((node) => {
     const record = node.url ? records.get(canonical(node.url, node.url) ?? '') : undefined
     const target = resolveMigrationRecord(records, record)
-    const page = target?.page
+    const page = occurrencePages.get(node) ?? target?.page
     const children = project(node.children ?? [])
     if (children.length) {
       const contains = (entries: Array<string | MigrationNavigationGroup>): boolean => entries.some((entry) => typeof entry === 'string' ? entry === (page && projection.navigationId(page)) : contains(entry.pages))
@@ -721,8 +733,20 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
     if (!record.evidence) continue
     const final = canonical(record.evidence.finalUrl, sourceUrl)
     if (!final) continue
-    if (record.outcome === 'imported') enqueueArticleLinks(record.evidence.links, final, record.url)
-    else if (record.outcome === 'excluded') {
+    if (record.outcome === 'imported') {
+      enqueueArticleLinks(record.evidence.links, final, record.url)
+      // The primary delta can commit before the newly discovered sibling's
+      // chunk. Keep the explicit declaration as evidence on both sides.
+      for (const reference of record.evidence.markdownRepresentations ?? []) {
+        const alternate = canonical(reference, final)
+        if (!alternate || !sameRouteMarkdownRepresentation(alternate, final)) continue
+        enqueue(alternate, final, 'declared-markdown-representation')
+        const sibling = records.get(alternate)
+        if (sibling && sibling.representationOf !== record.url) {
+          sibling.representationOf = record.url; changed.push(sibling)
+        }
+      }
+    } else if (record.outcome === 'excluded') {
       if (classifyMigrationResponse({ finalUrl: new URL(final), contentType: record.evidence.contentType, body: '' }) === 'index') {
         for (const link of record.evidence.links) enqueue(link, final, record.url)
       }
@@ -815,6 +839,7 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
     let claimedId: string | undefined
     let claimedFinal: string | undefined
     let markdownRepresentation: string | undefined
+    const markdownRepresentations: Array<string> = []
     let exactKey: string | undefined
     try {
       delete record.reason
@@ -892,15 +917,13 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
         $('link[rel="alternate"][type="text/markdown"][href]').each((_index, node) => {
           const alternate = canonical($(node).attr('href')!, final)
           if (!alternate) return
-          const target = new URL(alternate), primary = new URL(final)
-          const directory = (path: string) => path.replace(/\.mdx?$/i, '').replace(/\/index\/?$/i, '').replace(/\/$/, '')
-          if (target.origin !== primary.origin || target.search !== primary.search
-            || directory(target.pathname) !== directory(primary.pathname)
-            || !/\.mdx?$/i.test(target.pathname)) return
+          if (!sameRouteMarkdownRepresentation(alternate, final)) return
           enqueue(alternate, final, 'declared-markdown-representation')
-          const sibling = records.get(alternate)!
+          const sibling = records.get(alternate)
+          if (!sibling) return
           sibling.representationOf = record.url
           markdownRepresentation ??= alternate
+          markdownRepresentations.push(alternate)
           changed.push(sibling)
         })
       }
@@ -912,7 +935,8 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
         }
         enqueueNavigation(observedNavigation, final)
       }
-      if (imported >= maxPages) { record.outcome = 'excluded'; record.reason = 'A discovery endpoint resolved to an article after the selected page limit.'; return }
+      const replacesRepresentation = imported >= maxPages && markdownRepresentations.some(url => records.get(url)?.page)
+      if (imported >= maxPages && !replacesRepresentation) { record.outcome = 'excluded'; record.reason = 'A discovery endpoint resolved to an article after the selected page limit.'; return }
       const already = finalUrls.get(final)
       if (already && already !== record.url) { record.outcome = 'alias'; record.aliasOf = already; return }
       // Claim final identity before conversion can yield to asset acquisition.
@@ -924,10 +948,16 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
       const locale = language.locale
       const navigationId = locale ? id.split('/').filter(segment => segment.toLowerCase() !== locale.toLowerCase()).join('/') || 'introduction' : id
       const identityId = locale ? `${locale}/${navigationId}` : id
-      if (usedIds.has(identityId) && usedIds.get(identityId) !== record.url) { record.outcome = 'failed'; record.reason = `Destination collision for ${identityId}.`; return }
-      usedIds.set(identityId, record.url)
+      const owner = records.get(usedIds.get(identityId) ?? '')
+      const sharesDeclaredRepresentation = owner && (owner.representationOf === record.url || record.representationOf === owner.url)
+      if (owner && owner !== record && !sharesDeclaredRepresentation) { record.outcome = 'failed'; record.reason = `Destination collision for ${identityId}.`; return }
+      // A declared Markdown sibling may already be imported or awaiting assets.
+      // Let both conversions finish so genuine HTML failures retain the inert
+      // fallback, but reserve the shared route for the richer primary article.
+      if (!owner || owner === record || owner.representationOf === record.url) usedIds.set(identityId, record.url)
       claimedId = identityId
       const evidence = evidenceOf(document)
+      if (markdownRepresentations.length) evidence.markdownRepresentations = markdownRepresentations
       const page = convert(document, id)
       if (!page) { record.outcome = 'failed'; record.reason = 'Content could not be represented as safe inert MDX.'; return }
       let coveredSchemaGroups: number[] = []
@@ -1125,6 +1155,7 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
       if (!primary || primary === record) continue
       const winner = primary.outcome === 'imported' ? primary : record.outcome === 'imported' && primary.outcome === 'failed' ? record : undefined
       if (!winner) continue
+      if (winner.page) usedIds.set(winner.page.id, winner.url)
       const alternate = winner === primary ? record : primary
       if (alternate.outcome === 'alias' && alternate.aliasOf === winner.url) continue
       if (alternate.outcome === 'imported') {
@@ -1140,7 +1171,20 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
   settleArticleIdentities()
   while (cursor < pending.length && !options.signal?.aborted && !budgetExhausted && cursor < (options.maxCaptures ?? Infinity)) {
     if (imported >= maxPages) {
-      const index = pending.findIndex((record, position) => position >= cursor && isDiscoveryIndex(new URL(record.url), source))
+      const index = pending.findIndex((record, position) => {
+        if (position < cursor || record.outcome !== 'pending') return false
+        const url = new URL(record.url)
+        if (isDiscoveryIndex(url, source)) return true
+        if (/\.mdx?$/i.test(url.pathname)) return false
+        // A full page budget must still permit upgrading an already counted
+        // Markdown page. This only schedules a capture: the HTML must prove its
+        // explicit alternate before it may share that destination reservation.
+        return ['.md', '.mdx', '/index.md', '/index.mdx'].some(extension => {
+          const alternate = new URL(url)
+          alternate.pathname = alternate.pathname.replace(/\/index$/i, '') + extension
+          return records.get(alternate.href)?.outcome === 'imported'
+        })
+      })
       if (index < 0) break
       pending.splice(cursor, 0, pending.splice(index, 1)[0])
     }
@@ -1165,19 +1209,60 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
   }
   const navigationLabels = new Map<string, string>()
   const navigationIssues: Array<UrlMigrationIssue> = []
+  const navigationOccurrences = new Map<UrlMigrationRecord, Array<{ node: MigrationNavigationOccurrence; entry: UrlMigrationRecord }>>()
   const labelPages = (nodes: Array<MigrationNavigationOccurrence>): void => {
     for (const node of nodes) {
       const entry = node.url ? records.get(canonical(node.url, sourceUrl) ?? '') : undefined
       const target = resolveMigrationRecord(records, entry)
-      if (target?.page && node.label && !node.children?.length && !entry?.aliasAnchor) {
-        const previous = navigationLabels.get(target.url)
-        if (previous && previous !== node.label) navigationIssues.push({ code: 'unsupported-component', source: target.url, message: `This page has multiple source navigation labels (${previous}, ${node.label}); review the shared sidebar title.` })
-        else navigationLabels.set(target.url, node.label)
+      if (entry && target?.page && node.label && !node.children?.length && !entry.aliasAnchor) {
+        const occurrences = navigationOccurrences.get(target) ?? []
+        occurrences.push({ node, entry }); navigationOccurrences.set(target, occurrences)
       }
       labelPages(node.children ?? [])
     }
   }
   labelPages(checkpoint.navigation)
+  const occurrencePages = new Map<MigrationNavigationOccurrence, MigrationPage>()
+  const navigationAliases = new Map<string, { page: MigrationPage; target: UrlMigrationRecord }>()
+  const occupiedPageIds = new Set(checkpoint.records.flatMap(record => record.page ? [projection.pageId(record.page)] : []))
+  const navigationRedirects: NonNullable<MigrationBundle['docsConfig']['redirects']> = []
+  for (const [target, occurrences] of navigationOccurrences) {
+    // Capture order may make a redirecting URL own the article record. Prefer
+    // the final article's actual navigation label independently of that owner.
+    const final = target.evidence && canonical(target.evidence.finalUrl, sourceUrl)
+    const primary = occurrences.find(({ entry }) => entry.url === final)
+      ?? occurrences.find(({ entry }) => entry === target) ?? occurrences[0]
+    navigationLabels.set(target.url, primary.node.label)
+    for (const { node, entry } of occurrences) {
+      if (node.label === primary.node.label) continue
+      const existing = navigationAliases.get(entry.url)
+      if (existing?.page.navTitle === node.label && existing.target === target) {
+        occurrencePages.set(node, existing.page); continue
+      }
+      const sourceRoute = new URL(entry.url)
+      const id = inScope(sourceRoute, source, scopePath) ? idForUrl(sourceRoute, scopePath) : null
+      const locale = projection.canonicalLocale(target.page!)
+      let navigationId = id && (locale ? id.split('/').filter(segment => segment.toLowerCase() !== locale.toLowerCase()).join('/') || 'introduction' : id)
+      // A legacy locale namespace already proven by the article retains the
+      // same normalization on its redirect's portable navigation identity.
+      const legacyPrefix = locale && `${locale.toLowerCase()}-`
+      if (navigationId && legacyPrefix && projection.navigationId(target.page!) !== target.page!.navigationId
+        && navigationId.toLowerCase().startsWith(legacyPrefix)) navigationId = navigationId.slice(legacyPrefix.length)
+      const page = navigationId ? { ...target.page!, id: locale ? `${locale}/${navigationId}` : navigationId, navigationId,
+        ...(locale ? { locale } : {}), navTitle: node.label, source: entry.url, noindex: true } : undefined
+      if (!page || existing || occupiedPageIds.has(projection.pageId(page))) {
+        navigationIssues.push({ code: 'unsupported-component', source: target.url, message: `This page has multiple source navigation labels (${primary.node.label}, ${node.label}); their source routes cannot retain distinct sidebar titles safely.` })
+        continue
+      }
+      // Sidebar leaves read navTitle from a page file. Retain the observed
+      // alias's own leaf metadata and an internal redirect, rather than losing
+      // its label or duplicating the article in search. Journal capture counts
+      // still describe the one imported article and its observed aliases.
+      occupiedPageIds.add(projection.pageId(page))
+      navigationAliases.set(entry.url, { page, target }); occurrencePages.set(node, page)
+      navigationRedirects.push({ source: projection.route(page), destination: projection.route(target.page!), permanent: true })
+    }
+  }
   const pages = checkpoint.records.flatMap((record) => record.page ? [{ ...record.page, id: projection.pageId(record.page), navigationId: projection.navigationId(record.page), ...(projection.canonicalLocale(record.page) ? { locale: projection.canonicalLocale(record.page) } : {}), ...(navigationLabels.has(record.url) ? { navTitle: navigationLabels.get(record.url) } : {}), body: rewriteMarkdownDestinations(record.page.body, (value) => {
     let url: URL
     try { url = new URL(value, record.evidence!.finalUrl) } catch { return value }
@@ -1196,6 +1281,10 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
       && destination.evidence && !destination.evidence.anchors.includes(anchor))
     return `${route}${hasBrokenSourceAnchor ? '' : effectiveHash}`
   }) }] : [])
+  const projectedPages = new Map(pages.map(page => [page.id, page]))
+  for (const { page, target } of navigationAliases.values()) {
+    pages.push({ ...page, id: projection.pageId(page), body: projectedPages.get(projection.pageId(target.page!))!.body })
+  }
   const validation = validateUrlMigration(checkpoint, Boolean(options.signal?.aborted))
   validation.issues.push(...navigationIssues)
   if (navigationIssues.length && validation.status === 'passed') validation.status = 'partial'
@@ -1214,12 +1303,12 @@ export async function runUrlMigration(options: UrlMigrationRunOptions): Promise<
   }
   const bundle: MigrationBundle = {
     sourceUrl, sourceKind: 'url', platform: options.platform ?? 'generic', pages, assets: [...assets.values()],
-    docsConfig: navigationConfig(checkpoint, records) ?? buildNavigationFromPages(pages),
+    docsConfig: navigationConfig(checkpoint, records, occurrencePages) ?? buildNavigationFromPages(pages),
     warnings: [...validation.issues, ...validation.warnings ?? []].map((issue) => ({ code: issue.code === 'missing-page' ? 'missing-page' : 'unsupported-config', message: issue.message, source: issue.source })),
     urlMigrationValidation: validation,
     stats: { discovered: records.size, imported: pages.length, skipped: records.size - pages.length },
   }
-  if (projection.redirects.length) bundle.docsConfig.redirects = projection.redirects
+  if (projection.redirects.length || navigationRedirects.length) bundle.docsConfig.redirects = [...projection.redirects, ...navigationRedirects]
   if (projection.locales.length) {
     const locales = [...new Set([projection.defaultLocale, ...projection.locales])]
     bundle.docsConfig.i18n = { ...bundle.docsConfig.i18n, defaultLocale: projection.defaultLocale, locales: locales.map((code) => ({ code, label: code === 'en' ? 'English' : code })) }
@@ -1242,9 +1331,19 @@ function rewriteMarkdownDestinations(body: string, rewrite: (value: string) => s
     const original = body.slice(start, end)
     const replacement = rewrite(node.url!)
     if (replacement === node.url) return null
-    const index = original.lastIndexOf(node.url!)
-    if (index < 0) return null
-    return { start: start + index, end: start + index + node.url!.length, replacement }
+    // mdast decodes backslash escapes and character references in node.url.
+    // Locate the concrete destination with the same CommonMark tokenizer;
+    // substring matching either misses escaped URLs or edits a matching title.
+    // The outer link's destination follows any nested image in its label.
+    const destinations = postprocess(parse().document().write(preprocess()(original, undefined, true)))
+      .filter(([event, token]) => event === 'enter' && ['resourceDestinationString', 'definitionDestinationString', 'autolinkProtocol', 'autolinkEmail'].includes(token.type))
+    const destination = destinations.at(-1)?.[1]
+    if (!destination) return null
+    // Local paths can retain source fragments containing Markdown punctuation.
+    // Keep those decoded URL bytes inside the destination, including ampersands
+    // that would otherwise become a different character-reference value.
+    const escaped = replacement.replace(/[\\&()<>]/g, '\\$&').replace(/[\t\n\r ]/g, character => encodeURIComponent(character))
+    return { start: start + destination.start.offset, end: start + destination.end.offset, replacement: escaped }
   }).filter((edit): edit is { start: number; end: number; replacement: string } => edit !== null).sort((a, b) => b.start - a.start)
   for (const node of markdownNodes(body)) for (const attribute of node.attributes ?? []) {
     if (!attribute.name || !['src', 'poster', 'href', 'srcSet', 'srcset', 'img', 'primaryHref', 'secondaryHref'].includes(attribute.name) || !attribute.position) continue

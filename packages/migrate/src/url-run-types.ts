@@ -59,6 +59,8 @@ export interface MigrationEvidence {
   code: Array<string>
   anchors: Array<string>
   links: Array<string>
+  /** Explicit same-route Markdown alternates, retained to rebuild journal edges. */
+  markdownRepresentations?: Array<string>
   /** Exact observed canonical/article equality proof; never inferred from query names. */
   articleIdentity?: { canonicalUrl: string; articleSha256: string; sectionAnchor?: string }
 }
