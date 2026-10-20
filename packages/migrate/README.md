@@ -105,8 +105,13 @@ Missing primary counterparts and projected path collisions require review; the
 engine does not invent translations. Fresh HTML captures also observe `html lang`; conflicting or unsupported
 language evidence requires review. Capture adapters can supply `locale` when
 no language is declared in HTML or identified by the scoped URL path.
-The `url-evidence-v6` converter rejects earlier journals: replay retained raw
+The `url-evidence-v7` converter rejects earlier journals: replay retained raw
 captures into a new journal rather than relabelling previously hashed pages.
+Distinct observed redirect routes can retain their own sidebar titles through
+noindex page metadata and portable internal redirects to the captured article.
+Conflicting labels on the same route still require review. Markdown image and
+link destinations are localized by source spans, including escaped query strings,
+without changing matching labels, titles, or fenced examples.
 
 `stopReason` distinguishes a resumable `capture-limit` from hard `page-limit`
 or `byte-limit` outcomes. Hosts must not automatically retry a hard limit as an

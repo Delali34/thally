@@ -68,7 +68,7 @@ describe('evidence URL runner', () => {
     }
     const first = await runUrlMigration({ sourceUrl: 'https://docs.test/one', captureProvider: provider(pages), maxCaptures: 1, batchSize: 1, onCheckpoint: async (delta) => { deltas.push(JSON.parse(JSON.stringify(delta))) } })
     expect(first.validation.status).toBe('partial')
-    expect(deltas[0].converterVersion).toBe('url-evidence-v6')
+    expect(deltas[0].converterVersion).toBe('url-evidence-v7')
     expect(deltas.flatMap((delta) => delta.records).some((record) => record.url.endsWith('/two'))).toBe(true)
     const checkpoint = JSON.parse(JSON.stringify(first.checkpoint))
     checkpoint.records.find((record: { page?: unknown }) => record.page).page.body = 'corrupted'
