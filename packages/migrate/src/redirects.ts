@@ -17,10 +17,17 @@ import type { MigrationDocsConfig, MigrationPage, MigrationWarning } from './typ
 
 const LISTED = 10
 
+/** Remove trailing slashes in one backward scan, including on untrusted nonliteral paths. */
+export function trimTrailingSlashes(route: string): string {
+  let end = route.length
+  while (end > 0 && route[end - 1] === '/') end--
+  return route.slice(0, end)
+}
+
 /** A fully literal site path, without a trailing slash and in the case it was written; null for patterns, queries and fragments. */
 function exactRoute(route: string): string | null {
   return route.startsWith('/') && !/[?:*#()[\]{}]/.test(route)
-    ? route.replace(/\/+$/, '') || '/'
+    ? trimTrailingSlashes(route) || '/'
     : null
 }
 

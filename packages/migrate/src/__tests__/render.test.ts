@@ -3,6 +3,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { createContext, Script } from 'node:vm'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { mergeMigrationConfig } from '../index.js'
@@ -153,5 +154,15 @@ describe('in-place redirect preservation', () => {
     const incoming = [{ source: '/new', destination: '/x/../guide?lang=go#response', permanent: true }, { source: '/alias', destination: 'https://example.com/canonical', permanent: true }, { source: '/other', destination: '//example.com/canonical', permanent: true }]
     const merged = mergeMigrationConfig({ tabs: [], redirects: owner }, { tabs: [], redirects: incoming })
     expect(merged.redirects).toEqual([...owner, ...incoming])
+  })
+  it('bounds long literal and pattern source slash runs while preserving owner precedence', () => {
+    const sources = ['/' + '/'.repeat(250_000) + 'tail', '/:path/' + '/'.repeat(250_000) + 'tail']
+    for (const source of sources) {
+      const owner = { source, destination: '/owner', permanent: false }
+      const incoming = { source: source + '////', destination: '/imported', permanent: true }
+      const context = createContext({ merge: mergeMigrationConfig, existing: { tabs: [], redirects: [owner] }, incoming: { tabs: [], redirects: [incoming] } })
+      new Script('result = merge(existing, incoming)').runInContext(context, { timeout: 1000 })
+      expect(context.result.redirects).toEqual([owner])
+    }
   })
 })

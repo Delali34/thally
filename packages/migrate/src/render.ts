@@ -1,6 +1,6 @@
 /** Render canonical migration bundles into a portable Thally repository tree. */
 
-import { destinationRoute, literalRoute } from './redirects.js'
+import { destinationRoute, literalRoute, trimTrailingSlashes } from './redirects.js'
 import { mergeComponentRegistry } from './components.js'
 
 import type {
@@ -53,7 +53,7 @@ function isIntegrationsObject(value: unknown): value is Record<string, unknown> 
 /** Owner redirect sources win; distinct imported aliases survive without introducing literal cycles. */
 function mergeRedirects(existing: MigrationDocsConfig['redirects'] = [], incoming: MigrationDocsConfig['redirects'] = []): NonNullable<MigrationDocsConfig['redirects']> {
   const redirects = [...existing]
-  const key = (source: string): string => literalRoute(source) ?? source.replace(/\/+$/, '').toLowerCase()
+  const key = (source: string): string => literalRoute(source) ?? trimTrailingSlashes(source).toLowerCase()
   // Use the same browser normalization as migration's final redirect guard:
   // raw/encoded dot segments and queries must not disguise a cycle edge.
   const destinationKey = (destination: string): string | null => literalRoute(destinationRoute(destination) ?? '')
