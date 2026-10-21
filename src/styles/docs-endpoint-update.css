@@ -1,0 +1,53 @@
+/* API endpoint layout from the October handoff. Keep these rules scoped so
+   prose pages and customer-authored layouts retain their existing structure. */
+.thally-docs-api { min-width: 0; }
+.thally-endpoint { min-width: 0; }
+.thally-endpoint-header { margin-bottom: 28px; }
+.thally-endpoint-header > div > p { color: var(--docs-accent); font-size: .8rem; letter-spacing: 0; text-transform: none; margin-bottom: 10px; }
+.thally-endpoint-title { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 14px; }
+.thally-endpoint-title h1 { flex: 1; min-width: min(100%, 12rem); }
+.thally-endpoint-title > .prose,
+.thally-endpoint-title > p { flex-basis: 100%; max-width: 68ch; font-size: 1.125rem; line-height: 1.7; }
+.thally-endpoint-bar { display: flex; align-items: center; gap: 14px; min-width: 0; padding: 10px 12px 10px 16px; border-radius: 12px; background: var(--docs-surface); box-shadow: 0 0 0 1px var(--docs-line); }
+.thally-endpoint-path { flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; font-size: .84rem; }
+.thally-endpoint-path i { color: var(--sx-p, var(--docs-sky)); font-style: normal; }
+.thally-endpoint-try { flex-shrink: 0; height: 32px; padding: 0 13px; border-radius: 9px; background: var(--docs-primary); color: hsl(var(--thally-primary-foreground)); font-size: .78rem; font-weight: 600; }
+.thally-endpoint-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 440px); gap: 56px; margin-top: 32px; }
+.thally-endpoint-doc, .thally-endpoint-code { min-width: 0; }
+.thally-endpoint-code { align-self: start; position: sticky; top: calc(var(--docs-header-height, 60px) + 24px); }
+.thally-endpoint-doc h2 { margin: 36px 0 4px; font-size: 1.15rem; font-weight: 600; }
+.thally-endpoint-doc > section:first-child h2 { margin-top: 0; }
+.thally-endpoint-doc > section + section { margin-top: 30px; }
+.thally-parameter { padding: 14px 0; border-top: 1px solid var(--docs-line); }
+.thally-parameter:first-child { border-top: 0; }
+.thally-parameter-header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; }
+.thally-parameter-header > code { font-family: var(--font-mono), monospace; font-size: .88rem; font-weight: 500; }
+.thally-parameter-header > code { max-width: 100%; overflow-wrap: anywhere; white-space: normal; }
+.thally-parameter-type { color: var(--docs-mute); font-family: var(--font-mono), monospace; font-size: .78rem; }
+.thally-parameter-required { color: var(--sx-k, var(--docs-callout-danger)); font-size: .78rem; }
+.thally-endpoint .thally-parameter-location,
+.thally-authored-endpoint .thally-parameter-location { display: none; }
+.thally-parameter[data-highlighted] > .thally-parameter-header > code { color: var(--docs-accent); }
+@media (max-width: 1180px) {
+  .thally-endpoint-grid { grid-template-columns: minmax(0, 1fr); gap: 32px; }
+  .thally-endpoint-code { order: -1; position: static; }
+}
+@media (max-width: 560px) {
+  .thally-endpoint-bar { gap: 8px; padding-inline: 10px; }
+  .thally-endpoint-bar > button { flex-shrink: 0; }
+  .thally-endpoint-title > .prose, .thally-endpoint-title > p { font-size: 1.06rem; }
+}
+
+/* Authored API pages keep their MDX authoritative while Panel samples share
+   the generated endpoint's rail and code-first mobile order. */
+.thally-authored-endpoint-grid { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr); gap: 32px; }
+.thally-authored-endpoint-grid:has([data-mdx-panel]) { grid-template-columns: minmax(0, 1fr) minmax(0, 440px); gap: 56px; }
+.thally-authored-endpoint-code { min-width: 0; }
+.thally-authored-endpoint-code > div { top: calc(var(--docs-header-height, 60px) + 24px); max-height: calc(100dvh - var(--docs-header-height, 60px) - 48px); }
+.thally-authored-endpoint-grid:not(:has([data-mdx-panel])) > .thally-authored-endpoint-code { display: none; }
+.thally-authored-endpoint:has([data-mdx-panel]) .thally-panel-inline { display: none; }
+@media (max-width: 1180px) {
+  .thally-authored-endpoint-grid:has([data-mdx-panel]) { grid-template-columns: minmax(0, 1fr); gap: 32px; }
+  .thally-authored-endpoint-code { order: -1; }
+  .thally-authored-endpoint-code > div { position: static; max-height: none; overflow: visible; }
+}

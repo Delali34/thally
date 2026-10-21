@@ -3,6 +3,7 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
+import { ApiLocaleProvider } from '@/components/api/api-locale'
 import { Expandable, ParamField, ResponseField } from '@/components/mdx/api-fields'
 
 describe('API field components', () => {
@@ -29,6 +30,30 @@ describe('API field components', () => {
       expect(field(props)).not.toMatch(/>(body|query|path|header)<\/span>/)
     }
     expect(field({ query: 'page' })).toContain('<code class="text-sm font-semibold text-foreground">page</code>')
+  })
+
+  it('exposes named keyboard-focusable rows for parameter and code linking', () => {
+    const parameter = renderToStaticMarkup(createElement(ParamField, {
+      name: 'title', type: 'string', required: true, default: 'draft',
+    }, 'Page title.'))
+    const response = renderToStaticMarkup(createElement(ResponseField, { name: 'title', type: 'string' }))
+    for (const markup of [parameter, response]) {
+      expect(markup).toContain('data-p="title"')
+      expect(markup).toContain('tabindex="0"')
+      expect(markup).toContain('thally-parameter-header')
+    }
+    expect(parameter).toContain('thally-parameter-required')
+    expect(parameter).not.toContain('rounded border')
+  })
+
+  it('preserves localized metadata and description prose outside not-prose ancestors', () => {
+    const markup = renderToStaticMarkup(createElement(ApiLocaleProvider, { value: 'es' }, createElement(ParamField, { name: 'title', required: true, deprecated: true, default: 'draft' }, createElement('p', null, 'Descripción'))))
+    expect(markup).toContain('requerido')
+    expect(markup).toContain('obsoleto')
+    expect(markup).toContain('predeterminado')
+    expect(markup).toContain('prose prose-sm')
+    expect(markup).not.toMatch(/<section[^>]*class="[^"]*not-prose/)
+    expect(markup).toContain('[&amp;_div&gt;:first-child]:mt-0')
   })
 
   it('renders response labels and accessible expandable state', () => {

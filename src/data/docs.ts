@@ -136,12 +136,12 @@ export interface SidebarCollection {
 }
 
 export interface NavigationItem {
+  /** Request method from structured API metadata; never inferred from the label. */
+  method?: string
   id: string
   title: string
   href: string
   badge?: string
-  /** HTTP method of the page's `openapi:` operation, shown as a pill in the sidebar. */
-  method?: string
   /** Sidebar icon from page frontmatter (name, or an image path/URL). */
   icon?: string
   iconType?: IconStyle
@@ -1081,16 +1081,17 @@ function resolveNavItem(
   groupPath?: Array<string>,
 ): NavigationItem {
   const fm = readFrontmatter(pageId, locale)
+  const api = pageApiMetadata(fm)
+  const method = api.openapi ? (api.openapi.webhook ? 'HOOK' : api.openapi.method.toUpperCase()) : api.manual?.method
   const slug = pageId === 'introduction' ? [] : pageId.split('/').filter(Boolean)
   const baseHref = slug.length ? `/${slug.join('/')}` : '/'
-  const operation = pageApiMetadata(fm).openapi
   const href = servedRootHref(locale ? (baseHref === '/' ? `/${locale}` : `/${locale}${baseHref}`) : baseHref)
   return {
     id: slugifyId(pageId) || 'introduction',
     title: fm.navTitle ?? fm.title ?? deriveTitleFromSlug(pageId),
+    ...(method ? { method } : {}),
     href,
     badge: fm.badge,
-    ...(operation ? { method: operation.webhook ? 'HOOK' : operation.method.toUpperCase() } : {}),
     ...(typeof fm.icon === 'string' && fm.icon ? { icon: fm.icon } : {}),
     ...(fm.iconType ? { iconType: fm.iconType } : {}),
     description: fm.description,

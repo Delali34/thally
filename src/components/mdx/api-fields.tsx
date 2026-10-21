@@ -11,6 +11,7 @@
 import { useId, useState } from 'react'
 import { ChevronRight } from 'lucide-react'
 import { useApiLabels } from '@/components/api/api-locale'
+import { useParameterLink } from '@/components/api/parameter-link'
 import { cn } from '@/lib/utils'
 import type { ReactNode } from 'react'
 
@@ -49,19 +50,20 @@ export function ResponseField({
   children,
 }: ResponseFieldProps) {
   const t = useApiLabels()
+  const { active, ...linkEvents } = useParameterLink(name)
   return (
-    <section className="border-b border-border/70 py-5 last:border-0">
-      <div className="not-prose flex flex-wrap items-baseline gap-x-2.5 gap-y-1.5">
+    <section {...linkEvents} tabIndex={0} data-p={name} data-highlighted={active || undefined} className="thally-parameter">
+      <div className="thally-parameter-header not-prose">
         {pre.map((label) => <span key={`pre-${label}`} className="rounded bg-muted px-1.5 py-0.5 text-[0.68rem] font-medium text-foreground/60">{label}</span>)}
         <code className={cn('text-sm font-semibold text-foreground', deprecated && 'line-through opacity-65')}>{name}</code>
         {post.map((label) => <span key={`post-${label}`} className="rounded bg-muted px-1.5 py-0.5 text-[0.68rem] font-medium text-foreground/60">{label}</span>)}
         {type && (
-          <span className="rounded border border-border/50 bg-muted px-1.5 py-0.5 font-mono text-xs text-foreground/70">
+          <span className="thally-parameter-type">
             {type}
           </span>
         )}
         {required && (
-          <span className="text-[0.7rem] font-semibold text-rose-600 dark:text-rose-400">
+          <span className="thally-parameter-required">
             {t('required')}
           </span>
         )}
@@ -103,20 +105,21 @@ export function ParamField({ name, type, required, deprecated, body, query, path
   const isHeader = !path && !query && Boolean(header)
   const locatedName = [path, query, header, body].find((value): value is string => typeof value === 'string' && value.length > 0)
   const fieldName = locatedName ?? name ?? 'parameter'
+  const { active, ...linkEvents } = useParameterLink(fieldName)
   return (
-    <section className="border-b border-border/70 py-5 last:border-0">
-      <div className="not-prose flex flex-wrap items-baseline gap-x-2.5 gap-y-1.5">
+    <section {...linkEvents} tabIndex={0} data-p={fieldName} data-highlighted={active || undefined} className="thally-parameter">
+      <div className="thally-parameter-header not-prose">
         <code className={cn('text-sm font-semibold text-foreground', deprecated && 'line-through opacity-65')}>{fieldName}</code>
         {isHeader && (
-          <span className="font-mono text-[0.7rem] font-medium text-green-700 dark:text-green-300">header</span>
+          <span className="thally-parameter-location font-mono text-[0.7rem] font-medium text-green-700 dark:text-green-300">header</span>
         )}
         {type && (
-          <span className="rounded border border-border/50 bg-muted px-1.5 py-0.5 font-mono text-xs text-foreground/70">
+          <span className="thally-parameter-type">
             {type}
           </span>
         )}
         {required && (
-          <span className="text-[0.7rem] font-semibold text-rose-600 dark:text-rose-400">
+          <span className="thally-parameter-required">
             {t('required')}
           </span>
         )}

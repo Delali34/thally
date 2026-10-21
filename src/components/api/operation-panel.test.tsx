@@ -189,7 +189,7 @@ describe('OperationPanel Markdown descriptions keep their prose styles', () => {
   const document = new inertWindow.DOMParser().parseFromString(html, 'text/html')
 
   it('renders paragraphs, inline code, links and fenced code for the auth scheme, parameters and nested fields', () => {
-    const rows = [...document.querySelectorAll('section.border-b')]
+    const rows = [...document.querySelectorAll('section.thally-parameter')]
     // Authorization, page[after], then the data and nested id response fields.
     expect(rows.map((row) => row.querySelector('code')?.textContent)).toEqual(['Authorization', 'page[after]', 'data', 'id'])
     for (const row of rows) {
@@ -208,7 +208,7 @@ describe('OperationPanel Markdown descriptions keep their prose styles', () => {
       if (block.closest('.not-prose')) throw new Error(`${block.tagName} sits under .not-prose: ${block.parentElement?.className}`)
     }
     // Only the name, type and badge row opts out of prose.
-    for (const row of document.querySelectorAll('section.border-b')) {
+    for (const row of document.querySelectorAll('section.thally-parameter')) {
       expect(row.className).not.toContain('not-prose')
       expect(row.querySelector(':scope > div.not-prose code')).not.toBeNull()
     }
@@ -258,17 +258,18 @@ describe('OperationPanel $ref path parameter', () => {
     }
     const html = renderToStaticMarkup(<OperationPanel operation={operationFrom(spec)} />)
     expect(html).toContain('>id</code>')
-    expect(html).toContain('--url &#x27;https://api.example.com/v2/monitor/{id}&#x27;')
+    const parsed = new inertWindow.DOMParser().parseFromString(html, 'text/html')
+    expect(parsed.querySelector('.tc-source')?.textContent).toContain("--url 'https://api.example.com/v2/monitor/{id}'")
     expect(html).not.toContain('%7Bid%7D')
   })
 })
 
 describe('OperationPanel code samples', () => {
-  it('offers a language dropdown with the seven live languages, cURL first', () => {
+  it('starts with cURL and exposes an accessible language menu', () => {
     const html = renderToStaticMarkup(<OperationPanel operation={operationFrom(document)} />)
     expect(html).toContain('aria-label="Select language"')
-    const options = [...html.matchAll(/<option[^>]*>([^<]+)<\/option>/g)].map((m) => m[1])
-    expect(options).toEqual(['cURL', 'Python', 'JavaScript', 'PHP', 'Go', 'Java', 'Ruby'])
+    expect(html).toContain('aria-haspopup="menu"')
+    expect(html).toContain('>cURL</span>')
     expect(html).toContain('curl --request POST')
   })
 })
@@ -297,8 +298,9 @@ describe('OperationPanel response examples', () => {
     const tabs = html.match(/role="tablist" aria-label="Response status".*?<\/div>/)![0]
     expect(tabs).toContain('>200<')
     expect(tabs).toContain('>429<')
-    expect(tabs).not.toContain('>404<')
-    expect(html).toContain('&quot;success&quot;: true')
+    expect(tabs).toContain('>404<')
+    const parsed = new inertWindow.DOMParser().parseFromString(html, 'text/html')
+    expect(parsed.querySelector('.tc-res pre')?.textContent).toContain('"success": true')
     expect(html).not.toContain('Send a request to preview the response.')
   })
 })

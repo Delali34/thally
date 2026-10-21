@@ -131,6 +131,7 @@ export function TopBar({
         data-density={isCrowded ? 'compact' : 'comfortable'}
       >
         <MobileNav
+          navigationPresentation={navigationPresentation}
           sections={activeSections}
           collections={collections}
           activeCollectionId={activeCollectionId}

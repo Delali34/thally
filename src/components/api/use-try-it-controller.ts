@@ -1,4 +1,6 @@
-import { useCallback, useMemo, useState } from 'react'
+/** Editable playground state; encoding and authorization retain the runtime request contracts. */
+import { useCallback, useMemo, useRef, useState } from 'react'
+import { fieldJsonValue, getTryItFields, initialTryItBody, initialTryItParameters, parseBodyObject, validateTryItFields, type TryItField } from './try-it-fields'
 import { authHeaders } from '@/lib/openapi/auth'
 import { encodeUrlencoded, formPairs, isMultipart, isUrlencoded } from '@/lib/openapi/body-form'
 import type { NormalizedOperation } from '@/lib/openapi/types'
@@ -18,7 +20,7 @@ export interface TryItController {
   setBodyValue: (value: string) => void
   /** Files chosen in the body form for binary fields, by field name. */
   setFile: (name: string, file: File | null) => void
-  /** Typed credential per security scheme name; never stored, only sent with this request. */
+  /** Typed credential per scheme; retained only in this tab for this operation and server. */
   authValues: Record<string, string>
   setAuthValue: (scheme: string, value: string) => void
   setParamValue: (group: 'path' | 'query' | 'header', key: string, value: string) => void
@@ -33,6 +35,12 @@ export interface TryItController {
   cancelSend: () => void
   isSending: boolean
   canSendBody: boolean
+  fields: TryItField[]
+  fieldValues: Record<string, string>
+  errors: Record<string, string>
+  setFieldValue: (field: TryItField, value: string) => void
+  validateRequest: () => Record<string, string>
+  restoreCredentials: () => void
 }
 
 export interface PreparedRequest {
@@ -69,18 +77,66 @@ async function encodeMultipart(request: PreparedRequest, bodyValue: string, file
   return { base64: btoa(binary), headers: { 'Content-Type': encoded.headers.get('content-type') ?? 'multipart/form-data' } }
 }
 
+/** Preserve one request projection for execution, safe examples, and all form controls. */
 export function useTryItController(operation: NormalizedOperation): TryItController {
-  const [serverUrl, setServerUrl] = useState(operation.servers[0]?.url ?? '')
-  const [pathParams, setPathParams] = useState<Record<string, string>>(operation.prefill.path)
-  const [queryParams, setQueryParams] = useState<Record<string, string>>(operation.prefill.query)
-  const [headerParams, setHeaderParams] = useState<Record<string, string>>(operation.prefill.header)
-  const [bodyValue, setBodyValue] = useState(operation.prefill.body ?? '')
+  const [serverUrl, updateServerUrl] = useState(operation.servers[0]?.url ?? '')
+  const [errors, setErrors] = useState<Record<string, string>>({})
+  const [pathParams, setPathParams] = useState<Record<string, string>>(() => initialTryItParameters(operation, 'path'))
+  const [queryParams, setQueryParams] = useState<Record<string, string>>(() => initialTryItParameters(operation, 'query'))
+  const [headerParams, setHeaderParams] = useState<Record<string, string>>(() => initialTryItParameters(operation, 'header'))
+  const [bodyValue, updateBodyValue] = useState(() => initialTryItBody(operation))
+  const [bodyDrafts, setBodyDrafts] = useState<Record<string, string>>({})
+  const setBodyValue = useCallback((value: string) => {
+    updateBodyValue(value)
+    setBodyDrafts({})
+    if (value.trim()) setErrors((previous) => Object.fromEntries(Object.entries(previous).filter(([key]) => !key.startsWith('body:'))))
+  }, [])
   const [authValues, setAuthValues] = useState<Record<string, string>>(() =>
     Object.fromEntries(operation.authSchemes.flatMap((scheme) => (scheme.prefill ? [[scheme.name, scheme.prefill]] : []))),
   )
   const [response, setResponse] = useState<ResponsePayload | { error: string } | null>(null)
   const [isSending, setIsSending] = useState(false)
   const [confirmingSend, setConfirmingSend] = useState(false)
+  const sendingRef = useRef(false)
+  const fields = useMemo(() => getTryItFields(operation), [operation])
+  const fieldValues = useMemo(() => {
+    const body = parseBodyObject(bodyValue)
+    return Object.fromEntries(fields.map((field) => {
+      if (field.authSchemeName) return [field.id, authValues[field.authSchemeName] ?? '']
+      if (field.group === 'body') {
+        const value = body[field.name]
+        return [field.id, bodyDrafts[field.id] ?? (field.id === 'body:__raw' ? bodyValue : typeof value === 'string' ? value : value === undefined ? '' : JSON.stringify(value, null, 2))]
+      }
+      const values = field.group === 'path' ? pathParams : field.group === 'query' ? queryParams : headerParams
+      return [field.id, values[field.name] ?? '']
+    }))
+  }, [fields, bodyValue, bodyDrafts, authValues, pathParams, queryParams, headerParams])
+  const validateRequest = useCallback(() => {
+    const next = validateTryItFields(fields, fieldValues, { isBodyOmitted: !operation.requestBody?.required && !bodyValue.trim() })
+    if (bodyValue.trim() && (/json/i.test(operation.requestBody?.contents[0]?.mediaType ?? '') || isMultipart(operation.requestBody?.contents[0]?.mediaType) || isUrlencoded(operation.requestBody?.contents[0]?.mediaType))) {
+      try { JSON.parse(bodyValue) } catch { next['body:__raw'] = 'Enter valid JSON' }
+    }
+    setErrors(next)
+    return next
+  }, [fields, fieldValues, operation.requestBody, bodyValue])
+  const restoreForServer = useCallback((url: string) => {
+    const values: Record<string, string> = {}
+    for (const scheme of operation.authSchemes) {
+      // Query/cookie credentials never enter the URL or the relay's blocked Cookie header.
+      if (scheme.in !== 'header') continue
+      const fallback = url === operation.servers[0]?.url ? scheme.prefill ?? '' : ''
+      try { values[scheme.name] = sessionStorage.getItem(`thallyPgKey:${operation.specId}:${operation.id}:${url}:${scheme.name}`) ?? fallback }
+      catch { values[scheme.name] = fallback }
+    }
+    setAuthValues(values)
+  }, [operation.authSchemes, operation.id, operation.servers, operation.specId])
+  const restoreCredentials = useCallback(() => restoreForServer(serverUrl), [restoreForServer, serverUrl])
+  const setServerUrl = useCallback((url: string) => {
+    updateServerUrl(url)
+    setResponse(null)
+    setConfirmingSend(false)
+    restoreForServer(url)
+  }, [restoreForServer])
 
   const [files, setFiles] = useState<Record<string, File>>({})
   const setFile = useCallback(
@@ -141,7 +197,14 @@ export function useTryItController(operation: NormalizedOperation): TryItControl
   const preparedRequest = useMemo(() => buildRequest(false), [buildRequest])
   const sampleRequest = useMemo(() => buildRequest(true), [buildRequest])
 
-  const setAuthValue = useCallback((scheme: string, value: string) => setAuthValues((prev) => ({ ...prev, [scheme]: value })), [])
+  const setAuthValue = useCallback((scheme: string, value: string) => {
+    setAuthValues((previous) => ({ ...previous, [scheme]: value }))
+    try {
+      const key = `thallyPgKey:${operation.specId}:${operation.id}:${serverUrl}:${scheme}`
+      // Persist an empty marker too: clearing a configured credential must not restore it on reopen.
+      sessionStorage.setItem(key, value)
+    } catch { /* Storage can be blocked; the in-memory credential still works. */ }
+  }, [operation.id, operation.specId, serverUrl])
 
   const setParamValue = useCallback(
     (group: 'path' | 'query' | 'header', key: string, value: string) => {
@@ -160,11 +223,33 @@ export function useTryItController(operation: NormalizedOperation): TryItControl
     [],
   )
 
+  const setFieldValue = useCallback((field: TryItField, value: string) => {
+    setErrors((previous) => {
+      if (!previous[field.id] || !value.trim()) return previous
+      const next = { ...previous }
+      delete next[field.id]
+      return next
+    })
+    if (field.authSchemeName) setAuthValue(field.authSchemeName, value)
+    else if (field.group === 'body') {
+      setBodyDrafts((previous) => ({ ...previous, [field.id]: value }))
+      if (field.id === 'body:__raw') updateBodyValue(value)
+      else updateBodyValue((previous) => {
+        const next = parseBodyObject(previous)
+        if (value === '') delete next[field.name]
+        else next[field.name] = fieldJsonValue(field, value)
+        return !Object.keys(next).length && !operation.requestBody?.required ? '' : JSON.stringify(next, null, 2)
+      })
+    } else setParamValue(field.group, field.name, value)
+  }, [operation.requestBody?.required, setAuthValue, setParamValue])
+
   const sendRequest = useCallback(async () => {
+    if (sendingRef.current || Object.keys(validateRequest()).length) return
     if (!preparedRequest.isServerConfigured) {
       setResponse({ error: operation.manualPage ? MANUAL_NO_SERVER : 'No server URL available for this spec. Update your OpenAPI servers array.' })
       return
     }
+    sendingRef.current = true
     setIsSending(true)
     setResponse(null)
     try {
@@ -191,18 +276,20 @@ export function useTryItController(operation: NormalizedOperation): TryItControl
     } catch (error) {
       setResponse({ error: error instanceof Error ? error.message : 'Failed to execute request' })
     } finally {
+      sendingRef.current = false
       setIsSending(false)
     }
-  }, [bodyValue, files, operation.manualLocale, operation.manualPage, operation.path, operation.specId, preparedRequest])
+  }, [bodyValue, files, operation.manualLocale, operation.manualPage, operation.path, operation.specId, preparedRequest, validateRequest])
 
   const requestSend = useCallback(() => {
+    if (sendingRef.current || Object.keys(validateRequest()).length) return
     if (operation.method.toUpperCase() === 'DELETE' && !confirmingSend) {
       setConfirmingSend(true)
       return
     }
     setConfirmingSend(false)
     void sendRequest()
-  }, [confirmingSend, operation.method, sendRequest])
+  }, [confirmingSend, operation.method, sendRequest, validateRequest])
   const cancelSend = useCallback(() => setConfirmingSend(false), [])
 
   return {
@@ -227,5 +314,11 @@ export function useTryItController(operation: NormalizedOperation): TryItControl
     cancelSend,
     isSending,
     canSendBody,
+    fields,
+    fieldValues,
+    errors,
+    setFieldValue,
+    validateRequest,
+    restoreCredentials,
   }
 }
