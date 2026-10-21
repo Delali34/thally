@@ -135,9 +135,11 @@ describe('stable starter release', () => {
       `https://codeload.github.com/thallylabs/starter/tar.gz/${STARTER_COMMIT_SHA}`,
     )
     expect(STABLE_SCAFFOLD_RELEASE.source.treeSha).toBeTruthy()
-    expect(STABLE_SCAFFOLD_RELEASE.starterVersion).toBe(2)
+    // Retained v2 and lean v3 releases share the same immutable identity contract.
+    expect([2, 3]).toContain(STABLE_SCAFFOLD_RELEASE.starterVersion)
     expect(isStableScaffoldRelease(structuredClone(STABLE_SCAFFOLD_RELEASE))).toBe(true)
-    // The retained chain grows by one v2 record per promotion, so assert its
+    expect(SUPPORTED_SCAFFOLD_RELEASES.some(({ starterVersion }) => starterVersion === 2)).toBe(true)
+    // The retained chain grows by one supported record per promotion, so assert its
     // invariants instead of a literal snapshot: the stable record leads,
     // versions never increase along the update-base chain, and the frozen v1
     // base anchors the tail so v1 sites can always compute a three-way update.
