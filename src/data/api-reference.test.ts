@@ -56,6 +56,7 @@ describe('withApiNavigation', () => {
   it('prefixes generated links for a locale', async () => {
     const [entry] = await withApiNavigation([collection('docs-admin', { api: { source: 'b.json' } })], '/es')
     expect(entry.sections[0].items[0].href).toBe('/es/api/docs-admin/admin/get')
+    expect(entry.sections[0].items[0].method).toBe('GET')
   })
 })
 

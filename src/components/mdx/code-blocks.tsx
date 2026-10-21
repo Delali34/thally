@@ -2,10 +2,9 @@
 
 /**
  * Interactive code panels for authored MDX, including language/framework
- * labels, synchronized variant tabs, syntax output, and reader actions.
+ * labels, synchronized language menus, syntax output, and reader actions.
  */
 
-import { Tab, TabGroup, TabList, TabPanel, TabPanels } from '@headlessui/react'
 import clsx from 'clsx'
 import {
   Children,
@@ -13,18 +12,22 @@ import {
   Fragment,
   isValidElement,
   useContext,
-  useEffect,
   useId,
   useMemo,
+  useRef,
   useState,
 } from 'react'
 import type { ComponentPropsWithoutRef, CSSProperties, ReactNode } from 'react'
+import { CopyButton as SharedCopyButton } from '@/components/api/copy-button'
+import { LanguageMenu, useDocsLanguage } from '@/components/docs/code-card'
+import { useCompiledParameterLinks } from '@/components/api/parameter-link'
+import { useApiLabels } from '@/components/api/api-locale'
+import { normalizeDocsLanguage } from '@/lib/openapi/code-snippets'
 
 import { useDocsCodeActions } from '@/components/docs/code-actions-provider'
 import { Icon } from '@/components/mdx/content-icon'
 import { Tag } from '@/components/ui/tag'
 import { Mermaid } from '@/components/mdx/mermaid'
-import { resolvePreferredLanguage, usePreferredLanguageStore } from '@/lib/preferred-language'
 
 const languageNames: Record<string, string> = {
   bash: 'Shell',
@@ -73,7 +76,8 @@ const languageNames: Record<string, string> = {
   vue: 'Vue',
 }
 
-function getPanelTitle({
+/** Resolve authored labels and known fence grammars consistently across sample wrappers. */
+export function getPanelTitle({
   title,
   tag,
   language,
@@ -97,89 +101,8 @@ function getPanelTitle({
   return 'Code'
 }
 
-function ClipboardIcon(props: ComponentPropsWithoutRef<'svg'>) {
-  return (
-    <svg viewBox="0 0 20 20" aria-hidden="true" {...props}>
-      <path
-        strokeWidth="0"
-        d="M5.5 13.5v-5a2 2 0 0 1 2-2l.447-.894A2 2 0 0 1 9.737 4.5h.527a2 2 0 0 1 1.789 1.106l.447.894a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-5a2 2 0 0 1-2-2Z"
-      />
-      <path
-        fill="none"
-        strokeLinejoin="round"
-        d="M12.5 6.5a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-5a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2m5 0-.447-.894a2 2 0 0 0-1.79-1.106h-.527a2 2 0 0 0-1.789 1.106L7.5 6.5m5 0-1 1h-3l-1-1"
-      />
-    </svg>
-  )
-}
-
-async function writeClipboardText(value: string): Promise<boolean> {
-  try {
-    await window.navigator.clipboard.writeText(value)
-    return true
-  } catch {
-    // Clipboard access can be unavailable in embedded or non-secure previews.
-    // Keep copy functional there using the browser's legacy selection path.
-    const textarea = document.createElement('textarea')
-    textarea.value = value
-    textarea.setAttribute('readonly', '')
-    textarea.style.position = 'fixed'
-    textarea.style.opacity = '0'
-    document.body.append(textarea)
-    textarea.select()
-    try {
-      return document.execCommand('copy')
-    } finally {
-      textarea.remove()
-    }
-  }
-}
-
-function CopyButton({ code }: { code: string }) {
-  const [copyCount, setCopyCount] = useState(0)
-  const copied = copyCount > 0
-
-  useEffect(() => {
-    if (copyCount > 0) {
-      const timeout = setTimeout(() => setCopyCount(0), 1000)
-      return () => {
-        clearTimeout(timeout)
-      }
-    }
-  }, [copyCount])
-
-  return (
-    <button
-      type="button"
-      aria-label={copied ? 'Copied' : 'Copy code'}
-      title={copied ? 'Copied' : 'Copy'}
-      className="group/button relative inline-flex h-[30px] w-[30px] items-center justify-center rounded-[7px] text-muted-foreground transition hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-      onClick={() => {
-        void writeClipboardText(code).then((wasCopied) => {
-          if (wasCopied) setCopyCount((count) => count + 1)
-        })
-      }}
-    >
-      <span
-        aria-hidden={copied}
-        className={clsx('pointer-events-none transition duration-200', copied && '-translate-y-1 opacity-0')}
-      >
-        <ClipboardIcon className="h-[15px] w-[15px] fill-transparent stroke-current" />
-      </span>
-      <span
-        aria-hidden={!copied}
-        className={clsx(
-          'pointer-events-none absolute inset-0 flex items-center justify-center text-accent transition duration-200',
-          !copied && 'translate-y-1 opacity-0',
-        )}
-      >
-        ✓
-      </span>
-    </button>
-  )
-}
-
 function CodeActions({ code, nocopy }: { code: string; nocopy?: boolean }) {
+  const t = useApiLabels()
   const { canReportCode, hasAssistantEntryPoint, assistantLabel, reportCode, askAssistant } = useDocsCodeActions()
 
   return (
@@ -187,7 +110,7 @@ function CodeActions({ code, nocopy }: { code: string; nocopy?: boolean }) {
       <button type="button" onClick={() => reportCode(code)} disabled={!canReportCode} className="inline-flex h-[30px] w-[30px] items-center justify-center rounded-[7px] text-muted-foreground transition hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-35" aria-label="Report incorrect code" title="Report incorrect code">
         <svg viewBox="0 0 24 24" className="h-[15px] w-[15px]" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" aria-hidden="true"><path d="M8.2 3h7.6L21 8.2v7.6L15.8 21H8.2L3 15.8V8.2L8.2 3z"/><path d="M12 7.5V13" strokeLinecap="round"/><path d="M12 16.2v.1" strokeLinecap="round" strokeWidth="2.2"/></svg>
       </button>
-      {!nocopy && <CopyButton code={code} />}
+      {!nocopy && <SharedCopyButton value={code} label={t('copy') === 'Copy' ? 'Copy code' : t('copy')} />}
       {hasAssistantEntryPoint && <button type="button" onClick={() => askAssistant(code)} className="inline-flex h-[30px] w-[30px] items-center justify-center rounded-[7px] text-muted-foreground transition hover:bg-muted hover:text-foreground" aria-label="Ask assistant about this code" title={assistantLabel}>
         <svg viewBox="0 0 24 24" className="h-[15px] w-[15px]" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" aria-hidden="true"><path d="M12 3.5l1.8 4.9 4.9 1.8-4.9 1.8L12 16.9l-1.8-4.9-4.9-1.8 4.9-1.8L12 3.5z"/><path d="M18.5 15.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2z"/></svg>
       </button>}
@@ -197,7 +120,7 @@ function CodeActions({ code, nocopy }: { code: string; nocopy?: boolean }) {
 
 function CodePanelHeader({ tag, label, code, icon, nocopy }: { tag?: string; label?: string; code: string; icon?: string; nocopy?: boolean }) {
   return (
-    <div className="flex h-[42px] items-center gap-2 border-b border-border px-4 pr-2">
+    <div className="thally-code-header">
       {tag && (
         <div className="flex shrink-0">
           <Tag variant="small">{tag}</Tag>
@@ -208,7 +131,7 @@ function CodePanelHeader({ tag, label, code, icon, nocopy }: { tag?: string; lab
       )}
       {icon && <Icon icon={icon} size={14} className="h-3.5 w-3.5 text-muted-foreground" />}
       {label && (
-        <span className="min-w-0 truncate font-mono text-xs text-muted-foreground" title={label}>{label}</span>
+        <span className="thally-code-title min-w-0 truncate font-mono text-xs text-muted-foreground" title={label}>{label}</span>
       )}
       <CodeActions code={code} nocopy={nocopy} />
     </div>
@@ -242,10 +165,17 @@ const EXPANDABLE_COLLAPSED_LINES = 10
 const EXPANDABLE_COLLAPSED_HEIGHT = `${EXPANDABLE_COLLAPSED_LINES * 0.84 * 1.7 + 1}rem`
 
 /** Find the compiler's source-code payload through MDX/client wrappers. */
-function findCodePayload(node: ReactNode): string | undefined {
+export function findCodePayload(node: ReactNode): string | undefined {
   if (!isValidElement(node)) return undefined
-  const props = node.props as { code?: unknown; children?: ReactNode }
+  const props = node.props as { code?: unknown; children?: ReactNode; language?: unknown; filename?: unknown; className?: unknown }
   if (typeof props.code === 'string' && props.code.length > 0) return props.code
+  if ((node.type === CodeBlock || node.type === Pre || node.type === 'pre' || node.type === 'code') && typeof props.children === 'string') return props.children
+  // Across a Server Component boundary, a client element's type can be a lazy
+  // reference rather than this module's function identity. Its authored raw
+  // string remains source. Compiler Code nodes instead carry highlighted HTML
+  // under a language class and must use their enclosing pre's plain `code` prop.
+  const isCompilerCode = node.type === Code || (typeof props.className === 'string' && /\blanguage-/.test(props.className) && props.language === undefined && props.filename === undefined)
+  if (!isCompilerCode && typeof props.children === 'string') return props.children
   for (const child of Children.toArray(props.children)) {
     const nested = findCodePayload(child)
     if (nested) return nested
@@ -281,9 +211,11 @@ function CodePanel({
   lastmarked?: string
   hasGroupHeader?: boolean
 }) {
-  // `null` = untouched by the reader, so the default (see below) applies.
+  // Inactive panels remain mounted, so each sample preserves its expansion state.
   const [expanded, setExpanded] = useState<boolean | null>(null)
   const preId = useId()
+  const preRef = useRef<HTMLPreElement>(null)
+  useCompiledParameterLinks(preRef, code ?? findCodePayload(children) ?? '')
   const renderableChildren = getRenderableChildren(children)
   if (!renderableChildren.length) {
     return null
@@ -373,21 +305,18 @@ function CodePanel({
 
   return (
     <div className="group">
-      {hasGroupHeader ? (
-        <span className="absolute right-3 top-[7px] z-10">
+      {hasGroupHeader ? <span className="absolute right-2 top-[10px] z-10 max-[560px]:top-[51px]">
           <CodeActions code={resolvedCode} nocopy={resolvedNocopy} />
-        </span>
-      ) : (
-        <CodePanelHeader
+        </span> : <CodePanelHeader
           tag={resolvedTag}
           label={resolvedLabel}
           code={resolvedCode}
           icon={resolvedIcon}
           nocopy={resolvedNocopy}
-        />
-      )}
+        />}
       <div className="relative">
         <pre
+          ref={preRef}
           id={collapsible ? preId : undefined}
           style={
             collapsed || resolvedLines
@@ -426,166 +355,68 @@ function CodePanel({
   )
 }
 
-function CodeGroupHeader({
-  title,
-  children,
-  selectedIndex,
-}: {
-  title?: string
-  children: React.ReactNode
-  selectedIndex: number
-}) {
-  const hasTabs = Children.count(children) > 1
-
-  if (!title && !hasTabs) {
-    return null
-  }
-
-  return (
-    <div className="flex min-h-[42px] flex-wrap items-start gap-x-4 border-b border-border px-4 pr-24">
-      {title && (
-        <p className="mr-auto pt-3 font-mono text-xs font-medium text-muted-foreground">
-          {title}
-        </p>
-      )}
-      {hasTabs && (
-        <TabList className="-mb-px flex gap-4 text-xs font-medium">
-          {Children.map(children, (child, childIndex) => (
-            <Tab
-              className={clsx(
-                'border-b py-3 transition focus-visible:outline-none',
-                childIndex === selectedIndex
-                  ? 'border-accent text-accent'
-                  : 'border-transparent text-muted-foreground hover:text-foreground',
-              )}
-            >
-              {isValidElement(child) && (child.props as { icon?: string }).icon && (
-                <Icon
-                  icon={(child.props as { icon?: string }).icon}
-                  size={14}
-                  className="mr-1.5 inline-block h-3.5 w-3.5 align-[-2px]"
-                />
-              )}
-              {getPanelTitle(
-                isValidElement(child)
-                  ? (child.props as {
-                      title?: string
-                      tag?: string
-                      language?: string
-                    })
-                  : {},
-              )}
-            </Tab>
-          ))}
-        </TabList>
-      )}
-    </div>
-  )
-}
-
-function CodeGroupPanels({
-  children,
-  ...props
-}: ComponentPropsWithoutRef<typeof CodePanel>) {
-  const hasTabs = Children.count(children) > 1
-
-  if (hasTabs) {
-    return (
-      <TabPanels>
-        {Children.map(children, (child) => (
-          <TabPanel unmount={false}>
-            <CodePanel {...props}>{child}</CodePanel>
-          </TabPanel>
-        ))}
-      </TabPanels>
-    )
-  }
-
-  return <CodePanel {...props}>{children}</CodePanel>
-}
-
-function useTabGroupProps(availableLanguages: Array<string>) {
-  const { preferredLanguages, addPreferredLanguage } = usePreferredLanguageStore()
-
-  // Derive the selected tab from the shared preference store instead of
-  // mirroring it into local state — selecting a language in one group
-  // switches every group on the page.
-  const preferredLanguage = resolvePreferredLanguage(availableLanguages, preferredLanguages)
-  const preferredIndex = preferredLanguage ? availableLanguages.indexOf(preferredLanguage) : 0
-  const selectedIndex = preferredIndex === -1 ? 0 : preferredIndex
-
-  return {
-    as: 'div' as const,
-    selectedIndex,
-    onChange: (newSelectedIndex: number) => {
-      const language = availableLanguages[newSelectedIndex]
-      if (language) {
-        addPreferredLanguage(language)
-      }
-    },
-  }
+function responseStatusLabel(label: string) {
+  const match = /^(\d{3})(?:\s+(.+))?$/.exec(label)
+  if (!match?.[2]) return label
+  return <>{match[1]}<span className="tc-status-description">{match[2]}</span></>
 }
 
 const CodeGroupContext = createContext(false)
 
+/** Render authored alternatives with one persistent language menu or response-status tabs. */
 export function CodeGroup({
   children,
   title,
+  selection = 'language',
+  menuLabel,
   ...props
-}: ComponentPropsWithoutRef<typeof CodeGroupPanels> & { title?: string }) {
-  const languages = useMemo(
-    () =>
-    Children.map(children, (child) =>
-      getPanelTitle(
-        isValidElement(child)
-          ? (child.props as {
-              title?: string
-              tag?: string
-              language?: string
-            })
-          : {},
-      ),
-      ) ?? [],
-    [children],
-  )
-  const tabGroupProps = useTabGroupProps(languages)
-  const hasTabs = Children.count(children) > 1
-  const hasGroupHeader = Boolean(title || hasTabs)
-
-  const containerClassName =
-    'thally-docs-code relative my-5 overflow-hidden rounded-xl border'
-  const header = (
-    <CodeGroupHeader title={title} selectedIndex={tabGroupProps.selectedIndex}>
-      {children}
-    </CodeGroupHeader>
-  )
-  const panels = <CodeGroupPanels {...props} hasGroupHeader={hasGroupHeader}>{children}</CodeGroupPanels>
+}: ComponentPropsWithoutRef<typeof CodePanel> & { title?: string; selection?: 'language' | 'status'; menuLabel?: string }) {
+  const t = useApiLabels()
+  const items = useMemo(() => getRenderableChildren(children), [children])
+  const languages = useMemo(() => items.map((child) => getPanelTitle(isValidElement(child) ? child.props as { title?: string; tag?: string; language?: string } : {})), [items])
+  const aliases = items.map((child, index) => [languages[index], isValidElement(child) ? (child.props as { language?: string }).language : undefined].filter((value): value is string => Boolean(value)).map(normalizeDocsLanguage))
+  const [preferredLanguage, setPreferredLanguage] = useDocsLanguage(aliases.flat())
+  const matchingIndex = aliases.findIndex((names) => names.includes(preferredLanguage))
+  const [selectedStatus, setSelectedStatus] = useState(0)
+  const groupId = useId()
+  const selectedIndex = selection === 'status' ? Math.min(selectedStatus, Math.max(0, items.length - 1)) : matchingIndex >= 0 ? matchingIndex : 0
+  const selected = items[selectedIndex]
+  const hasVariants = items.length > 1
+  const hasGroupHeader = Boolean(title || hasVariants)
+  const selectedProps = isValidElement(selected) ? selected.props as { code?: string; nocopy?: boolean | string; language?: string; icon?: string } : {}
 
   return (
     <CodeGroupContext.Provider value={true}>
-      {hasTabs ? (
-        <TabGroup {...tabGroupProps} className={containerClassName}>
-          <div className="not-prose">
-            {header}
-            {panels}
-          </div>
-        </TabGroup>
-      ) : (
-        <div className={containerClassName}>
-          <div className="not-prose">
-            {header}
-            {panels}
-          </div>
+      <div className={`thally-docs-code relative my-5 overflow-hidden rounded-xl border${selection === 'status' ? ' thally-response-example' : ''}`}>
+        <div className="not-prose">
+          {hasGroupHeader && <div className="thally-code-header thally-code-group-header !pr-[104px]">
+            {selectedProps.icon && <Icon icon={selectedProps.icon} size={14} className="h-3.5 w-3.5 text-muted-foreground" />}
+            <span className="thally-code-title text-xs font-semibold">{title ?? 'Code'}</span>
+            {hasVariants && selection === 'status' && <div role="tablist" aria-label={t('responseStatus')} className="tc-statuses">{languages.map((label, index) => <button type="button" role="tab" key={index} id={`${groupId}-tab-${index}`} aria-controls={`${groupId}-panel-${index}`} aria-selected={index === selectedIndex} tabIndex={index === selectedIndex ? 0 : -1} className={`tc-st${/^[45]/.test(label) ? ' err' : ''}`} onClick={() => setSelectedStatus(index)} onKeyDown={(event) => {
+              if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+              event.preventDefault()
+              const next = event.key === 'Home' ? 0 : event.key === 'End' ? languages.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + languages.length) % languages.length
+              setSelectedStatus(next)
+              const tabs = event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')
+              tabs?.[next]?.focus()
+            }}><i aria-hidden="true" />{responseStatusLabel(label)}</button>)}</div>}
+            {hasVariants && selection === 'language' && <LanguageMenu label={menuLabel ?? (title === 'Request' ? 'Request example' : 'Code language')} value={languages[selectedIndex]} options={languages} onChange={setPreferredLanguage} />}
+          </div>}
+          {items.map((child, index) => <div key={index} role={hasVariants ? 'tabpanel' : undefined} hidden={hasVariants && index !== selectedIndex} id={hasVariants ? `${groupId}-panel-${index}` : undefined} aria-label={hasVariants ? languages[index] : undefined}>
+            <CodePanel {...props} hasGroupHeader={hasGroupHeader}>{child}</CodePanel>
+          </div>)}
         </div>
-      )}
+      </div>
     </CodeGroupContext.Provider>
   )
 }
 
+/** Preserve compiler-highlighted code inside panels and ordinary text for inline code. */
 export function Code({
   children,
   ...props
 }: ComponentPropsWithoutRef<'code'>) {
+
   return <code {...props}>{children}</code>
 }
 
@@ -593,6 +424,7 @@ interface PreProps extends Omit<ComponentPropsWithoutRef<typeof CodeGroup>, 'chi
   children?: ReactNode
 }
 
+/** Render a fenced block through the shared card while preserving its authored options. */
 export function Pre({
   children,
   title,

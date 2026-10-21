@@ -26,7 +26,7 @@ const render = (locale?: string) => renderToStaticMarkup(<OperationPanel operati
 describe('API panel labels', () => {
   it('stay English by default', () => {
     const html = render()
-    for (const label of ['Authorizations', 'Parameters', 'Request body', 'Responses', 'Try it', 'required']) expect(html).toContain(label)
+    for (const label of ['Authorizations', 'Query parameters', 'Request body', 'Responses', 'Try it', 'required']) expect(html).toContain(label)
   })
 
   it.each([

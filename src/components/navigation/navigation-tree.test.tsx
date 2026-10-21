@@ -43,7 +43,7 @@ describe('sidebar current page', () => {
 })
 
 describe('sidebar API method pills', () => {
-  it('prefixes operation pages with their HTTP method, abbreviating DELETE', () => {
+  it('prefixes operation pages with their complete HTTP method', () => {
     const nodes = [
       { type: 'page', item: { id: 'a', title: 'Scrape', href: '/scrape', method: 'POST' } },
       { type: 'page', item: { id: 'b', title: 'Cancel Crawl', href: '/cancel', method: 'DELETE' } },
@@ -51,8 +51,8 @@ describe('sidebar API method pills', () => {
     ] as Array<NavigationNode>
     const html = renderToStaticMarkup(<NavigationTree nodes={nodes} pathname="/" />)
     expect(html).toMatch(/>POST<\/span><span[^>]*>Scrape</)
-    expect(html).toMatch(/>DEL<\/span><span[^>]*>Cancel Crawl</)
-    expect(html.match(/font-mono/g)).toHaveLength(2)
+    expect(html).toMatch(/>DELETE<\/span><span[^>]*>Cancel Crawl</)
+    expect(html.match(/thally-method-tag/g)).toHaveLength(2)
   })
 })
 
@@ -62,4 +62,19 @@ it('renders an authored open group even when no descendant is active', () => {
   const html = renderToStaticMarkup(<NavigationTree nodes={nodes} pathname="/other" />)
   expect(html).toContain('aria-expanded="true"')
   expect(html).toContain('href="/example"')
+})
+
+/** Metadata remains distinct from labels, including labels beginning with a verb. */
+describe('API method tags', () => {
+  it('renders structured methods without guessing from a page title', () => {
+    const nodes: Array<NavigationNode> = [
+      { type: 'page', item: { id: 'api', title: 'Create page', href: '/api/pages', method: 'POST' } },
+      { type: 'page', item: { id: 'guide', title: 'GET started', href: '/guide' } },
+    ]
+    const html = renderToStaticMarkup(<NavigationTree nodes={nodes} pathname="/api/pages" mobile />)
+    expect(html).toContain('data-method="post"')
+    expect(html).toContain('thally-method-tag">POST</span>')
+    expect(html.match(/thally-method-tag/g)).toHaveLength(1)
+    expect(html).toContain('GET started')
+  })
 })

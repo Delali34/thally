@@ -10,6 +10,10 @@ import type { PlaygroundDisplay } from '@/lib/openapi/playground-display'
 
 /** Endpoint header + Try It for a page authored with `api:` frontmatter. */
 export function ManualApiEndpoint({ operation, playground = 'interactive', locale }: { operation: NormalizedOperation; playground?: PlaygroundDisplay; locale?: string }) {
+  return <ManualApiEndpointContent key={`${operation.specId}:${operation.manualPage ?? operation.id}:${operation.key}`} operation={operation} playground={playground} locale={locale} />
+}
+
+function ManualApiEndpointContent({ operation, playground, locale }: { operation: NormalizedOperation; playground: PlaygroundDisplay; locale?: string }) {
   const controller = useTryItController(operation)
   const [open, setOpen] = useState(false)
   return (

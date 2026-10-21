@@ -325,6 +325,7 @@ export async function withApiNavigation(
           title: group.title,
           items: group.items.map((item) => toSidebarItem(item, hrefPrefix)),
         }))
+
       return { ...collection, sections: [...(collection.sections ?? []), ...apiSections] }
     }),
   )

@@ -1,127 +1,62 @@
-import { useState } from 'react'
-import { CopyButton } from '@/components/api/copy-button'
-import { useApiLabels } from '@/components/api/api-locale'
+'use client'
+
+/** Handoff code cards preserve authored samples, media examples, and the latest live result. */
+import { useId, useState } from 'react'
 import type { TryItController } from '@/components/api/use-try-it-controller'
-import { ResponseBody } from '@/components/api/try-it-panel'
-import { statusColorClass, statusUnderlineClass } from '@/components/api/tokens'
+import { useApiLabels } from '@/components/api/api-locale'
+import { CodeCard, CodeCardActions, CodeLines, LanguageMenu, useDocsLanguage } from '@/components/docs/code-card'
 import { buildCodeSamples } from '@/lib/openapi/code-samples'
+import { normalizeDocsLanguage, requestSnippetLineParameters } from '@/lib/openapi/code-snippets'
 import { formatExample, responseExamples } from '@/lib/openapi/response-examples'
-import { resolvePreferredLanguage, usePreferredLanguageStore } from '@/lib/preferred-language'
-import { cn } from '@/lib/utils'
 
-interface OperationCodePanelProps {
-  controller: TryItController
-}
-
-export function OperationCodePanel({ controller }: OperationCodePanelProps) {
+/** Use the credential-free sample projection; the modal owns editable request values. */
+export function OperationCodePanel({ controller }: { controller: TryItController }) {
   const t = useApiLabels()
-  const { sampleRequest, operation } = controller
-  const { preferredLanguages, addPreferredLanguage } = usePreferredLanguageStore()
-  const samples = buildCodeSamples(sampleRequest, operation.codeSamples)
-  const language = resolvePreferredLanguage(samples.map((sample) => sample.label), preferredLanguages)
-  const sample = samples.find((candidate) => candidate.label === language)
-
-  return (
-    <div className="space-y-4">
-      {/* Request — styled like RequestExample */}
-      <div className="overflow-hidden rounded-[11px] border border-border bg-muted/40">
-        <div className="flex items-center justify-between border-b border-border px-4 py-2">
-          <div className="flex items-center gap-2">
-            <span className="h-2 w-2 rounded-full bg-blue-400" />
-            <span className="text-xs font-semibold uppercase tracking-wide text-foreground/60">{t('request')}</span>
-          </div>
-          <div className="flex items-center gap-1">
-            {samples.length ? (
-              <select
-                aria-label={t('selectLanguage')}
-                value={language}
-                onChange={(event) => addPreferredLanguage(event.target.value)}
-                className="rounded-[7px] bg-transparent px-1 py-1 text-xs text-foreground/60 hover:text-foreground"
-              >
-                {samples.map((candidate) => (
-                  <option key={candidate.label} value={candidate.label}>{candidate.label}</option>
-                ))}
-              </select>
-            ) : null}
-            <CopyButton
-              value={sample?.source ?? ''}
-              disabled={!sample}
-              className="flex items-center gap-1.5 rounded-[7px] px-2 py-1 text-xs text-foreground/60 transition hover:bg-muted hover:text-foreground disabled:opacity-40"
-            />
-          </div>
-        </div>
-        <pre className="scrollbar-hide max-h-[280px] overflow-auto bg-transparent p-4 font-mono text-[0.82rem] leading-[1.65] text-foreground/80">
-          {sample ? sample.source : 'Configure a server URL to preview the generated code sample.'}
-        </pre>
-      </div>
-
-      <ResponseExamples controller={controller} />
-    </div>
-  )
-}
-
-/** Response box: a tab per status in the spec with its example, plus the real result once a request was sent. */
-function ResponseExamples({ controller }: OperationCodePanelProps) {
-  const t = useApiLabels()
-  const { operation, response } = controller
-  // A status with no body has nothing to show, so it gets no tab, as on live.
-  const withExamples = operation.responses.filter((candidate) => responseExamples(candidate).length)
+  const { operation, sampleRequest, response } = controller
+  // An authored sample wins when two labels resolve to the same language.
+  const availableSamples = buildCodeSamples(sampleRequest, operation.codeSamples).map((sample) => ({ ...sample, label: normalizeDocsLanguage(sample.label) }))
+  const samples = availableSamples.filter((sample, index) => availableSamples.findIndex((candidate) => candidate.label === sample.label) === index)
+  const [preferredLanguage, setLanguage] = useDocsLanguage(samples.map((sample) => sample.label))
+  const sample = samples.find((item) => item.label === normalizeDocsLanguage(preferredLanguage)) ?? samples[0]
+  const requestCode = sample?.source ?? t('noServer')
+  const fields = controller.fields
+  const parameters = fields.map((field) => field.name)
+  const lineParameters = requestSnippetLineParameters(requestCode, sampleRequest, fields)
   const sent = response && 'body' in response ? response : null
   const [pick, setPick] = useState<{ code: string; at: unknown } | null>(null)
   const [exampleKeys, setExampleKeys] = useState<Record<string, string>>({})
-  // A new result takes the tab back; a pick only holds for the result it was made against.
-  const active = pick && pick.at === response ? pick.code : sent ? 'sent' : (withExamples[0]?.code ?? '')
-  const activeResponse = withExamples.find((candidate) => candidate.code === active)
+  const activeCode = pick && pick.at === response ? pick.code : sent ? 'sent' : operation.responses[0]?.code ?? ''
+  const activeResponse = operation.responses.find((item) => item.code === activeCode)
   const examples = activeResponse ? responseExamples(activeResponse) : []
-  const example = examples.find((candidate) => candidate.key === exampleKeys[active]) ?? examples[0]
-  const tabs = [...(sent ? [{ code: 'sent', label: String(sent.status), status: String(sent.status) }] : []), ...withExamples.map((r) => ({ code: r.code, label: r.code, status: r.code }))]
-
-  return (
-    <div className="overflow-hidden rounded-[11px] border border-border bg-muted/40">
-      <div className="flex items-center gap-1 overflow-x-auto border-b border-border px-2" role="tablist" aria-label={t('responseStatus')}>
-        {sent ? <span className="px-2 text-xs font-semibold uppercase tracking-wide text-foreground/60">{t('result')}</span> : null}
-        {tabs.map((tab, index) => (
-          <button
-            key={tab.code}
-            type="button"
-            role="tab"
-            aria-selected={tab.code === active}
-            onClick={() => setPick({ code: tab.code, at: response })}
-            className={cn(
-              'relative px-2.5 py-2 text-xs font-semibold transition',
-              tab.code === active ? statusColorClass(tab.status) : 'text-foreground/40 hover:text-foreground/70',
-              sent && index === 1 ? 'ml-2 border-l border-border' : '',
-            )}
-          >
-            {tab.label}
-            {tab.code === active ? <span className={cn('absolute inset-x-1 -bottom-px h-0.5 rounded-full', statusUnderlineClass(tab.status))} /> : null}
-          </button>
-        ))}
-        {!tabs.length ? <span className="px-2 py-2 text-xs font-semibold uppercase tracking-wide text-foreground/60">{t('response')}</span> : null}
+  const example = examples.find((item) => item.key === exampleKeys[activeCode]) ?? examples[0]
+  const responseCode = activeCode === 'sent' && sent ? sent.body : example ? formatExample(example.value) : t('noResponseBody')
+  const tabs = [...(sent ? [{ code: 'sent', status: String(sent.status), label: `${t('result')} ${sent.status}` }] : []), ...operation.responses.map((item) => ({ code: item.code, status: item.code, label: item.code }))]
+  const id = useId()
+  return <div className="epcode">
+    <CodeCard title={t('request')} tools={<>
+      {sample ? <LanguageMenu value={sample.label} options={samples.map((item) => item.label)} onChange={setLanguage} label={t('selectLanguage')} /> : null}
+      <CodeCardActions code={requestCode} language={sample?.label} />
+    </>}><CodeLines code={requestCode} parameters={parameters} lineParameters={lineParameters} /></CodeCard>
+    <CodeCard title={t('response')} className="tc-res" tools={<>
+      {tabs.length ? <div className="tc-statuses" role="tablist" aria-label={t('responseStatus')}>
+        {tabs.map((tab, index) => <button type="button" role="tab" id={`${id}-tab-${tab.code}`} aria-controls={`${id}-response`} aria-selected={activeCode === tab.code} tabIndex={activeCode === tab.code ? 0 : -1}
+          key={tab.code} className={`tc-st${/^[45]/.test(tab.status) ? ' err' : ''}`} onClick={() => setPick({ code: tab.code, at: response })}
+          onKeyDown={(event) => {
+            if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+            event.preventDefault()
+            const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length
+            setPick({ code: tabs[next].code, at: response })
+            document.getElementById(`${id}-tab-${tabs[next].code}`)?.focus()
+          }}><i aria-hidden="true" />{tab.label}</button>)}
+      </div> : null}
+      <CodeCardActions code={responseCode} ask={false} />
+    </>}>
+      {examples.length > 1 ? <select aria-label={t('selectExample')} value={example?.key} onChange={(event) => setExampleKeys((previous) => ({ ...previous, [activeCode]: event.target.value }))} className="m-3 rounded-md border border-border bg-background px-2 py-1 text-xs">
+        {examples.map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}
+      </select> : null}
+      <div id={`${id}-response`} role={tabs.length ? 'tabpanel' : undefined} aria-labelledby={tabs.length ? `${id}-tab-${activeCode}` : undefined} tabIndex={tabs.length ? 0 : undefined} key={`${activeCode}:${example?.key ?? ''}`}>
+        <CodeLines code={responseCode} parameters={parameters} animate />
       </div>
-      <div className="min-h-[80px] bg-transparent p-4">
-        {active === 'sent' && sent ? (
-          <ResponseBody body={sent.body} />
-        ) : example ? (
-          <div className="space-y-2">
-            {examples.length > 1 ? (
-              <select
-                aria-label={t('selectExample')}
-                value={example.key}
-                onChange={(event) => setExampleKeys((prev) => ({ ...prev, [active]: event.target.value }))}
-                className="rounded-[7px] border border-border bg-transparent px-1 py-1 text-xs text-foreground/70"
-              >
-                {examples.map((candidate) => (
-                  <option key={candidate.key} value={candidate.key}>{candidate.label}</option>
-                ))}
-              </select>
-            ) : null}
-            <pre className="scrollbar-hide max-h-[320px] overflow-auto font-mono text-[0.82rem] leading-[1.65] text-foreground/80">{formatExample(example.value)}</pre>
-          </div>
-        ) : (
-          <p className="text-xs text-foreground/50">{t('sendToPreview')}</p>
-        )}
-      </div>
-    </div>
-  )
+    </CodeCard>
+  </div>
 }

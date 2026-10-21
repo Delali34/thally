@@ -163,7 +163,9 @@ describe('expandable defaults and accessibility', () => {
   it('plain fences get no id, print or toggle markup', () => {
     const html = render({}, linesOf(20))
     expect(html).not.toContain(' id=')
-    expect(html).not.toContain('thally-code-')
+    expect(html).not.toContain('thally-code-toggle')
+    expect(html).not.toContain('thally-code-collapsed')
+    expect(html).not.toContain('thally-code-lines')
   })
 
   it('applies hanging indent only for lines + wrap', () => {

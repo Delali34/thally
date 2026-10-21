@@ -1,14 +1,20 @@
 'use client'
 
+/** Focus-contained API playground backed by the existing bounded request relay. */
+import { useEffect, useRef } from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
 import { Loader2, X } from 'lucide-react'
 import { useApiLabels } from '@/components/api/api-locale'
-import { TryItPanel } from '@/components/api/try-it-panel'
+import { CopyButton } from '@/components/api/copy-button'
+import { TryItPanel, TryItResponse } from '@/components/api/try-it-panel'
 import { Markdown } from '@/components/mdx/markdown'
-import { OperationCodePanel } from '@/components/api/operation-code-panel'
-import type { TryItController } from '@/components/api/use-try-it-controller'
+import { CodeCard, CodeCardActions, CodeLines, LanguageMenu, useDocsLanguage } from '@/components/docs/code-card'
+import { ParameterLinkProvider } from '@/components/api/parameter-link'
+import { normalizeDocsLanguage, requestSnippetLineParameters } from '@/lib/openapi/code-snippets'
+import { buildCodeSamples } from '@/lib/openapi/code-samples'
+import { getTryItFields } from '@/components/api/try-it-fields'
 import { getMethodToken } from '@/components/api/tokens'
-import { cn } from '@/lib/utils'
+import type { TryItController } from '@/components/api/use-try-it-controller'
 
 interface TryItDialogProps {
   controller: TryItController
@@ -16,90 +22,123 @@ interface TryItDialogProps {
   onOpenChange: (open: boolean) => void
 }
 
-export function SendButton({ controller }: { controller: TryItController }) {
+/** Keep the runtime's second-click DELETE confirmation in both responsive toolbars. */
+export function SendButton({ controller, mobile = false, onSend }: { controller: TryItController; mobile?: boolean; onSend?: () => void }) {
   const t = useApiLabels()
-  const { isSending, confirmingSend, requestSend, cancelSend, preparedRequest } = controller
-  return (
-    <button
-      type="button"
-      onClick={requestSend}
-      onBlur={cancelSend}
-      disabled={!preparedRequest.isServerConfigured || isSending}
-      className={cn(
-        'flex items-center gap-2 rounded-[9px] px-5 py-2 text-sm font-semibold transition hover:brightness-125 disabled:opacity-50',
-        confirmingSend ? 'bg-rose-600 text-white' : 'bg-primary text-primary-foreground',
-      )}
-    >
-      {isSending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-      {isSending ? t('sending') : confirmingSend ? t('confirmDelete') : t('send')}
-    </button>
-  )
+  return <button type="button" className="pg-send" style={controller.confirmingSend ? { background: 'var(--sx-k)', color: 'var(--docs-bg)' } : undefined} onClick={onSend ?? controller.requestSend} onBlur={controller.cancelSend} aria-busy={controller.isSending} disabled={controller.isSending || !controller.preparedRequest.isServerConfigured}>
+    {controller.isSending ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : null}
+    {controller.isSending ? t('sending') : controller.confirmingSend ? t('confirmDelete') : t('send')}
+    {!mobile ? <kbd>⌘ / Ctrl ↵</kbd> : null}
+  </button>
 }
 
-/**
- * Full-viewport playground: endpoint and Send on top, the request form on the
- * left, the request sample and response on the right. Radix traps focus,
- * closes on Esc and returns focus to the control that opened it.
- */
+/** Open an operation as a responsive modal, preserving the invoking control's focus. */
 export function TryItDialog({ controller, open, onOpenChange }: TryItDialogProps) {
   const t = useApiLabels()
-  const { operation, serverUrl, setServerUrl, preparedRequest } = controller
-  const methodToken = getMethodToken(operation.method)
+  const sampleRequest = controller.sampleRequest ?? controller.preparedRequest
+  const fields = controller.fields ?? getTryItFields(controller.operation)
+  const samples = buildCodeSamples(sampleRequest, controller.operation.codeSamples)
+  const [selectedLanguage, setLanguage] = useDocsLanguage(samples.map((sample) => sample.label))
+  const currentSample = samples.find((sample) => normalizeDocsLanguage(sample.label) === normalizeDocsLanguage(selectedLanguage)) ?? samples[0]
+  const language = currentSample?.label ?? 'cURL'
+  const triggerRef = useRef<HTMLElement | null>(null)
+  const contentRef = useRef<HTMLDivElement>(null)
+  const responseRef = useRef<HTMLDivElement>(null)
+  const code = currentSample?.source ?? ''
+  const lineParameters = requestSnippetLineParameters(code, sampleRequest, fields)
+
+  function send() {
+    if (controller.isSending || !controller.preparedRequest.isServerConfigured) return
+    const errors = controller.validateRequest()
+    const firstError = Object.keys(errors)[0]
+    if (firstError) {
+      const inputs = contentRef.current?.querySelectorAll<HTMLElement>('[data-field-id]')
+      const target = Array.from(inputs ?? []).find((input) => input.dataset.fieldId === firstError) ?? (firstError.startsWith('body:') ? contentRef.current?.querySelector<HTMLElement>('[data-field-id="body:__raw"]') : undefined)
+      target?.focus()
+      return
+    }
+    controller.requestSend()
+  }
+
+  useEffect(() => {
+    if (open && controller.response && window.matchMedia('(max-width: 980px)').matches) {
+      responseRef.current?.scrollIntoView({ block: 'start', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' })
+    }
+  }, [controller.response, open])
 
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+    <Dialog.Root open={open} onOpenChange={(next) => { if (!next) controller.cancelSend(); onOpenChange(next) }}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-40 bg-background/70 backdrop-blur-md" />
-        <Dialog.Content
-          aria-describedby={undefined}
-          className="fixed inset-2 z-50 flex flex-col overflow-hidden rounded-[14px] border border-border bg-background shadow-2xl sm:inset-4 lg:inset-x-8 lg:inset-y-6"
-        >
-          <header className="flex flex-wrap items-center gap-3 border-b border-border p-4">
-            <span className={cn('rounded-[5px] px-2 py-1 font-mono text-[0.7rem] font-medium uppercase tracking-[0.02em]', methodToken.bg, methodToken.text)}>
-              {operation.method}
-            </span>
-            {operation.servers.length > 1 ? (
-              <select
-                aria-label={t('apiServer')}
-                value={serverUrl}
-                onChange={(event) => setServerUrl(event.target.value)}
-                className="rounded-[9px] border border-border bg-background px-3 py-1 text-sm"
-              >
-                {operation.servers.map((server) => (
-                  <option key={server.url} value={server.url}>{server.url}</option>
-                ))}
-              </select>
-            ) : null}
-            <div
-              className="min-w-0 flex-1 break-all rounded-[9px] border border-border px-3 py-2 font-mono text-xs text-foreground/80"
-              title={preparedRequest.url || undefined}
-            >
-              {preparedRequest.url || t('noServer')}
-            </div>
-            <SendButton controller={controller} />
-            <Dialog.Close asChild>
-              <button type="button" className="rounded-[9px] border border-border p-2 text-foreground/70 transition hover:bg-muted hover:text-foreground">
-                <X className="h-4 w-4" />
-                <span className="sr-only">{t('close')}</span>
-              </button>
-            </Dialog.Close>
-          </header>
-          <div className="grid min-h-0 flex-1 overflow-y-auto lg:grid-cols-2 lg:overflow-hidden">
-            <div className="space-y-4 p-5 lg:overflow-y-auto">
-              <Dialog.Title className="text-lg font-semibold">{operation.title}</Dialog.Title>
-              {operation.description && operation.description !== operation.title ? (
-                <div className="prose prose-neutral max-w-none text-sm text-foreground/60">
-                  <Markdown>{operation.description}</Markdown>
+        <Dialog.Overlay className="pg-scrim" />
+        <ParameterLinkProvider>
+          <Dialog.Content
+            ref={contentRef}
+            className="pg"
+            aria-describedby={undefined}
+            onOpenAutoFocus={(event) => {
+              triggerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+              controller.restoreCredentials()
+              event.preventDefault()
+              requestAnimationFrame(() => {
+                const content = contentRef.current
+                const firstField = content?.querySelector<HTMLElement>('.pg-form input, .pg-form textarea, .pg-form select, .pg-form button[data-field-id]')
+                const target = firstField ?? content?.querySelector<HTMLElement>('select, .pg-send:not(:disabled), .pg-x') ?? content
+                target?.focus()
+              })
+            }}
+            onEscapeKeyDown={(event) => {
+              // The language menu consumes the first Escape before the modal closes.
+              if (contentRef.current?.querySelector('[role="menu"]')) event.preventDefault()
+            }}
+            onCloseAutoFocus={(event) => { event.preventDefault(); triggerRef.current?.focus() }}
+            onChangeCapture={controller.cancelSend}
+            onKeyDown={(event) => {
+              if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); void send() }
+            }}
+          >
+            <header className="pg-top">
+              <div className="pg-env">
+                {controller.operation.servers.length > 1 ? <select aria-label={t('apiServer')} value={controller.serverUrl} disabled={controller.isSending} onChange={(event) => controller.setServerUrl(event.target.value)}>
+                  {controller.operation.servers.map((server) => <option key={server.url} value={server.url}>{server.description || server.url}</option>)}
+                </select> : <span>{controller.operation.servers[0]?.description || t('apiServer')}</span>}
+              </div>
+              <div className="pg-url">
+                <b className={`m ${getMethodToken(controller.operation.method).text}`}>{controller.operation.method}</b>
+                <div className="pg-addr" aria-label="Request URL" title={controller.preparedRequest.url}>
+                  <RequestAddress controller={controller} />
                 </div>
-              ) : null}
-              <TryItPanel controller={controller} variant="dialog" showHeading={false} />
+                <CopyButton value={controller.preparedRequest.url} label={`${t('copy')} URL`} disabled={!controller.preparedRequest.isServerConfigured} />
+              </div>
+              <SendButton controller={controller} onSend={send} />
+              <Dialog.Close className="pg-x" aria-label={t('close')}><X aria-hidden="true" /></Dialog.Close>
+            </header>
+            <div className="pg-body">
+              <div className="pg-form-pane">
+                <div className="pg-head"><Dialog.Title>{controller.operation.title}</Dialog.Title>{controller.operation.description ? <div className="pg-summary"><Markdown>{controller.operation.description}</Markdown></div> : null}</div>
+                <TryItPanel controller={controller} variant="dialog" showHeading={false} onSend={() => void send()} />
+              </div>
+              <aside className="pg-side" aria-label="Request and response">
+                <CodeCard title={t('request')} tools={<><LanguageMenu value={language} onChange={setLanguage} options={samples.map((sample) => sample.label)} label={t('selectLanguage')} /><CodeCardActions code={code} language={language} ask={false} /></>}>
+                  <CodeLines code={code || 'Configure an API server to preview the request.'} parameters={fields.map((field) => field.name)} lineParameters={lineParameters} />
+                </CodeCard>
+                <div ref={responseRef}><TryItResponse response={controller.response} isSending={controller.isSending} /></div>
+              </aside>
             </div>
-            <div className="border-t border-border bg-muted/20 p-5 lg:overflow-y-auto lg:border-l lg:border-t-0">
-              <OperationCodePanel controller={controller} />
-            </div>
-          </div>
-        </Dialog.Content>
+            <footer className="pg-foot"><SendButton controller={controller} onSend={send} mobile /></footer>
+          </Dialog.Content>
+        </ParameterLinkProvider>
       </Dialog.Portal>
     </Dialog.Root>
   )
+}
+
+function RequestAddress({ controller }: { controller: TryItController }) {
+  const path = controller.operation.path.split(/({[^}]+})/g)
+  const query = controller.preparedRequest.url.split('?')[1]
+  return <>{controller.serverUrl.replace(/\/$/, '')}{path.map((part, index) => {
+    const match = /^{([^}]+)}$/.exec(part)
+    if (!match) return <span key={index}>{part}</span>
+    const value = controller.pathParams[match[1]]
+    return <span key={index} className={`pg-tok${value ? ' set' : controller.errors?.[`path:${match[1]}`] ? ' miss' : ''}`}>{value ? encodeURIComponent(value) : part}</span>
+  })}{query ? `?${query}` : ''}</>
 }

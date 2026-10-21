@@ -1,6 +1,9 @@
 'use client'
 
+/** Generated API documentation keeps schema behavior while sharing handoff code/field focus. */
 import { useState } from 'react'
+import { ParameterLinkProvider } from '@/components/api/parameter-link'
+import { CopyPageButton } from '@/components/docs/copy-page-button'
 import { ExamplePanel } from '@/components/api/example-panel'
 import { TryItDialog } from '@/components/api/try-it-dialog'
 import { OperationCodePanel } from '@/components/api/operation-code-panel'
@@ -35,7 +38,12 @@ interface OperationPanelProps {
   locale?: string
 }
 
-export function OperationPanel({ operation, children, showDescription = true, showTitle = false, playground = 'interactive', locale }: OperationPanelProps) {
+/** Keep operation-local state isolated when navigating between specs and endpoints. */
+export function OperationPanel(props: OperationPanelProps) {
+  return <ParameterLinkProvider key={`${props.operation.specId}:${props.operation.id}:${props.operation.key}`}><OperationPanelContent {...props} /></ParameterLinkProvider>
+}
+
+function OperationPanelContent({ operation, children, showDescription = true, showTitle = false, playground = 'interactive', locale }: OperationPanelProps) {
   const t = (key: ApiLabelKey, n?: number) => apiLabel(locale, key, n)
   const controller = useTryItController(operation)
   const interactive = playground === 'interactive' && !operation.isWebhook
@@ -66,36 +74,22 @@ export function OperationPanel({ operation, children, showDescription = true, sh
 
   return (
     <ApiLocaleProvider value={locale}>
-    <div className="grid gap-12 xl:grid-cols-[minmax(0,1fr)_320px]">
-      <div className="space-y-10">
+    <div className="thally-endpoint">
         {/* Header */}
-        <header className="space-y-6">
+        <header className="thally-endpoint-header">
           {showTitle ? (
-            <h1 className="break-words font-heading text-4xl font-semibold leading-10 tracking-[-0.025em] text-foreground">
+            <div className="thally-endpoint-title"><h1 className="break-words font-heading text-4xl font-semibold leading-10 tracking-[-0.025em] text-foreground">
               {operation.title}
-            </h1>
+            </h1><CopyPageButton /></div>
           ) : null}
           {showTitle ? description : null}
           <EndpointBar operation={operation} display={playground} onTryIt={() => setDialogOpen(true)} />
           {showTitle ? null : description}
         </header>
 
+        <div className="thally-endpoint-grid">
+        <div className="thally-endpoint-doc">
         {children ? <Prose>{children}</Prose> : null}
-
-        {/* Servers */}
-        {operation.servers.length > 1 ? (
-          <section className="space-y-3">
-            <p className="text-xs font-semibold uppercase tracking-[0.3em] text-foreground/50">{t('servers')}</p>
-            <div className="border-y border-border">
-              {operation.servers.map((server) => (
-                <div key={server.url} className="flex flex-wrap items-baseline gap-x-4 border-b border-border px-0 py-3 last:border-b-0">
-                  <p className="text-sm font-semibold text-foreground break-all">{server.url}</p>
-                  {server.description ? <p className="text-xs text-foreground/60">{server.description}</p> : null}
-                </div>
-              ))}
-            </div>
-          </section>
-        ) : null}
 
         {/* Authorizations */}
         {operation.authSchemes.length ? (
@@ -118,13 +112,27 @@ export function OperationPanel({ operation, children, showDescription = true, sh
           </section>
         ) : null}
 
+        {/* Servers */}
+        {operation.servers.length > 1 ? (
+          <section className="space-y-3">
+            <p className="text-xs font-semibold uppercase tracking-[0.3em] text-foreground/50">{t('servers')}</p>
+            <div className="border-y border-border">
+              {operation.servers.map((server) => (
+                <div key={server.url} className="flex flex-wrap items-baseline gap-x-4 border-b border-border px-0 py-3 last:border-b-0">
+                  <p className="text-sm font-semibold text-foreground break-all">{server.url}</p>
+                  {server.description ? <p className="text-xs text-foreground/60">{server.description}</p> : null}
+                </div>
+              ))}
+            </div>
+          </section>
+        ) : null}
+
         {/* Parameters */}
         {parameterGroups.length ? (
           <section className="space-y-6">
-            <h2 className="text-lg font-semibold text-foreground">{t('parameters')}</h2>
             {parameterGroups.map((group) => (
               <div key={group.title}>
-                <p className="mb-3 text-xs font-semibold uppercase tracking-[0.3em] text-foreground/50">{group.title}</p>
+                <h2>{group.title}</h2>
                 <div className="border-y border-border">
                   {group.parameters.map((param) => (
                     <ParamField
@@ -176,14 +184,11 @@ export function OperationPanel({ operation, children, showDescription = true, sh
         ) : null}
       </div>
 
-      {operation.isWebhook ? (
-        <WebhookExample body={operation.prefill.body} />
-      ) : (
-        <>
-          <OperationCodePanel controller={controller} />
-          {interactive ? <TryItDialog controller={controller} open={isDialogOpen} onOpenChange={setDialogOpen} /> : null}
-        </>
-      )}
+        <div className="thally-endpoint-code">{operation.isWebhook ? (
+          <WebhookExample body={operation.prefill.body} />
+        ) : <OperationCodePanel controller={controller} />}</div>
+        </div>
+        {interactive ? <TryItDialog controller={controller} open={isDialogOpen} onOpenChange={setDialogOpen} /> : null}
     </div>
     </ApiLocaleProvider>
   )

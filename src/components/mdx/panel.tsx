@@ -18,7 +18,7 @@ export function Panel({ children }: PanelProps) {
 
   return (
     <>
-      <div className={`not-prose my-6 ${panelTarget ? 'xl:hidden' : ''}`}>{children}</div>
+      <div className={`thally-panel-inline not-prose my-6 ${panelTarget ? 'xl:hidden' : ''}`}>{children}</div>
       {panelTarget ? createPortal(
         <div className="not-prose space-y-4 pb-6" data-mdx-panel>{children}</div>,
         panelTarget,

@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { InlineUpdateFilters, PagePanelSlot, PageSlotsProvider, UpdateFilterControls } from '@/components/mdx/page-slots'
 import { Panel, InlinePanel } from '@/components/mdx/panel'
+import { Pre, CodeBlock } from '@/components/mdx/code-blocks'
 import { RequestExample, ResponseExample } from '@/components/mdx/examples'
 import { Prompt, TerminalInput, TerminalOutput } from '@/components/mdx/prompt'
 import { Embed, View } from '@/components/mdx/view'
@@ -50,6 +51,39 @@ describe('semantic compatibility components', () => {
     expect(request).toContain('aria-label="Request example"')
     expect(request).toContain('cURL')
     expect(response).toContain('Response')
+  })
+
+  it('keeps natural language labels when request fences have no authored titles', () => {
+    const request = renderToStaticMarkup(createElement(RequestExample, null, [
+      createElement(Pre, { key: 'python', language: 'python', code: 'requests.get(url)' }, createElement('code', { className: 'language-python' }, 'requests.get(url)')),
+      createElement(Pre, { key: 'go', language: 'go', code: 'http.Get(url)' }, createElement('code', { className: 'language-go' }, 'http.Get(url)')),
+    ]))
+    expect(request).toContain('Python')
+    expect(request).not.toContain('Example 1')
+    const nested = renderToStaticMarkup(createElement(RequestExample, null, [
+      createElement('pre', { key: 'python' }, createElement('code', { className: 'language-python' }, 'requests.get(url)')),
+      createElement('pre', { key: 'ruby' }, createElement('code', { className: 'language-ruby' }, 'Net::HTTP.get(uri)')),
+    ]))
+    expect(nested).toContain('Python')
+    expect(nested).not.toContain('Example 1')
+  })
+
+  it('uses CodeBlock filenames as request and response labels and numbers example lines', () => {
+    const request = renderToStaticMarkup(createElement(RequestExample, null, [
+      createElement(CodeBlock, { key: 'curl', filename: 'cURL', language: 'bash' }, 'curl /pages'),
+      createElement(CodeBlock, { key: 'python', filename: 'Python', language: 'python' }, 'requests.get(url)'),
+    ]))
+    const response = renderToStaticMarkup(createElement(ResponseExample, null, [
+      createElement(CodeBlock, { key: '201', filename: '201', language: 'json' }, '{"title":"A page"}'),
+      createElement(CodeBlock, { key: '400', filename: '400', language: 'json' }, '{"error":"Invalid title"}'),
+    ]))
+    expect(request).toContain('cURL')
+    expect(request).not.toContain('Example 1')
+    expect(request).toContain('thally-code-lines')
+    expect(response).toContain('>201</button>')
+    expect(response).toContain('>400</button>')
+    expect(response).not.toContain('Example 1')
+    expect(response).toContain('thally-code-lines')
   })
 
   it('renders canonical prompt actions and preserves bare legacy Prompt terminals', () => {

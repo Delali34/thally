@@ -27,7 +27,9 @@ describe('api.playground.display', () => {
   it('none shows no endpoint bar and no Try it', () => {
     const html = render('none')
     expect(html).not.toContain('Try it')
-    expect(html).not.toContain('<code')
+    expect(html).not.toContain('class="thally-endpoint-bar"')
+    // Static request examples remain readable when only the playground is hidden.
+    expect(html).toContain('curl --request POST')
   })
 })
 

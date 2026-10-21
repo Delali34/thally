@@ -1,3 +1,5 @@
+/** Shared method colors keep navigation, endpoint bars and Try It consistent. */
+
 export const methodTokens: Record<
   string,
   {
@@ -7,29 +9,29 @@ export const methodTokens: Record<
   }
 > = {
   get: {
-    text: 'text-accent',
-    bg: 'bg-accent/10',
-    ring: 'ring-accent/20',
+    text: 'text-[var(--docs-method-get)]',
+    bg: 'bg-[color-mix(in_oklab,var(--docs-method-get)_11%,transparent)]',
+    ring: 'ring-[color-mix(in_oklab,var(--docs-method-get)_20%,transparent)]',
   },
   post: {
-    text: 'text-sky-500',
-    bg: 'bg-sky-500/10',
-    ring: 'ring-sky-500/20',
+    text: 'text-[var(--docs-method-post)]',
+    bg: 'bg-[color-mix(in_oklab,var(--docs-method-post)_11%,transparent)]',
+    ring: 'ring-[color-mix(in_oklab,var(--docs-method-post)_20%,transparent)]',
   },
   put: {
-    text: 'text-amber-500',
-    bg: 'bg-amber-500/10',
-    ring: 'ring-amber-500/20',
+    text: 'text-[var(--docs-method-put)]',
+    bg: 'bg-[color-mix(in_oklab,var(--docs-method-put)_11%,transparent)]',
+    ring: 'ring-[color-mix(in_oklab,var(--docs-method-put)_20%,transparent)]',
   },
   patch: {
-    text: 'text-blue-500',
-    bg: 'bg-blue-500/10',
-    ring: 'ring-blue-500/20',
+    text: 'text-[var(--docs-method-patch)]',
+    bg: 'bg-[color-mix(in_oklab,var(--docs-method-patch)_11%,transparent)]',
+    ring: 'ring-[color-mix(in_oklab,var(--docs-method-patch)_20%,transparent)]',
   },
   delete: {
-    text: 'text-rose-500',
-    bg: 'bg-rose-500/10',
-    ring: 'ring-rose-500/20',
+    text: 'text-[var(--docs-method-delete)]',
+    bg: 'bg-[color-mix(in_oklab,var(--docs-method-delete)_11%,transparent)]',
+    ring: 'ring-[color-mix(in_oklab,var(--docs-method-delete)_20%,transparent)]',
   },
   options: {
     text: 'text-violet-500',
@@ -48,6 +50,7 @@ export const methodTokens: Record<
   },
 }
 
+/** Resolve documented method colors with a neutral fallback for extension verbs. */
 export function getMethodToken(method: string) {
   const token = methodTokens[method.toLowerCase()]
   if (token) {

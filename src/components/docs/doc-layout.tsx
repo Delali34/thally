@@ -15,6 +15,7 @@ import { getManagedSiteConfigSnapshot } from '@/lib/cloud-link/client'
 import { getBuildContentControls } from '@/lib/cloud-link/content-controls'
 import { resolveBuildSiteConfig } from '@/lib/site-config'
 import { localeDirection } from '@/lib/i18n/config'
+import { ParameterLinkProvider } from '@/components/api/parameter-link'
 import { InlineUpdateFilters, PagePanelSlot, PageSlotsProvider } from '@/components/mdx/page-slots'
 
 interface DocLayoutProps {
@@ -22,9 +23,12 @@ interface DocLayoutProps {
   locale?: string
   navigation?: Pick<NavContext, 'prev' | 'next' | 'breadcrumb' | 'group' | 'groupPath'>
   children: React.ReactNode
+  /** Keep a manual endpoint bar above the responsive parameter/code grid. */
+  endpoint?: React.ReactNode
 }
 
-function DocLayoutContent({ doc, locale = 'en', navigation, children }: DocLayoutProps) {
+function DocLayoutContent({ doc, locale = 'en', navigation, endpoint, children: body }: DocLayoutProps) {
+  const children = <>{endpoint}{body}</>
   const { prev, next, breadcrumb: breadcrumbs } = navigation ?? {
     ...getPrevNextLinks(doc.href),
     breadcrumb: getBreadcrumbs(doc.href),
@@ -150,6 +154,34 @@ function DocLayoutContent({ doc, locale = 'en', navigation, children }: DocLayou
     )
   }
 
+  // Manual API pages use authored MDX as their canonical parameter content.
+  // Panel portals move just the samples; headers and the endpoint stay above
+  // both columns so the phone's code-first order never hides the operation.
+  if (doc.manualApi) {
+    return (
+      <article className="thally-docs-article thally-authored-endpoint flex-1" lang={locale} dir={localeDirection(locale)}>
+        <ContentStack>
+          <div className="not-prose space-y-4">
+            {showBreadcrumbs ? <DocBreadcrumbs items={breadcrumbs} /> : null}
+            <DocHeader doc={doc} eyebrow={eyebrow} showCopyPage={contentControls.showCopyPage} />
+          </div>
+          {endpoint}
+          <div className="thally-authored-endpoint-grid">
+            <Prose className="min-w-0 w-full">{body}</Prose>
+            <aside className="thally-authored-endpoint-code" aria-label="Code examples">
+              <PagePanelSlot fallback={null} />
+            </aside>
+          </div>
+          <div className="not-prose space-y-6">
+            {feedback}
+            {pageSourceActions}
+            <DocPagination prev={prev} next={next} />
+          </div>
+        </ContentStack>
+      </article>
+    )
+  }
+
   // default: two-column with TOC
   return (
     <MainColumns>
@@ -183,8 +215,10 @@ const MODES_WITH_UPDATE_FILTERS = new Set(['default', 'wide', 'center'])
 /** Render a documentation page with page-scoped MDX coordination. */
 export function DocLayout(props: DocLayoutProps) {
   return (
-    <PageSlotsProvider urlFilters={MODES_WITH_UPDATE_FILTERS.has(props.doc.mode ?? 'default')}>
-      <DocLayoutContent {...props} />
-    </PageSlotsProvider>
+    <ParameterLinkProvider key={props.doc.id}>
+      <PageSlotsProvider urlFilters={MODES_WITH_UPDATE_FILTERS.has(props.doc.mode ?? 'default')}>
+        <DocLayoutContent {...props} />
+      </PageSlotsProvider>
+    </ParameterLinkProvider>
   )
 }

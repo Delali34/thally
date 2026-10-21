@@ -5,7 +5,6 @@
 import { ChevronRight } from 'lucide-react'
 import { useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { NavigationNode, NavigationSection } from '@/data/docs'
-import { getMethodToken } from '@/components/api/tokens'
 import { Badge } from '@/components/ui/badge'
 import { Icon } from '@/components/mdx/rich-content'
 import { IntentPrefetchLink } from '@/components/navigation/intent-prefetch-link'
@@ -20,41 +19,35 @@ interface NavigationTreeProps {
   showGroupIcons?: boolean
 }
 
-function MethodPill({ method }: { method: string }) {
-  const token = getMethodToken(method)
-  return (
-    <span className={cn('shrink-0 rounded px-1 py-px font-mono text-[10px] font-semibold uppercase leading-4', token.bg, token.text)}>
-      {method === 'DELETE' ? 'DEL' : method}
-    </span>
-  )
-}
-
 function NavigationPage({ node, pathname, onNavigate, mobile, showGroupIcons }: NavigationTreeProps & { node: NavigationNode }) {
   if (node.type !== 'page') return null
   const active = matchesNavigationPath(node.item.href, pathname)
     return (
       <IntentPrefetchLink
         href={node.item.href}
+        data-method={node.item.method?.toLowerCase()}
         aria-current={active ? 'page' : undefined}
         onClick={onNavigate}
         className={cn(
-          'group relative block rounded-lg px-2.5 text-left transition-colors duration-150 focus:outline-none',
+          'thally-navigation-item group relative block rounded-lg px-2.5 text-left transition-colors duration-150 focus:outline-none',
           mobile ? 'py-1.5 text-sm' : 'py-1.5 text-sm leading-6',
           active
             ? 'bg-accent/10 font-normal text-accent'
             : 'font-normal text-muted-foreground hover:bg-muted hover:text-foreground',
         )}
       >
-        <span className="flex min-h-5 items-center gap-2">
-          {showGroupIcons && node.item.icon ? (
-            <Icon
-              {...(/^(\/(?!\/)|https:\/\/)/i.test(node.item.icon) ? { src: node.item.icon } : { icon: node.item.icon })}
-              iconType={node.item.iconType}
-              className="h-3.5 w-3.5 shrink-0 text-foreground/50"
-            />
-          ) : null}
-          {node.item.method ? <MethodPill method={node.item.method} /> : null}
-          <span className="line-clamp-2 break-words">{node.item.title}</span>
+        <span className="thally-navigation-label flex min-h-5 items-center gap-2">
+          {node.item.method ? <span className="thally-method-tag">{node.item.method.toUpperCase()}</span> : null}
+          <span className="thally-navigation-title line-clamp-2 break-words">
+            {showGroupIcons && node.item.icon ? (
+              <Icon
+                {...(/^(\/(?!\/)|https:\/\/)/i.test(node.item.icon) ? { src: node.item.icon } : { icon: node.item.icon })}
+                iconType={node.item.iconType}
+                className="mr-2 inline-block h-3.5 w-3.5 shrink-0 text-foreground/50"
+              />
+            ) : null}
+            {node.item.title}
+          </span>
           {node.item.badge ? <Badge className="shrink-0 text-[10px] uppercase">{node.item.badge}</Badge> : null}
         </span>
         {mobile && node.item.description ? (

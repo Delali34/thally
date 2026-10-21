@@ -302,9 +302,8 @@ export default async function DocsPage({ params }: PageProps) {
       {localeAvailability}
       {localizedNavigation}
       <JsonLdScript data={jsonLd} />
-      <DocLayout doc={doc} locale={contentLocale} navigation={nav}>
+      <DocLayout doc={doc} locale={contentLocale} navigation={nav} endpoint={doc.manualApi ? <ManualApiEndpoint operation={doc.manualApi} playground={playground} locale={contentLocale} /> : undefined}>
         {localeNotice}
-        {doc.manualApi ? <ManualApiEndpoint operation={doc.manualApi} playground={playground} locale={contentLocale} /> : null}
         <Content />
       </DocLayout>
     </>

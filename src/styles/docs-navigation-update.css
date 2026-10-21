@@ -1,0 +1,80 @@
+/* API navigation and small-screen shell refinements from the October handoff.
+ * Method identity comes from operation metadata; authored navigation stays intact. */
+:root {
+  --docs-method-get: oklch(0.5 0.12 152);
+  --docs-method-post: oklch(0.5 0.13 255);
+  --docs-method-put: oklch(0.55 0.12 70);
+  --docs-method-patch: oklch(0.56 0.14 45);
+  --docs-method-delete: oklch(0.55 0.16 25);
+}
+.dark {
+  --docs-method-get: oklch(0.78 0.13 150);
+  --docs-method-post: oklch(0.76 0.11 255);
+  --docs-method-put: oklch(0.8 0.11 80);
+  --docs-method-patch: oklch(0.78 0.12 50);
+  --docs-method-delete: oklch(0.74 0.14 25);
+}
+.thally-navigation-item[data-method] { --method-color: var(--docs-mute); }
+.thally-navigation-item[data-method='get'] { --method-color: var(--docs-method-get); }
+.thally-navigation-item[data-method='post'] { --method-color: var(--docs-method-post); }
+.thally-navigation-item[data-method='put'] { --method-color: var(--docs-method-put); }
+.thally-navigation-item[data-method='patch'] { --method-color: var(--docs-method-patch); }
+.thally-navigation-item[data-method='delete'] { --method-color: var(--docs-method-delete); }
+.thally-navigation-item[data-method] .thally-navigation-label {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  column-gap: 10px;
+  align-items: baseline;
+}
+.thally-navigation-item[data-method] .thally-navigation-title { min-width: 0; }
+.thally-method-tag {
+  justify-self: start;
+  padding: 3px 5px;
+  border-radius: 5px;
+  color: var(--method-color);
+  background: color-mix(in oklab, var(--method-color) 11%, transparent);
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  line-height: 1.2;
+}
+.thally-navigation-item[aria-current='page'] .thally-method-tag {
+  color: var(--docs-bg);
+  background: var(--method-color);
+}
+.thally-navigation-item[data-method] .thally-navigation-label > :nth-child(3) { grid-column: 2; }
+.thally-mobile-nav-trigger { display: none; }
+.thally-mobile-nav-drawer, .thally-mobile-nav-scrim { top: var(--docs-header-height, 60px); }
+.thally-mobile-nav-drawer { background: hsl(var(--thally-background)); }
+.thally-mobile-nav-drawer :focus-visible { outline: 1px solid hsl(var(--thally-foreground) / 0.5); outline-offset: 2px; }
+.thally-mobile-section-links .thally-docs-tabs { display: flex; flex-direction: column; align-items: stretch; gap: 0; }
+.thally-mobile-section-links .thally-nav-tab-item { padding: 8px 10px; border: 0; }
+.thally-mobile-section-links [aria-current='page'] { background: hsl(var(--thally-accent) / 0.1); color: hsl(var(--thally-accent)); }
+@media (min-width: 881px) and (max-width: 1040px) {
+  .thally-docs-topbar-inner, .thally-docs-collection-row { padding-inline: 20px; }
+  .thally-docs-topbar-inner { gap: 8px; }
+  .thally-docs-brand { margin-inline-end: 8px; }
+  .thally-docs-tabs { column-gap: 0; }
+  .thally-docs-tabs .thally-nav-tab-item { padding-inline: 8px; font-size: 0.86rem; }
+}
+@media (min-width: 881px) {
+  .thally-docs-sidebar { display: block; }
+}
+@media (max-width: 880px) {
+  .thally-mobile-nav-trigger { display: inline-flex; width: 36px; height: 36px; }
+  .thally-docs-shell { display: flex; min-width: 0; padding-inline: 0; }
+  .thally-docs-main { min-width: 0; width: 100%; }
+  .thally-docs-main > div { padding-inline: 20px; }
+  .thally-docs-sidebar { display: none; }
+}
+@media (max-width: 560px) {
+  .thally-docs-brand > span:last-child { display: none; }
+  .thally-docs-primary { display: inline-flex; height: 34px; min-height: 34px; padding-inline: 10px; }
+  .thally-docs-header > div { flex-wrap: wrap; }
+  .thally-docs-header > div > div:first-child { flex-basis: 100%; min-width: 0; }
+  .thally-docs-header p:not(.thally-docs-eyebrow) { font-size: 1.06rem; }
+  .thally-docs-prose { font-size: 15px; }
+  .thally-docs-code pre { font-size: 0.76rem; }
+  .thally-docs-actions { gap: 4px; }
+}
