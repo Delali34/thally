@@ -12,9 +12,22 @@ import path from 'node:path'
 
 const require = createRequire(import.meta.url)
 
-export function run(command: string, args: Array<string>, cwd = process.cwd()): Promise<number> {
+/**
+ * Run a command with inherited stdio and resolve with its exit code (127 when
+ * it cannot start). Windows needs a shell for the `npm.cmd`/`npx.cmd` shims,
+ * so that is the default there. A shell joins the command and its arguments
+ * without quoting them, so pass `shell: false` when spawning an executable by
+ * absolute path: `C:\Program Files\nodejs\node.exe` would otherwise split at
+ * the space.
+ */
+export function run(
+  command: string,
+  args: Array<string>,
+  cwd = process.cwd(),
+  shell = process.platform === 'win32',
+): Promise<number> {
   return new Promise((resolve) => {
-    const child = spawn(command, args, { cwd, stdio: 'inherit', shell: process.platform === 'win32' })
+    const child = spawn(command, args, { cwd, stdio: 'inherit', shell })
     child.on('close', (code) => resolve(code ?? 0))
     child.on('error', () => resolve(127))
   })
@@ -137,12 +150,16 @@ export function runFramework(
   return onLine ? runTee(command, args, onLine) : run(command, args)
 }
 
-/** Run a sibling package binary (create-thally-docs, thally-mcp) via node. */
+/**
+ * Run a sibling package binary (create-thally-docs, thally-mcp) via node.
+ * Node is spawned directly, without a shell, so neither its install path nor
+ * arguments such as a project path containing spaces are split on Windows.
+ */
 export function runPackageBin(pkg: string, binName: string, args: Array<string>): Promise<number> {
   const bin = resolveBin(pkg, binName)
   if (!bin) {
     process.stderr.write(`\n  Could not resolve the "${binName}" binary from "${pkg}".\n  Is it installed in this project?\n\n`)
     return Promise.resolve(127)
   }
-  return run(process.execPath, [bin, ...args])
+  return run(process.execPath, [bin, ...args], process.cwd(), false)
 }
