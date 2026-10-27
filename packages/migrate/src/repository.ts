@@ -6678,6 +6678,12 @@ export function migrateRepository(options: RepositoryMigrationOptions): Migratio
         message: `The Docusaurus ${DOCUSAURUS_IDENTITY_LABELS[field]} could not be read without running the config and was left out of the migration.${fallback} Use a string literal, or plain data in an imported module, to import it.`,
       })
     }
+    for (const token of docusaurusSettings.unresolvedCopyright ?? []) {
+      warnings.push({
+        code: 'unsupported-config',
+        message: `The Docusaurus footer copyright references ${token}, which could not be read without running the config, so the placeholder was removed. Use a literal value, or plain data in an imported module, to import it.`,
+      })
+    }
     if (presentation) {
       assets.push({ path: '_thally/source-theme.css', content: Buffer.from(presentation.css) })
       docsConfig = { ...docsConfig, stylesheets: [...(docsConfig.stylesheets ?? []), '/_thally/source-theme.css'], ...(presentation.headingFont ? { fonts: { ...docsConfig.fonts, heading: { family: presentation.headingFont, weight: ['400', '500', '600', '700'] } } } : {}) }

@@ -940,6 +940,8 @@ export interface DocusaurusSiteSettings {
    * without the migration saying why.
    */
   unresolvedIdentity?: Array<'title' | 'tagline' | 'navbarTitle'>
+  /** Copyright tokens that only exist at build time and were removed. */
+  unresolvedCopyright?: string[]
 }
 
 function propertyStart(source: string, name: string): number {
@@ -1195,6 +1197,42 @@ function staticStringField(source: string, name: string, bindings?: Map<string, 
   }
 }
 
+/** The only build-time expression a migrated copyright can keep, as `{year}`. */
+const COPYRIGHT_YEAR = /\$\{\s*new Date\(\)\s*\.\s*getFullYear\(\)\s*\}/g
+const COPYRIGHT_TOKEN = /\$\{([^}]*)\}/g
+/** Docusaurus' own footer credit, which advertises a framework the site no longer runs. */
+const DOCUSAURUS_CREDIT = /\s*\bBuilt with Docusaurus\b[.!]*/gi
+
+/**
+ * Turn a footer copyright into text the scaffold can render. A resolved
+ * `${...}` keeps the sentence readable, the build-time year becomes `{year}`,
+ * and a token whose value only exists at build time is reported and removed
+ * rather than shipped to readers as source code.
+ */
+function docusaurusCopyright(
+  source: string,
+  bindings: Map<string, string>,
+  unresolved: Array<string>,
+): string | undefined {
+  const value = source
+    .replace(COPYRIGHT_YEAR, '{year}')
+    .replace(COPYRIGHT_TOKEN, (_match, expression: string) => {
+      const reference = expression.trim()
+      const resolved = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*$/.test(reference)
+        ? bindings.get(reference)
+        : undefined
+      if (resolved !== undefined) return resolved
+      unresolved.push(reference)
+      return ''
+    })
+    .replace(DOCUSAURUS_CREDIT, '')
+    // Removing a token usually leaves a space before its punctuation.
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\s+([.,;!?])/g, '$1')
+    .trim()
+  return value || undefined
+}
+
 /** Project Docusaurus' static site identity and footer without loading config code. */
 export function readDocusaurusSiteSettings(repositoryRoot: string): DocusaurusSiteSettings {
   const empty: DocusaurusSiteSettings = { docsRouteBasePath: 'docs', defaultColorMode: 'light', navbarLinks: [], footerLinks: [] }
@@ -1246,13 +1284,16 @@ export function readDocusaurusSiteSettings(repositoryRoot: string): DocusaurusSi
     })
     return items.length > 0 ? [{ heading, items }] : []
   }) : []
-  // A build-time year expression is the one dynamic Docusaurus copyright
-  // pattern that can be represented without evaluating source JavaScript.
-  const copyright = footer && propertyStart(footer, 'copyright') >= 0
-    ? staticStringField(footer, 'copyright')
-      ?? footer.slice(propertyStart(footer, 'copyright')).match(/^`([^`]+)`/)?.[1]
-        ?.replace(/\$\{new Date\(\)\.getFullYear\(\)\}/g, '{year}')
-    : undefined
+  // Copyright text is data, not behaviour: a quoted string, a bound constant,
+  // or a template literal whose `${...}` values can be read statically.
+  const copyrightStart = footer ? propertyStart(footer, 'copyright') : -1
+  const copyrightSource = copyrightStart < 0 ? undefined
+    : staticStringField(footer!, 'copyright', bindings)
+      ?? footer!.slice(copyrightStart).match(/^`([^`]+)`/)?.[1]
+  const unresolvedCopyright: Array<string> = []
+  const copyright = copyrightSource === undefined
+    ? undefined
+    : docusaurusCopyright(copyrightSource, bindings, unresolvedCopyright)
   const announcementStart = theme ? propertyStart(theme, 'announcementBar') : -1
   const announcement = announcementStart < 0 ? null : matchingObjectLiteral(theme!, announcementStart)
   const announcementContent = announcement && staticStringField(announcement, 'content')
@@ -1273,6 +1314,7 @@ export function readDocusaurusSiteSettings(repositoryRoot: string): DocusaurusSi
     ...(description ? { description } : {}),
     ...(navbarTitle ? { navbarTitle } : {}),
     ...(unresolvedIdentity.length > 0 ? { unresolvedIdentity } : {}),
+    ...(unresolvedCopyright.length > 0 ? { unresolvedCopyright } : {}),
     defaultColorMode,
     docsRouteBasePath,
     ...(logo && staticStringField(logo, 'src', bindings) ? {

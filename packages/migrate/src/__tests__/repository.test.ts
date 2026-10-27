@@ -4200,6 +4200,57 @@ describe('Docusaurus repository migration', () => {
     expect(bundle.warnings.map((warning) => warning.message).join('\n')).toContain('source repository name')
   })
 
+  it('resolves footer copyright placeholders against imported identity data', () => {
+    const root = docusaurusFixture()
+    writeFileSync(join(root, 'site.json'), JSON.stringify({ name: 'Hookline', title: 'Hookline Docs' }))
+    writeFileSync(join(root, 'docusaurus.config.ts'), `
+      import site from './site.json'
+      export default {
+        presets: [['classic', { docs: { sidebarPath: './sidebars.ts' } }]],
+        title: site.title,
+        themeConfig: {
+          footer: {
+            copyright: \`Copyright © \${new Date().getFullYear()} \${site.name}. A fictional product. Built with Docusaurus.\`,
+          },
+        },
+      }
+    `)
+    const bundle = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/acme/hookline-docs', platform: 'docusaurus' })
+    expect(bundle.docsConfig.footer?.copyright).toBe('Copyright © {year} Hookline. A fictional product.')
+    expect(bundle.warnings.filter((warning) => warning.message.includes('footer copyright'))).toEqual([])
+  })
+
+  it('drops the Docusaurus credit from a plain footer copyright', () => {
+    const root = docusaurusFixture()
+    writeFileSync(join(root, 'docusaurus.config.ts'), `
+      export default {
+        presets: [['classic', { docs: { sidebarPath: './sidebars.ts' } }]],
+        title: 'Acme Docs',
+        themeConfig: { footer: { copyright: 'Copyright © Acme. Built with Docusaurus' } },
+      }
+    `)
+    const bundle = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/acme/docusaurus-docs', platform: 'docusaurus' })
+    expect(bundle.docsConfig.footer?.copyright).toBe('Copyright © Acme.')
+  })
+
+  it('removes an unreadable footer copyright placeholder and names it in a warning', () => {
+    const root = docusaurusFixture()
+    writeFileSync(join(root, 'docusaurus.config.ts'), `
+      export default {
+        presets: [['classic', { docs: { sidebarPath: './sidebars.ts' } }]],
+        title: 'Acme Docs',
+        themeConfig: {
+          footer: { copyright: \`Copyright © \${new Date().getFullYear()} \${process.env.BRAND}. All rights reserved.\` },
+        },
+      }
+    `)
+    const bundle = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/acme/docusaurus-docs', platform: 'docusaurus' })
+    expect(bundle.docsConfig.footer?.copyright).toBe('Copyright © {year}. All rights reserved.')
+    const warnings = bundle.warnings.filter((warning) => warning.message.includes('footer copyright'))
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0].message).toContain('process.env.BRAND')
+  })
+
   it('keeps site sections outside the Docusaurus docs mount on the source domain', () => {
     const root = docusaurusFixture()
     writeFileSync(join(root, 'docs', 'blog.md'), '---\ntitle: Blog\n---\n\nHow to configure the blog.')
