@@ -249,14 +249,37 @@ export interface MintlifyFontSource {
   remote: boolean
 }
 
+/** A font file served by Google Fonts itself: Thally loads that font by family, so its `source` changes nothing. */
+const GOOGLE_FONT_SOURCE = /^https?:\/\/fonts\.(?:googleapis|gstatic)\.com\//i
+
+/**
+ * Whether docs.json `fonts` gives a font its own file (`source`, which Mintlify takes for a font hosted
+ * elsewhere or kept in the docs folder), as opposed to a Google font named by family. Thally's `fonts`
+ * setting is Google-only, so a family with such a source cannot be named there: Google has no font of that name.
+ */
+export function isSelfHostedFontSource(source: unknown): boolean {
+  return typeof source === 'string' && source.trim() !== '' && !GOOGLE_FONT_SOURCE.test(source.trim())
+}
+
+/**
+ * The one warning for a self-hosted font that was not applied, with `detail` for what became of its file.
+ * Naming the family would make every page ask Google Fonts for it, which fails, so no family is set.
+ */
+export function selfHostedFontWarning(family: string, detail: string): MigrationWarning {
+  return {
+    code: 'unsupported-config',
+    message: `Self-hosted font "${family}" was not applied: Thally's docs.json fonts setting loads Google Fonts by family name, and a font you host yourself is not on Google Fonts, so naming it would make every page request a font that cannot load. No font family was set and the default font is used; ${detail}. To use it, add an @font-face rule for it to a stylesheet in public/, list that stylesheet under "stylesheets" in docs.json, and set --font-heading (headings) or --font-sans (body text) to its family. Thally Cloud site settings can also load a custom font file.`,
+  }
+}
+
 /** Self-hosted font references from docs.json `fonts` (top level, `heading`, `body`). */
 export function mintlifyFontSources(config: Record<string, unknown> | null): Array<MintlifyFontSource> {
   const fonts = objectValue(config?.fonts)
   if (!fonts) return []
   const found: Array<MintlifyFontSource> = []
   for (const entry of [fonts, objectValue(fonts.heading), objectValue(fonts.body)]) {
-    if (!entry || typeof entry.source !== 'string' || !entry.source.trim()) continue
-    const source = entry.source.trim()
+    if (!entry || !isSelfHostedFontSource(entry.source)) continue
+    const source = (entry.source as string).trim()
     const family = typeof entry.family === 'string' ? entry.family : 'a font'
     const remote = /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(source)
     // A leading slash is relative to the content root, as on Mintlify; the

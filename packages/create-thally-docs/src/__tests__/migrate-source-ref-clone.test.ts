@@ -52,7 +52,8 @@ describe('sourceRef clone', () => {
   it('clones the referenced repository without following its submodules', async () => {
     const { pages } = await run()
     expect(cloneCalls.find((call) => call.repo === 'sdk')?.options).toEqual({ skipSubmodules: true })
-    expect(cloneCalls.find((call) => call.repo === 'docs')?.options).toBeUndefined()
+    // The main repository keeps its submodules (no `skipSubmodules`) and says which docs directory its `.mintignore` is read from.
+    expect(cloneCalls.find((call) => call.repo === 'docs')?.options).toEqual({ docsDir: undefined })
     expect(pages).toBe(2)
   })
 

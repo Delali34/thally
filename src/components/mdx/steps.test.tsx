@@ -50,10 +50,34 @@ describe('Step title element', () => {
     expect(h2).toContain('data-level="2"')
   })
 
-  it('never marks a plain-text title, even when handed an id', () => {
+  it('never marks a plain-text title as a heading, even when handed an id', () => {
     const html = renderToStaticMarkup(<Steps titleSize="p"><Step title="One" id="one" /></Steps>)
     expect(html).toMatch(/<p [^>]*>One<\/p>/)
-    expect(html).not.toMatch(/data-heading|\bid="one"/)
+    expect(html).not.toMatch(/<p [^>]*(data-heading|\bid=)/)
+    expect(html).not.toContain('data-heading')
+  })
+
+  // Mintlify puts the id of a step whose title is plain text on the step itself, so a link to it lands there.
+  it('puts the id of a plain-text step on the step container, once', () => {
+    for (const html of [
+      renderToStaticMarkup(<Steps titleSize="p"><Step title="Add a method" id="add-method">Body.</Step></Steps>),
+      renderToStaticMarkup(<Steps><Step title="Add a method" id="add-method" titleSize="p">Body.</Step></Steps>),
+    ]) {
+      expect(html).toMatch(/<div id="add-method" class="thally-step /)
+      expect(html.match(/id="add-method"/g)).toHaveLength(1)
+      expect(html).toMatch(/<p [^>]*>Add a method<\/p>/)
+    }
+  })
+
+  it('keeps the id of a heading title on the heading and off the container, once', () => {
+    const html = renderToStaticMarkup(<Steps titleSize="h3"><Step title="Add a method" id="add-method">Body.</Step></Steps>)
+    expect(html).toMatch(/<h3 [^>]*\bid="add-method"/)
+    expect(html).not.toMatch(/<div id="add-method"/)
+    expect(html.match(/id="add-method"/g)).toHaveLength(1)
+  })
+
+  it('renders no id on a step that was handed none', () => {
+    expect(renderToStaticMarkup(<Steps titleSize="p"><Step title="One" /></Steps>)).not.toContain(' id=')
   })
 
   it('renders a code span in the title as code, in plain-text and heading titles alike', () => {
@@ -67,5 +91,28 @@ describe('Step title element', () => {
     const html = renderToStaticMarkup(<Steps titleSize="h3"><Step title="Run the CLI `init` command" id="run-the-cli-init-command" /></Steps>)
     expect(html).toContain('data-heading="Run the CLI init command"')
     expect(html).toMatch(/<h3 [^>]*\bid="run-the-cli-init-command"/)
+  })
+})
+
+describe('Step without a title', () => {
+  it('renders the number and the content with no title element', () => {
+    const html = renderToStaticMarkup(<Steps><Step>Only the content.</Step></Steps>)
+    expect(html).toContain('thally-step-number')
+    expect(html).toContain('Only the content.')
+    expect(html).not.toMatch(/<(?:h[1-6]|p)\b/)
+  })
+
+  it.each([['an empty title', ''], ['a blank title', '   ']])('renders no title element for %s', (_name, title) => {
+    for (const titleSize of ['p', 'h2', 'h3', 'h4'] as const) {
+      const html = renderToStaticMarkup(<Steps titleSize={titleSize}><Step title={title} id="gone">Body.</Step></Steps>)
+      expect(html).toContain('Body.')
+      expect(html).not.toMatch(/<h[1-6]\b|data-heading/)
+    }
+  })
+
+  it('keeps the title of the other steps in the same list', () => {
+    const html = renderToStaticMarkup(<Steps><Step>First.</Step><Step title="Second">Next.</Step></Steps>)
+    expect(html).toMatch(/<h3 [^>]*>Second<\/h3>/)
+    expect(html.match(/thally-step-number/g)).toHaveLength(2)
   })
 })

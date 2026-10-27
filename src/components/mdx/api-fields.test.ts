@@ -32,6 +32,21 @@ describe('API field components', () => {
     expect(field({ query: 'page' })).toContain('<code class="text-sm font-semibold text-foreground">page</code>')
   })
 
+  // Mintlify gives every field an id so a link can land on it; the id sits on the head row and changes nothing else.
+  it('puts the id it is handed on the field head and leaves the rest of the markup as it was', () => {
+    for (const [Field, props] of [
+      [ParamField, { body: 'expiresInDays', type: 'integer', required: true }],
+      [ResponseField, { name: 'pagination.cursor', type: 'string' }],
+    ] as const) {
+      const plain = renderToStaticMarkup(createElement(Field as never, props, 'Body.'))
+      const withId = renderToStaticMarkup(createElement(Field as never, { ...props, id: 'param-x' }, 'Body.'))
+      expect(plain).not.toContain(' id=')
+      expect(withId).toMatch(/<div [^>]*\bid="param-x"[^>]*><code /)
+      expect(withId).not.toMatch(/<section [^>]*\bid=/)
+      expect(withId.replace(' id="param-x"', '')).toBe(plain)
+    }
+  })
+
   it('exposes named keyboard-focusable rows for parameter and code linking', () => {
     const parameter = renderToStaticMarkup(createElement(ParamField, {
       name: 'title', type: 'string', required: true, default: 'draft',

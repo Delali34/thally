@@ -8,7 +8,7 @@ function localizeHref(href: string, locale: string): string {
 }
 
 function localizeItem(item: NavigationItem, locale: string): NavigationItem {
-  return { ...item, href: localizeHref(item.href, locale) }
+  return { ...item, href: localizeHref(item.href, locale), ...(item.redirectTo ? { redirectTo: localizeHref(item.redirectTo, locale) } : {}) }
 }
 
 function localizeNode(node: NavigationNode, locale: string): NavigationNode {

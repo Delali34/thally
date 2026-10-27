@@ -186,7 +186,7 @@ async function discoverMigration(options: MigrateOptions): Promise<MigrationBund
   const cloneDir = join(temporaryRoot, 'repository')
   try {
     const cloneWarnings: Array<MigrationWarning> = []
-    await terminal.step(`Cloning ${source.owner}/${source.repo}`, () => cloneGitHubRepository(source, cloneDir, cloneWarnings), 'Source repository cloned')
+    await terminal.step(`Cloning ${source.owner}/${source.repo}`, () => cloneGitHubRepository(source, cloneDir, cloneWarnings, { docsDir: options.docsDir }), 'Source repository cloned')
     const sourceRefs = options.sourceRefs?.length
       ? await terminal.step('Importing sourceRef repositories', () => fetchSourceRefs(options.sourceRefs ?? [], cloneWarnings), 'sourceRef repositories imported')
       : []

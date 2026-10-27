@@ -22,9 +22,14 @@ interface NavigationTreeProps {
 function NavigationPage({ node, pathname, onNavigate, mobile, showGroupIcons }: NavigationTreeProps & { node: NavigationNode }) {
   if (node.type !== 'page') return null
   const active = matchesNavigationPath(node.item.href, pathname)
+  // A page that only redirects links to where the redirect ends: the router drops a redirect's fragment.
+  const href = node.item.redirectTo ?? node.item.href
+  const external = /^https?:\/\//i.test(href)
     return (
       <IntentPrefetchLink
-        href={node.item.href}
+        href={href}
+        target={external ? '_blank' : undefined}
+        rel={external ? 'noreferrer' : undefined}
         data-method={node.item.method?.toLowerCase()}
         aria-current={active ? 'page' : undefined}
         onClick={onNavigate}

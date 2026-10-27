@@ -58,6 +58,30 @@ describe('migration description fallback', () => {
     expect(page).toMatchObject({ description: 'Introductory prose.', descriptionPlacement: 'body' })
   })
 
+  it('keeps a description taken from the body out of the title area on every platform, since the body already shows it', () => {
+    for (const platform of [undefined, 'mintlify', 'docusaurus', 'fern'] as const) {
+      const page = parseMarkdownPage({ id: 'guide', platform, raw: '---\ntitle: Guide\n---\n\nFirst paragraph.\n\nSecond paragraph.', source: 'guide.mdx' })
+      expect(page, String(platform)).toMatchObject({ description: 'First paragraph.', descriptionPlacement: 'body' })
+    }
+  })
+
+  it('leaves an authored description in the title area, except where a platform already kept it in the body', () => {
+    const raw = '---\ntitle: Guide\ndescription: Authored.\n---\n\nFirst paragraph.'
+    for (const platform of [undefined, 'mintlify'] as const) {
+      expect(parseMarkdownPage({ id: 'guide', platform, raw, source: 'guide.mdx' })?.descriptionPlacement, String(platform)).toBeUndefined()
+    }
+    for (const platform of ['docusaurus', 'fern'] as const) {
+      expect(parseMarkdownPage({ id: 'guide', platform, raw, source: 'guide.mdx' })?.descriptionPlacement, platform).toBe('body')
+    }
+  })
+
+  it('marks no placement when there is no description to place, or when an operation describes the page', () => {
+    const code = parseMarkdownPage({ id: 'code', platform: 'mintlify', raw: '```jsx\n<Widget />\n```', source: 'code.mdx' })
+    const operation = parseMarkdownPage({ id: 'op', platform: 'mintlify', raw: '---\nopenapi: post /links\n---\n\nProse.', source: 'op.mdx' })
+    expect([code?.description, operation?.description]).toEqual(['', ''])
+    expect([code?.descriptionPlacement, operation?.descriptionPlacement]).toEqual([undefined, undefined])
+  })
+
   it('takes a leading Markdown H1 as the page title and removes its duplicate body heading', () => {
     const page = parseMarkdownPage({
       id: 'api/docusaurus-config',
@@ -770,6 +794,20 @@ describe('Mintlify heading ids from the live Trigger.dev docs', () => {
     ['### Database package (`@repo/db`)', 'database-package-@repo/db'],
     ['### `No loader is configured for ".node" files`', 'no-loader-is-configured-for--node-files'],
     ['### `Failed to index deployment` with `Column must be greater than or equal to 0, got -1`', 'failed-to-index-deployment-with-column-must-be-greater-than-or-equal-to-0-got-1'],
+    ['### Comparison: =, !=, &lt;, >, &lt;=, >=', 'comparison-=-=-<->-<=->='],
+    // Turso: what a code span holds is text, not a tag, even when it reads as one (`Option<T>`).
+    ['#### `kv.get<T: DeserializeOwned>(key: &str) -> Option<T>`', 'kv-get<t-deserializeowned>-key-&str->-option<t>'],
+    ['#### `fs.read_file(path: &str) -> Vec<u8>`', 'fs-read_file-path-&str->-vec<u8>'],
+    ['#### `kv.get<T>(key: string): Promise<T | undefined>`', 'kv-get<t>-key-string--promise<t-|-undefined>'],
+    ['#### `fs.readdir(path: string): Promise<string[]>`', 'fs-readdir-path-string--promise<string>'],
+    // A single quote before `<` closes, as one before a word opens.
+    ["#### Ordering with OPERATOR '&lt;'", 'ordering-with-operator-\u2019<\u2019'],
+    // Turso: `...` in a heading's text is typeset as an ellipsis, which the id keeps; in code it stays three periods, which the id drops (above).
+    ['### char(X1, X2, ..., XN) and chr(X)', 'char-x1-x2-…-xn-and-chr-x'],
+    ['### coalesce(X, Y, ...)', 'coalesce-x-y-…'],
+    ['### concat(X, ...) and concat_ws(SEP, X, ...)', 'concat-x-…-and-concat_ws-sep-x-…'],
+    ['### format(FORMAT, ...) and printf(FORMAT, ...)', 'format-format-…-and-printf-format-…'],
+    ['### max(X, Y, ...) and min(X, Y, ...)', 'max-x-y-…-and-min-x-y-…'],
   ])('gives %s the id %s', (line, id) => {
     expect(effectiveId(line)).toBe(id)
   })
@@ -778,6 +816,135 @@ describe('Mintlify heading ids from the live Trigger.dev docs', () => {
     expect(mintlifyHeadingSlug('@trigger.dev/sdk/v3')).toBe('@trigger-dev/sdk/v3')
     expect(mintlifyHeadingSlug('sessions.start(body, requestOptions?)')).toBe('sessions-start-body-requestoptions')
     expect(mintlifyHeadingSlug('out.writer({ execute, ... })')).toBe('out-writer--execute-')
+  })
+})
+
+describe('Mintlify heading ids the renderer cannot derive', () => {
+  // The renderer builds a heading's id from its own text and leaves out inline components and what they hold,
+  // so Mintlify's id, which keeps that text, needs an explicit marker.
+  it.each([
+    ['## Initialize instance <Badge icon="building" color="blue" size="sm" shape="pill">Enterprise</Badge>', '## Initialize instance <Badge icon="building" color="blue" size="sm" shape="pill">Enterprise</Badge> {/* #initialize-instance-enterprise */}'],
+    ['### Post metrics <Badge color="orange">Experimental</Badge> and <Badge>New</Badge>', '### Post metrics <Badge color="orange">Experimental</Badge> and <Badge>New</Badge> {/* #post-metrics-experimental-and-new */}'],
+  ])('marks %s', (line, expected) => {
+    expect(normalizeMdx(line, 'mintlify')).toBe(expected)
+  })
+
+  it.each([
+    // Nothing of the heading's own text is left for an id: it stays as it was.
+    '## <Badge>Enterprise</Badge>',
+    // The component holds no text, so both ids agree.
+    '## Setup <Icon icon="gear" />',
+    '## Quick start',
+    '## Install `lightdash`',
+  ])('leaves %s unmarked', (line) => {
+    expect(normalizeMdx(line, 'mintlify')).toBe(line)
+  })
+
+  // A marker reserves its id for the whole page. The marker for a heading with an inline component is new (it is not marked without
+  // the component), so it is withheld wherever something else on the page could own that id: the page then serves the ids it served
+  // before, the ones the heading's own text gives.
+  it.each([
+    ['a heading on the page', ['## Foo bar', '', '## Foo <Badge>bar</Badge>']],
+    ['a heading in a blockquote', ['> ## Foo bar', '', '## Foo <Badge>bar</Badge>']],
+    ['a setext heading in a blockquote', ['> Foo bar', '> -------', '', '## Foo <Badge>bar</Badge>']],
+    ['a heading in a list in a blockquote', ['- > ## Foo bar', '', '## Foo <Badge>bar</Badge>']],
+    ['a heading in a list', ['- ### Foo bar', '', '## Foo <Badge>bar</Badge>']],
+    ['a setext heading', ['Foo bar', '-------', '', '## Foo <Badge>bar</Badge>']],
+    ['a step title', ['<Steps titleSize="h3">', '  <Step title="Foo bar">Text.</Step>', '</Steps>', '', '## Foo <Badge>bar</Badge>']],
+    ['a step title over two lines', ['<Steps titleSize="h3">', '<Step title="Foo', 'bar">Text.</Step>', '</Steps>', '', '## Foo <Badge>bar</Badge>']],
+    ['a heading after it', ['## Foo <Badge>bar</Badge>', '', '## Foo bar']],
+    ['an authored numbered id', ['## Foo <Badge>bar</Badge>', '', '## Foo bar', '', '## Custom {/* #foo-bar-2 */}', '', '[Custom](#foo-bar-2)']],
+    ['an authored id', ['## Foo <Badge>bar</Badge>', '', '## Custom {/* #foo-bar */}']],
+    ['an id attribute', ['<a id="foo-bar"></a>', '', '## Foo <Badge>bar</Badge>']],
+    ['an id given as a string expression', ['<a id={"foo-bar"}>Target</a>', '', '## Foo <Badge>bar</Badge>']],
+    ['an id given as a template literal', ['<a id={`foo-bar`}>Target</a>', '', '## Foo <Badge>bar</Badge>']],
+    ['a step title given as a string expression', ['<Steps titleSize="h3">', '  <Step title={"Foo bar"}>Text.</Step>', '</Steps>', '', '## Foo <Badge>bar</Badge>']],
+    ['an anchor on its own line', ['## Foo <Badge>bar</Badge> <a id="foo-bar" />']],
+    ['a repeat of itself', ['## Foo <Badge>bar</Badge>', '', '## Foo <Badge>bar</Badge>']],
+  ])('leaves a heading with a component unmarked when %s could own its id', (_name, lines) => {
+    const page = lines.join('\n')
+    expect(normalizeMdx(page, 'mintlify')).toBe(page)
+  })
+
+  it('leaves a line inside an indented code fence in a JSX block as it was', () => {
+    const page = ['<div>', '', '    ~~~md', '## Foo <Badge>bar</Badge>', '    ~~~', '', '</div>'].join('\n')
+    expect(normalizeMdx(page, 'mintlify')).toBe(page)
+  })
+
+  it('keeps an authored numbered id written as {#id} on its heading, whatever else is on the page', () => {
+    const output = normalizeMdx(['## Foo <Badge>bar</Badge>', '', '## Foo bar', '', '## Custom {#foo-bar-2}'].join('\n'), 'mintlify')
+    expect(output).toBe(['## Foo <Badge>bar</Badge>', '', '## Foo bar', '', '## Custom {/* #foo-bar-2 */}'].join('\n'))
+  })
+
+  it('still marks a heading with a component whose id nothing else on the page can own', () => {
+    expect(normalizeMdx(['> ## Other', '', '## Foo <Badge>bar</Badge>', '', '- ### More', '', '## Foo'].join('\n'), 'mintlify')).toBe([
+      '> ## Other',
+      '',
+      '## Foo <Badge>bar</Badge> {/* #foo-bar */}',
+      '',
+      '- ### More',
+      '',
+      '## Foo',
+    ].join('\n'))
+  })
+
+  // Headings that are marked without any component are marked as they always were, whatever else is on the page.
+  it.each([
+    ['a heading whose id has no dash where its slug has one', ['## Foo,bar', '', '## Foobar'], ['## Foo,bar {/* #foobar */}', '', '## Foobar']],
+    ['repeats and a heading in a blockquote', ['## Scrape + Interact', '', '> ## Scrape Interact', '', '## Scrape + Interact'], ['## Scrape + Interact {/* #scrape-+-interact */}', '', '> ## Scrape Interact', '', '## Scrape + Interact {/* #scrape-+-interact */}']],
+  ])('marks %s as before', (_name, lines, expected) => {
+    expect(normalizeMdx(lines.join('\n'), 'mintlify')).toBe(expected.join('\n'))
+  })
+
+  it('keeps an explicit id over the computed one on a heading with a component', () => {
+    const line = '## Setup <Badge>Pro</Badge> {/* #custom */}'
+    expect(normalizeMdx(line, 'mintlify')).toBe(line)
+  })
+
+  // Pairs read from the ids a live Mintlify site serves (a heading's source and the id on the page).
+  it.each([
+    ['100% Stacked bar chart', '100%-stacked-bar-chart'],
+    ['Allowing users with certain email domain(s) to join automatically', 'allowing-users-with-certain-email-domains-to-join-automatically'],
+    ['Custom role doesn’t restrict a permission (e.g., Google Sheets export)', 'custom-role-doesn’t-restrict-a-permission-e-g--google-sheets-export'],
+    // `= < > |` are kept, like `+ & @`.
+    ['Containment: @>', 'containment-@>'],
+    ['Overlap: &&', 'overlap-&&'],
+    ['Concatenation: ||', 'concatenation-||'],
+    ['Comparison: =, !=, <, >, <=, >=', 'comparison-=-=-<->-<=->='],
+    // A comma ends a run of dashes, as a colon does.
+    ['length(X), char_length(X), character_length(X), and octet_length(X)', 'length-x--char_length-x--character_length-x--and-octet_length-x'],
+    ['lower(X), upper(X)', 'lower-x--upper-x'],
+    ['ltrim(X), rtrim(X), trim(X), btrim(X)', 'ltrim-x--rtrim-x--trim-x--btrim-x'],
+  ])('slugs %j as %s', (text, id) => {
+    expect(mintlifyHeadingSlug(text)).toBe(id)
+  })
+
+  it('still dashes a parenthesis between two words, and a period only before a word or a comma', () => {
+    expect(mintlifyHeadingSlug('sessions.start(body, requestOptions?)')).toBe('sessions-start-body-requestoptions')
+    expect(mintlifyHeadingSlug('Run start(body) now')).toBe('run-start-body-now')
+    expect(mintlifyHeadingSlug('Project context vs. semantic layer')).toBe('project-context-vs-semantic-layer')
+    expect(mintlifyHeadingSlug('Grain, not filters')).toBe('grain-not-filters')
+  })
+
+  it('typesets a straight quote that opens a heading and closes mid-heading as a closing quote, as a live site does', () => {
+    expect(normalizeMdx('### "Config block already exists" errors', 'mintlify'))
+      .toBe('### ”Config block already exists” errors {/* #”config-block-already-exists”-errors */}')
+    // A heading quoted from end to end keeps its opening quote (another live site).
+    expect(normalizeMdx('### "Module not found: x"', 'mintlify')).toBe('### “Module not found: x” {/* #“module-not-found-x” */}')
+  })
+
+  // A link's target is not part of a heading's text, whatever the link's text holds. The first pair is read from the live ScrapeGraphAI
+  // docs (`id="1-markdownify-→-scrape"`); the arrow is what makes the id differ from Thally's, so these headings are marked.
+  it.each([
+    ['### 1. Markdownify → [`Scrape`](/integrations/n8n)', '### 1. Markdownify → [`Scrape`](/integrations/n8n) {/* #1-markdownify-→-scrape */}'],
+    ['### A → [the `x` option](/p)', '### A → [the `x` option](/p) {/* #a-→-the-x-option */}'],
+  ])('leaves the target of a link whose text holds code out of the id of %s', (line, expected) => {
+    expect(normalizeMdx(line, 'mintlify')).toBe(expected)
+  })
+
+  it('reads link syntax inside a code span as text, not as a link', () => {
+    // Read as a link it would leave only `a`: the `b` is the code span's own text.
+    expect(normalizeMdx('### A → `[a](b)`', 'mintlify')).toBe('### A → `[a](b)` {/* #a-→-ab */}')
   })
 })
 
@@ -1033,6 +1200,28 @@ describe('protectMathBlocks', () => {
     const result = protectMathBlocks(body)
     expect(result.converted).toBe(false)
     expect(result.body).toBe(body)
+  })
+
+  it('keeps a template literal that holds a dollar sign inside a multi-line prop object', () => {
+    const body = [
+      '<Demo',
+      '  examples={[',
+      '    { title: "a", code: `x$y` },',
+      '    { title: "b", code: `$(x)` },',
+      '    { title: "c", code: `eval "$(tool profile create --pin)"` },',
+      '    { title: "d", code: `a ${1} c` },',
+      '    { title: "e", code: `$`, note: `${"$"}` },',
+      '  ]}',
+      '/>',
+    ].join('\n')
+    const result = protectMathBlocks(body)
+    expect(result.converted).toBe(false)
+    expect(result.body).toBe(body)
+  })
+
+  it('keeps an inline code span that sits inside a JSX tag on a line with a dollar sign', () => {
+    const body = '<Demo code={`$HOME/bin`} label={`two`} />'
+    expect(protectMathBlocks(body).body).toBe(body)
   })
 
   it('leaves an inlined ESM component with template-literal interpolations untouched (mintlify/docs vercel-json-generator.mdx repro)', () => {

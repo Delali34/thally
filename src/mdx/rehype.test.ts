@@ -336,6 +336,8 @@ describe('step title heading ids', () => {
     ['a titleSize expression', '<Steps titleSize={size}>\n<Step title="One">x</Step>\n</Steps>'],
     ['a title expression', '<Steps titleSize="h3">\n<Step title={"One"}>x</Step>\n</Steps>'],
     ['an empty title', '<Steps titleSize="h3">\n<Step title="">x</Step>\n</Steps>'],
+    ['no title', '<Steps titleSize="h3">\n<Step>x</Step>\n</Steps>'],
+    ['a blank title', '<Steps titleSize="h3">\n<Step title="   ">x</Step>\n</Steps>'],
   ])('leaves a step title that is not a heading alone: %s', async (_name, source) => {
     expect(await ids(source)).toEqual([])
   })

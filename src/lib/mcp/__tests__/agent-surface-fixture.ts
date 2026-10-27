@@ -159,6 +159,7 @@ export const docsModule = {
     { ...apiCollection, sections: [{ title: 'Users', items: [{ id: 'op', title: 'Create user', href: '/api/default/users/post' }] }] },
   ],
   getApiPlaygroundCredentials: () => ({ bearerAuth: PLAYGROUND_SECRET }),
+  getApiMdxConfig: () => ({ servers: [] }),
   // No reader auth in this fixture: every page is open to every reader.
   canReaderViewPage: async () => true,
   isDocEntryVisibleTo: () => true,

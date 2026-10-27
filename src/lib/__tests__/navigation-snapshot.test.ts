@@ -53,6 +53,15 @@ describe('navigation transport', () => {
     expect(navigationHeaders(Array.from({ length: 1000 }, (_, index) => ({ id: `${index}`, label: `${index}`, sections: [] })))).toHaveLength(256)
   })
 
+  it('carries the hidden pages a tab owns, and holds them to the shape of a listed page', () => {
+    const source = fixture(2)
+    source[0].hiddenItems = [{ id: 'hidden', title: 'Hidden', href: '/v2/fr/hidden', groupPath: ['Reference'] }]
+    const decoded = decodeNavigationWire(JSON.parse([...navigationWire(source)].join('')))
+    expect(decoded[0].hiddenItems).toEqual(source[0].hiddenItems)
+    expect(() => decodeNavigationWire([{ ...source[0], hiddenItems: [{ id: 'hidden', title: 'Hidden' }] }])).toThrow()
+    expect(() => decodeNavigationWire([{ ...source[0], hiddenItems: '/v2/fr/hidden' }])).toThrow()
+  })
+
   it('rejects malformed nodes instead of installing an unrelated or partial tree', () => {
     expect(() => decodeNavigationWire([{ id: 'docs', label: 'Docs', sections: [{ title: 'Bad', nodes: [{ type: 'page', item: { href: '/' } }] }] }])).toThrow()
     expect(() => decodeNavigationWire({ collections: [] })).toThrow()

@@ -128,6 +128,11 @@ versions, languages, and reusable `$ref` navigation files; it also preserves
 dropdown presentation, collection descriptions and icons, explicit default
 versions, page route casing, redirects, local snippets, static assets,
 compatible page frontmatter, site identity, and OpenAPI configuration.
+A page with no `description`, other than one that names an API operation, gets
+one from its first paragraph, which keeps it for search and metadata but marks it
+`descriptionPlacement: body`, so the runtime does not print the same sentence under
+the title and again in the body; an authored description is shown under the title as
+written. (Docusaurus and Fern pages are always marked `body`.)
 Analytics come across too: docs.json `integrations` and legacy mint.json
 `analytics` for GA4, Google Tag Manager, PostHog, and Plausible are validated
 and written to `docs.json` `integrations` (`integrations` wins per provider when
@@ -135,7 +140,17 @@ both exist). Invalid values are skipped with a warning, and every other
 Mintlify provider (Amplitude, Mixpanel, Segment, and so on) is listed once in a
 warning instead of being dropped silently. For public Mintlify
 sites, the URL adapter reads the structured configuration embedded in the
-rendered application before falling back to DOM link inference.
+rendered application before falling back to DOM link inference. A navigation
+entry's `tag` label and `boost` search weight have no Thally counterpart: one
+warning for each says how many entries had it.
+
+A group with a `root` page and a `directory` of `card` or `accordion` (set on
+the group or inherited from a group above it; `none` turns it off) ends its root
+page with the group's pages as cards, as Mintlify's page directory does: the
+group's own pages first, in order, then each nested group, as a label with its
+cards (a group nested deeper becomes one card that gives its page count). A
+hidden or access-restricted page is left out and named in a warning, and
+`accordion` is shown as cards with a warning.
 
 An `openapi` (or `asyncapi`) reference is resolved wherever Mintlify allows
 it — the top-level `api.openapi`, or on any individual
@@ -146,13 +161,24 @@ a tab `menu` (string or `{ source, directory }`) becomes its own API tab named
 only content it binds to the tab itself. The item's `icon` and `hidden` carry
 onto that tab, and a `directory` output folder is not used (a warning says so:
 endpoint pages are generated under `/api/`). An item Thally cannot represent
-produces a warning naming it. Specs that share a file name across folders are
+produces a warning naming it. A top-level `api.openapi` that no navigation entry
+lists and that pages name in their `openapi:` frontmatter (a bare `GET /x` names
+it only when it is the site's one spec) gets no API tab, because Mintlify
+publishes just those pages: the spec is bound to a hidden tab (`OpenAPI: <spec>`)
+of its own that the pages' endpoints resolve against. It never binds to an
+existing tab whose label merely contains "API" or is the same as its own (an
+authored tab named `OpenAPI: <spec>` is an ordinary tab), and no other spec ever
+takes that tab over (one that cannot share a tab is left out with a warning, never
+swapped in for the first). A spec no page names keeps its API tab. Specs that share a file name across folders are
 kept as separate files in `openapi/`. A remote `https://` spec is not
 downloaded by `migrateRepository`; the bundle lists it and warns, and
 `hydrateRemoteApiSpecs` (which `create-thally-docs migrate` runs after the
-conversion) downloads it from a public host, up to 25 MB, saves it as `.json`
-or `.yaml` by its content rather than its URL, and binds it to its tab. A
-download that fails leaves a warning naming the URL. An `http://` spec is never
+conversion) downloads it from a public host, up to 25 MB once decompressed (it
+asks for gzip), saves it as `.json` or `.yaml` by its content rather than its
+URL, and binds it to its tab. A download is abandoned after 30 seconds without
+data or 5 minutes in all (one clock for the whole redirect chain, the DNS lookup
+of every hop included, so a stalled lookup cannot hold it past the limit),
+however slowly the bytes arrive. A download that fails leaves a warning naming the URL. An `http://` spec is never
 imported. Missing local specs also produce warnings
 instead of silently dropping that API tab's reference. AsyncAPI has no Thally
 renderer, so it always produces a clear warning naming the spec instead of
@@ -191,11 +217,12 @@ operations still have their pages. This is separate from a `directory`'s flat
 operation list, which still only drives the endpoint redirects.
 
 Mintlify serves one generated page per operation a navigation container lists,
-at `/<directory>/<first tag>/<summary>` (`directory` is the reference's
-`{ source, directory }` folder, `api-reference` when it is a plain string).
+at `/<directory>/<first tag>/<title>` (`directory` is the reference's
+`{ source, directory }` folder, `api-reference` when it is a plain string; an
+untagged operation has no tag folder).
 Each such operation becomes an MDX page at that path under `src/content`, so it
 keeps its URL, sidebar entry, eyebrow and previous/next links. Its frontmatter is
-the summary as `title` (else the operation id, else `METHOD /path`), the first
+the summary as `title` (else `<Method> <words of the path>`, never the operation id), the first
 sentence of the description as `description` (the title when there is none), and
 `openapi: "<spec file> METHOD /path"`; the body is empty. `descriptionPlacement: operation`
 keeps that short summary for search and metadata while the runtime renders the
@@ -224,10 +251,23 @@ the spec has none of the listed operations, or the tab is bound to another spec.
 A reference that lists no operation (Mintlify generated every endpoint) is not
 affected. Operations whose path item is a local `$ref` are read as the renderer
 reads them (hidden or excluded on any level of the reference withholds them).
+
+An authored page that names an operation (`openapi: post /links`) or a webhook
+(`openapi: webhook link.created`, read from the spec's `webhooks`) and sets neither
+a `title` nor a leading heading is titled by that operation, as Mintlify titles it:
+the summary, else the operation id, else `METHOD /path` (`POST link.created` for a
+webhook), where its file name would otherwise give it "Create" for `links/create.mdx`. A page that names its spec reads
+that spec; a bare reference reads the first spec that publishes the operation, so
+when a site has a remote spec, `hydrateRemoteApiSpecs` titles these pages once every
+spec is bound. A page whose operation no spec publishes (a remote spec that failed to
+download, say) keeps its file name title. `sidebarTitle` still becomes
+`navTitle`, and an authored title always wins.
 The renderer tries the first visible API tab's spec first for a bare
 `openapi: "METHOD /path"` page; when converting a tab to pages stops its spec being
 that one, each bare reference to an operation the converted spec defines is
 written with that spec's path in front, so it still renders the same operation.
+A spec a tab rejects (Thally binds one API spec per tab) has no binding, so no
+reference is moved to it.
 
 Mintlify `styling.eyebrows: "breadcrumbs"` becomes `eyebrow: "path"` (the full
 group path above the page title); `"section"` or no setting writes nothing.
@@ -258,10 +298,10 @@ no operation points to that section's overview page instead, and one warning
 lists the affected links (up to ten). A link to an address the site answers
 itself (a guide authored inside an API directory, trailing slash or `/index` or
 not, or the source of an authored redirect) is never rewritten. A spec that
-Mintlify mounted under a `directory` also gets a redirect from each endpoint URL that directory served
-(not the operations a container lists, which are pages at those URLs),
-to the matching endpoint page, and never to an operation the published spec
-withholds with `x-hidden` or `x-excluded`. A remote spec gets every directory
+Mintlify mounted under a `directory` also gets a redirect from each endpoint URL
+that directory served (not the operations a container lists, which are pages at
+those URLs), to the matching endpoint page, and never to an operation the
+published spec withholds with `x-hidden` or `x-excluded`. A remote spec gets every directory
 each of its tabs mounted it under, limited to the operations the navigation
 listed under a directory when it listed any. A local spec gets one directory
 per tab (the first) and every operation of the spec. When directories nest
@@ -274,11 +314,20 @@ id its spec is served under), so they stay as authored until then. A remote
 directory whose download failed still owns the addresses under it: they stay as
 authored, never rewritten or redirected. A link under any
 directory reaches only that directory's own endpoint URLs; a link under none is
-redirected by its last two segments (tag and summary) only when exactly one
+redirected by its last two segments (tag and title, as they appear in that URL) only when exactly one
 published operation across every spec carries them, to the id its spec is
 served under. A Mintlify default version's pages also get a redirect from their
 address without the version segment, since the original site serves them both
 ways.
+
+An endpoint URL Mintlify generates is `<directory>/<first tag>/<title>`: the
+title is the summary, else `<Method> <words of the path>` (the operation id is
+never used), an untagged operation has no tag folder, and an operation whose URL
+repeats an earlier one's gets `-1`, `-2` and so on after it, in the order the
+spec lists them. A navigation container (a group, tab or other) that names a
+spec without listing any of its operations had every one of them generated, under
+`api-reference` when it names no `directory`, so such a spec is mounted there
+too; the top-level `api` setting generates nothing.
 
 Redirects are checked once, after every platform and step has added its own.
 Next.js applies a redirect before it looks for a page and compares a source
@@ -302,7 +351,14 @@ URLs case-sensitively. Next.js reads a redirect source as a route pattern, so on
 whose address has a `+ ? ( ) [ ] { }` character (a `directory` such as
 `sdk/c++`) would fail the build; every redirect from authored config, a local
 spec or a downloaded spec is left out instead, and one warning lists the first
-ten of them.
+ten of them. A source that ends in a catch-all `/:name*` also matches the path
+without that segment, so when that path is a page of the site, or is where the
+redirect itself goes (`/docs/sdks/typescript/:path*` to `/docs/sdks/typescript`),
+the redirect would send the page to itself. Its source is rewritten to
+`/:name+`, which keeps redirecting every deeper path and leaves the page alone.
+For `/:name*` that path is the root `/`, which the site answers with its
+introduction page or with a redirect of its own, so such a catch-all
+(`/:path*` to `https://example.com/docs`) becomes `/:path+` in either case.
 
 A Mintlify page whose frontmatter `url` is a web address is a link in the
 source sidebar. It is imported as a page that is kept out of the sitemap, stays
@@ -313,14 +369,53 @@ purpose; a `url` that is not an `http(s)` address is ignored. The home page
 both redirect, and the redirect from `/` replaces the generated one to the first
 page. A redirect for `/` that the source site wrote stays, and a warning says so.
 
+An authored redirect (Mintlify and Fern `redirects`, Docusaurus
+`plugin-client-redirects`) starts at a path on the site and ends at another
+path on it or at an absolute `http(s)` address, which is kept exactly as written
+(`/docs/examples` to `https://github.com/dubinc/examples`). A destination that
+starts with `//`, uses another scheme such as `javascript:` or `data:`, or holds
+a backslash, whitespace, a control character, credentials or a bracketed IPv6
+host is left out for safety, and one warning lists the first ten sources skipped.
+Only the path of a destination is checked as route syntax: its query is kept as
+written (`https://example.com/?next=https://other.com`), and so is a fragment
+unless it holds a character Next.js reads as route syntax (`: * + ? ( ) { }`). An
+address whose host name, once its percent escapes are read, is not a valid one
+(letters, digits, hyphens, underscores and dots, then an optional port) is left out with a
+warning, since Next.js fails when it follows such a redirect. A `:name` in a
+destination that the source does not define is kept as text (its colon is written
+`%3A`), because Next.js fails when it has no value for it; a wildcard
+(`:name*`, `:name+`) the source does not have, or a wildcard of the source that
+the destination writes without its `*` or `+`, is left out with a warning. A
+redirect that still cannot be carried (a `:` inside a path segment such as
+`Category:Foo`, a `*` anywhere but as the whole last segment, or such a fragment)
+is left out with a warning that names that reason.
+A Mintlify source or destination written without its leading slash
+(`features/extract-beta`) is read as the path it names, as Mintlify's own site
+does, and one warning lists the first ten redirects given a slash; one starting
+with `./` or `../`, a source with a scheme, or a destination with a scheme other
+than `http:` or `https:` is left out like any other unsafe value. Fern
+and Docusaurus ask for a rooted path, so theirs are not read that way.
+A Mintlify or Fern redirect that does not set `permanent` is permanent (308), the
+default both platforms document, so search engines move to the new address;
+`permanent: false` stays temporary (307), and so do the route aliases, endpoint
+URLs and page links the migrator adds itself.
+
 A repository is limited to 5,000 documentation files and, separately, 5,000
 asset files. Past that, files are kept in navigation order with the default
 version first, then pages not listed in navigation, and one warning counts and
 names (the first three of) the pages left out and suggests `--docs-dir` to
 migrate a smaller part of the repository. Scanning itself stops after 100,000
-files with its own warning. Individual assets over 25 MB, or beyond 500 MB in
-total, are not copied; one warning per reason gives the count, the first five
-paths, and the next step (copy them into `public/` manually).
+files with its own warning. An asset is not copied when it is over 25 MB and no
+page uses it, over 100 MB when a page does, or when the copied assets would pass
+500 MB in total; one warning per reason gives the count, the first five paths,
+and the next step (copy them into `public/` manually). The budget is spent in
+order: the root stylesheet, the site's own scripts and fonts, and the files
+`docs.json` names (logo, favicon, background; a bare `logo.svg` counts like
+`/logo.svg`) first, then the assets pages use, then the rest, so a full budget
+never costs the site its branding. Cloudflare, including Thally Cloud, serves a
+static file only up to 25 MiB (26,214,400 bytes), so a copied asset over that
+size gets its own warning: a Cloudflare deploy fails until it is made smaller
+(for example, an animated GIF converted to a video) or hosted elsewhere.
 
 Headings written with an explicit `{#custom-id}` become a preceding
 `<a id="custom-id"></a>` anchor and keep their text, so links to that id still
@@ -509,8 +604,28 @@ For a copied client component that receives a simple page-authored JSX callback,
 the importer moves the callback into a client wrapper and keeps the page. If
 the callback cannot be moved safely, it keeps the page and the control's child
 content as a passive fallback, with a warning identifying the control. A
-stateful local snippet component is kept as a client component instead of
-flattening away its hooks and state.
+function the page imports from a copied module and passes as a prop to such a
+component (`badges={badgesFor}`) is imported by a client adapter instead, so
+the page never hands a function across the server boundary, however the module
+exports it (`export default format`, `export { format as f }`); an export that
+cannot be classified without running the module is moved too, since importing
+plain data inside a client module is just as safe (a `let` or `var` is one, as a later
+assignment may change it: only a `const` literal stays on the page). A tag gets one
+adapter for all of its function props, a page-authored callback and imported
+functions alike, so none is left crossing from the page; that holds for a
+component the page also uses as a value (`C={Widget}`), which keeps a real import
+instead of an alias. A client component gets the adapter for either kind of
+function. A copied server component keeps receiving an imported function from the
+page, as authored, and gets one for a page-authored callback only when it can run
+once wrapped: an async one (`export default async function Widget`) is left as
+authored, since wrapped it would be an async client component. A function prop
+that a later spread or a later prop of the same name overrides is never moved
+(the adapter would put it over them), and neither is a function passed as
+`children` (the adapter hands the component its own children): a page-authored
+callback then stays passive, and an imported function stays on the page, each
+with a warning. A stateful local
+snippet component is kept as a client component instead of flattening away its
+hooks and state.
 A component a page declares itself (`export const Counter = () => ...`) that
 calls a React hook is moved into its own `'use client'` module, together with
 every page-local component, helper and constant it uses (a sibling it renders,
@@ -524,7 +639,32 @@ over a same-named built-in. If any dependency cannot run in a client module
 the migration removed, a dynamic `import()`), the component is left where it
 is and a warning names it and the blocker.
 `<Snippet file="...">` accepts the documented `snippets/`-relative path as well
-as a `/snippets/...` or page-relative one. An outer code fence that contains a
+as a `/snippets/...` or page-relative one. A multi-line snippet keeps the
+indentation of the tag it replaces on every line (aligned with the item text
+after a list marker), so a list or block stays inside its `<Step>` or list item;
+lines inside a JS expression, and every line of a fenced code block, are left as
+written so a template literal and the code keep their text. The string props a snippet is called with are its variables, as on
+Mintlify: `{mode === "x" && ...}` and `props.mode` in the snippet read the
+value of `<Snippet mode="x" />` at each use, so the content a prop selects is
+kept. A prop binds only where its name is a free variable, which a scope
+analysis of the expression decides (`eslint-scope`): a name the snippet declares
+itself (a top-level `export const mode`, a function or an import, or a parameter,
+`var`, block, loop, `catch` clause or class around the use) is that declaration's,
+never the prop's, while a default parameter (`(x = mode) => { var mode }`) still
+reads the outer name. That includes `props` itself (`props.mode` binds only where
+the snippet does not declare `props`, and a callback parameter named `props`
+shields only its own uses of it). A property key, a member name after a dot, a
+label (`mode: for (...)`, `break mode`) and the name of a class member (method,
+field, accessor, `#private`) are names, not uses, and are never replaced; a
+computed key (`[mode]`) is a use.
+A bare `{mode}` follows the same rules, so a callback parameter or a declaration
+of that name keeps its own value there too; it becomes the value as text in a
+Markdown snippet and `{"value"}` in a JSX one; `{children}` becomes the children as
+written in text and as the child of an element inside an expression
+(`{mode === "x" && <Note>{children}</Note>}`) alike. A `{name}` inside a fenced code
+block is never replaced, and a fence closes only as CommonMark closes it (the same
+character, at least as long, nothing after it), so a three-backtick block inside a
+four-backtick one stays code. An outer code fence that contains a
 same-length nested fence is widened so the inner fence no longer closes it, and
 a bare placeholder tag in prose (`<Feature> requires a plan`) that would stop
 the page compiling is escaped as text rather than losing the page.
@@ -673,13 +813,62 @@ page. Those files are copied to `public/` (tooling config such as
 output, dot-directories, and `node_modules` are not) under the normal asset
 size limits. Scripts are added to `docs.json` `customScripts` (URL-encoded),
 except modules that pages import as components, which are copied as components
-instead. Thally cannot
-load a stylesheet from `docs.json`, so each `.css` is preserved with a warning
-that it is not applied and likely targets Mintlify's DOM. Fonts named by
+instead. Thally loads a local stylesheet that `docs.json` lists under
+`stylesheets`, but the migrator does not list the `.css` files it copies, since
+their rules likely target Mintlify's DOM: each is preserved with a warning that it
+is not applied. Fonts named by
 `fonts.source` (top level, `heading`, `body`) that are local `.woff`, `.woff2`,
-`.ttf`, or `.otf` files are copied; Thally's `fonts` setting loads Google Fonts
-by family only, so a warning says the file is not applied. Remote font URLs
-are not downloaded, and unsafe or missing paths are warned about.
+`.ttf`, or `.otf` files are copied. Thally's `fonts` setting loads Google Fonts
+by family only, so a font with a `source` of its own is not written to it (the
+page would ask Google for a family it does not have, and fail): the site keeps its
+default font, and one warning per font says so and how to use the copied file (an
+`@font-face` rule in a stylesheet in `public/` that `docs.json` lists under
+`stylesheets`, then `--font-heading` or `--font-sans`). A `source` that is a
+Google Fonts address (`fonts.googleapis.com`, `fonts.gstatic.com`) still loads by
+family. Remote font URLs are not downloaded, and unsafe or missing paths are
+warned about.
+
+The root `style.css` is the exception to that: it is projected, and the
+projection is listed under `stylesheets`. It keeps the rules for markup the
+migrated site authors (a class or id in a page, a script, or a copied component,
+including a class a component builds from a template or a family name of at
+least three characters) and skips those for Mintlify's own markup, the global
+reset and utility classes. Every rule it keeps is confined to the page content,
+so an imported stylesheet can never restyle the navbar, sidebar, table of
+contents, breadcrumbs, pagination, search or footer, whatever its classes, ids and
+variables are named. The content is the element the Thally runtime renders a
+page's content in (`.thally-docs-prose`), and `.x p` becomes
+`:where(.thally-docs-prose) .x p`; a leading `html`, `body`, `:root`, `.dark` or
+`.light` stays above it (`.dark :where(.thally-docs-prose) .x p`). A selector
+for the page itself (`html.x`, `body > .x`) is skipped, and so is one that starts
+with an `:is()` or `:where()` of which only some alternatives are the page
+(`:is(.dark, .x) .y`). `:root` and `.dark`
+blocks keep only the custom properties a kept rule reads, directly or through
+another kept property, and declare them on that element, so they reach the
+content and nothing around it; any other declaration in those blocks is left
+out. A rule nested inside another rule (CSS nesting) is skipped, since a nested
+selector is read relative to the rule around it; write it as a separate rule to
+keep it. A `@media` or `@supports` written inside a rule is kept, except inside a
+`:root` or `.dark` block, which takes custom properties and nothing else. A
+`@property` registration applies to the whole page, so it is kept only when a
+kept rule reads the property and the site's own `:root` or `.dark` block declares
+properties with the same prefix (`--ifx-` in `--ifx-glow`), which shows the name
+is the site's and not the shell's; any other is left out and named in a warning.
+Every `@layer` is kept, even an empty one or a bare `@layer a, b;`, since
+the order of the layers decides which rule wins. A keyframes name is global to the page, so a site's `spin` would replace
+the runtime's: each `@keyframes` is kept under a prefix of the site's own
+(`src-<id>-spin`, the id being that of the stylesheet's directory in
+`public/migrated/`), and the `animation` and `animation-name` declarations (and
+custom properties) that name it follow. `@font-face` is kept as written, and so
+is a `@counter-style` or `@font-palette-values` that a kept rule names (as it
+is, with whatever it names in turn). Any other at-rule that holds no style rule,
+such as `@page`, an unreferenced `@counter-style` or a stray `@namespace`, is
+left out. A warning counts the selectors and at-rules that were skipped. Thally renders a page in `mode: custom` with no such element, so the
+migration wraps that page's content (everything after its imports and exports)
+in `<div data-thally-source-page>`, and every rule is confined to that as well
+(`:where(.thally-docs-prose, [data-thally-source-page])`). A custom page that
+cannot take the wrapper (an export follows its content) is left as it was, and a
+warning says how many there are.
 
 Legacy `mint.json` `topbarLinks` and `topbarCtaButton` (including
 `type: github`) map to `navbar.links` and `navbar.primary`; `docs.json`

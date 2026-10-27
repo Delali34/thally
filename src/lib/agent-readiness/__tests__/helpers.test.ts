@@ -59,6 +59,9 @@ describe('findBrokenLinks', () => {
   it('compiles redirect sources without matching everything on bad input', () => {
     expect(compileRedirectSource('/docs/:id')!.test('/docs/a')).toBe(true)
     expect(compileRedirectSource('/docs/:id')!.test('/docs/a/b')).toBe(false)
+    expect(compileRedirectSource('/docs/:id*')!.test('/docs')).toBe(true)
+    expect(compileRedirectSource('/docs/:id+')!.test('/docs')).toBe(false)
+    expect(compileRedirectSource('/docs/:id+')!.test('/docs/a/b')).toBe(true)
     expect(compileRedirectSource('/a.b')!.test('/aXb')).toBe(false)
     expect(compileRedirectSource('no-leading-slash')).toBeNull()
   })

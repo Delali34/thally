@@ -50,3 +50,7 @@ description: "Document request parameters — body, query, path, and header."
 | `deprecated` | `boolean` | Marks the parameter as deprecated |
 | `default` | `any` | Default value shown inline |
 | `placeholder` | `string` | Suggested input shown by API tooling |
+
+## Linking to a field
+
+Every `<ParamField>` and `<ResponseField>` gets an anchor made from its name: `param-` followed by the name in kebab case, so `expiresInDays` is `#param-expires-in-days`. A name used twice on one page is numbered from `-1` (`#param-key-id`, `#param-key-id-1`), and a link to a field inside a collapsed `<Expandable>` opens it.

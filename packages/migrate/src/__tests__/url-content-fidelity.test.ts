@@ -75,6 +75,23 @@ describe('HTML code language fidelity', () => {
   })
 })
 
+describe('HTML description placement', () => {
+  const page = (head: string, article: string) => htmlPage({ body: `<html><head>${head}</head><body><article><h1>Guide</h1>${article}</article></body></html>`, finalUrl: new URL('https://docs.test/guide'), contentType: 'text/html' }, 'guide').page!
+
+  it('keeps a description taken from the page text out of the title area, since the body already shows it', () => {
+    const synthesised = page('', '<p>Install the client and create a link.</p>')
+    expect(synthesised.description).toContain('Install the client and create a link.')
+    expect(synthesised.descriptionPlacement).toBe('body')
+    expect(page('', '<ul><li></li></ul>').descriptionPlacement).toBe('body')
+  })
+
+  it('leaves the description the site published in its meta tag alone', () => {
+    const published = page('<meta name="description" content="Published summary.">', '<p>Install the client and create a link.</p>')
+    expect(published.description).toBe('Published summary.')
+    expect(published.descriptionPlacement).toBeUndefined()
+  })
+})
+
 describe('authored paragraph semantics', () => {
   it('keeps block card links as inert links instead of literal Markdown brackets', async () => {
     const body = '<article><h1>Home</h1><a href="/guide?section=first&amp;view=full" onclick="unsafe()"><div><strong>Guide</strong><p>Read the complete guide.</p></div></a><a href="https://example.test/sponsor"><div><img src="/logo.png" alt="Sponsor"></div></a></article>'

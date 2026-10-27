@@ -48,6 +48,7 @@ import langYaml from 'shiki/langs/yaml.mjs'
 import { visit } from 'unist-util-visit'
 import { getDocsJsonConfig } from '../lib/docs-json-config'
 import { plainInlineText } from '../lib/inline-code'
+import { componentIds, constantString, fieldAnchorBase, fieldAnchorName, numberFieldIds, numberHeadingIds } from '../lib/field-anchor'
 import { slugify } from '../lib/utils'
 import type { DocsJsonConfig } from '../data/docs'
 import { smartenTree } from './smart-quotes'
@@ -787,6 +788,32 @@ function jsxStringAttribute(node: JsxNode, name: string): string | null | undefi
   return typeof attribute.value === 'string' ? attribute.value : null
 }
 
+/**
+ * A string attribute: a literal, or a constant string in braces (`title={"Param name"}`),
+ * which hands a component the same string; `null` for any other expression, `undefined`
+ * when the attribute is absent.
+ */
+function jsxConstantAttribute(node: JsxNode, name: string): string | null | undefined {
+  const attribute = node.attributes?.find((item) => item.type === 'mdxJsxAttribute' && item.name === name)
+  if (!attribute) return undefined
+  return typeof attribute.value === 'string' ? attribute.value : constantString(attribute.value)
+}
+
+/** Give a JSX element an `id` attribute, replacing a literal one or a constant string in braces, which the pass numbers as it does a literal. Any other expression is the author's: it is kept. */
+function setJsxId(jsx: JsxNode, id: string): void {
+  const attributes = (jsx.attributes ??= [])
+  const existing = attributes.find((attribute) => attribute.type === 'mdxJsxAttribute' && attribute.name === 'id')
+  if (!existing) attributes.push({ type: 'mdxJsxAttribute', name: 'id', value: id })
+  else if (typeof existing.value === 'string' || constantString(existing.value) !== null) existing.value = id
+}
+
+/** A node as `renderedText` reads it: a hast element, text, or a JSX element or `{…}` expression MDX leaves in the tree. */
+interface TextNode {
+  type: string
+  value?: string
+  children?: Array<TextNode>
+}
+
 interface HeadingTarget {
   text: string
   /** An id the author fixed (`id` attribute or `{/* #id *\/}` comment). */
@@ -802,72 +829,92 @@ interface HeadingTarget {
  *
  * A `<Step>` whose title renders as a heading (`titleSize` h2, h3 or h4, on the
  * step or its `<Steps>`) is numbered with the rest and given the `id` its title
- * is rendered with, so the table of contents scrolls to it.
+ * is rendered with, so the table of contents scrolls to it. A step's own `id` is
+ * read as a literal or a constant string in braces; any other expression is kept
+ * as it is, and the step takes no id from the numbering.
+ *
+ * A heading made only of components (`## <Badge>Name</Badge>`) has no text of
+ * its own here, so it is numbered under the text its children render as, the id
+ * the heading component would otherwise slug for it (`renderedText`).
+ *
+ * A `<ParamField>` or `<ResponseField>` is given the anchor Mintlify serves for
+ * it (`param-expires-in-days`). Those are numbered once every heading has its id,
+ * so a field never takes a heading's id and never shifts one. A field with an
+ * `id` of its own keeps it. Every `id` an author wrote anywhere on the page (a
+ * field, a Step whose title is plain text, a Card, an HTML element) and every one
+ * a component makes from its text (an Accordion, an Update: `componentIds`) is
+ * skipped, so a generated field id never repeats one.
  */
 function rehypeUniqueHeadingIds() {
   return (tree: Root) => {
-    const occurrences = new Map<string, number>()
-    const usedIds = new Set<string>()
     const targets: Array<HeadingTarget> = []
+    const fields: Array<{ base: string; assign: (id: string) => void }> = []
+    const authoredIds = new Set<string>()
+    const componentGeneratedIds = new Set<string>()
     const text = (node: Element): string => node.children.map((child) =>
       child.type === 'text' ? child.value
         : child.type === 'element' ? text(child)
           : '').join('')
+    // What the heading component renders as text, which it slugs for a heading this pass gave no id: it adds the children of a component and a string in braces.
+    const renderedText = (node: TextNode): string => (node.children ?? []).map((child) =>
+      child.type === 'text' ? child.value ?? ''
+        : child.type === 'mdxTextExpression' ? constantString(child) ?? ''
+          : renderedText(child)).join('')
     const collect = (node: Element | JsxNode | Root, stepSize: string | undefined): void => {
       let childSize = stepSize
       if (node.type === 'element') {
         const element = node as Element
+        if (typeof element.properties?.id === 'string' && element.properties.id) authoredIds.add(element.properties.id)
         if (/^h[2-6]$/.test(element.tagName)) {
           const given = typeof element.properties?.id === 'string' && element.properties.id
             ? element.properties.id : takeHeadingIdMarker(element)
+          // A heading made only of components has no id of its own here, but the component slugs the text it renders: number that id with the rest.
+          const plain = text(element)
           targets.push({
-            text: text(element),
+            text: (slugify(plain) || given) ? plain : renderedText(element as unknown as TextNode),
             given: given || undefined,
             assign: (id) => { element.properties = { ...element.properties, id } },
           })
         }
       } else if (node.type === 'mdxJsxFlowElement' || node.type === 'mdxJsxTextElement') {
         const jsx = node as JsxNode
+        const authored = jsxConstantAttribute(jsx, 'id')?.trim()
+        if (authored) authoredIds.add(authored)
+        for (const id of componentIds(jsx.name ?? '', (attribute) => jsxConstantAttribute(jsx, attribute))) componentGeneratedIds.add(id)
         // `<Steps>` hands its size to every step below it, set or not (a React context).
         if (jsx.name === 'Steps') childSize = jsxStringAttribute(jsx, 'titleSize') ?? undefined
         if (jsx.name === 'Step') {
           const own = jsxStringAttribute(jsx, 'titleSize')
           const size = own === undefined ? stepSize : own
           const title = jsxStringAttribute(jsx, 'title')?.trim()
-          if (title && size && STEP_HEADING_SIZES.has(size)) {
+          // An id that is not a constant is whatever it holds when the page renders: the step keeps it and takes no id from the page's numbering.
+          const stepId = jsxConstantAttribute(jsx, 'id')
+          if (title && size && STEP_HEADING_SIZES.has(size) && stepId !== null) {
             targets.push({
               text: plainInlineText(title),
-              given: jsxStringAttribute(jsx, 'id')?.trim() || undefined,
-              assign: (id) => {
-                const attributes = (jsx.attributes ??= [])
-                const existing = attributes.find((attribute) => attribute.type === 'mdxJsxAttribute' && attribute.name === 'id')
-                if (existing) existing.value = id
-                else attributes.push({ type: 'mdxJsxAttribute', name: 'id', value: id })
-              },
+              given: stepId?.trim() || undefined,
+              assign: (id) => setJsxId(jsx, id),
             })
           }
+        }
+        if (jsx.name === 'ParamField' || jsx.name === 'ResponseField') {
+          const name = fieldAnchorName(jsx.name, (attribute) => jsxConstantAttribute(jsx, attribute))
+          const base = name === undefined ? undefined : fieldAnchorBase(name)
+          // A field with an `id` attribute of any kind keeps it: one that is an expression holds an id only the page knows.
+          if (base && jsxConstantAttribute(jsx, 'id') === undefined) fields.push({ base, assign: (id) => setJsxId(jsx, id) })
         }
       }
       for (const child of (node as JsxNode).children ?? []) collect(child, childSize)
     }
     collect(tree, undefined)
-    const reserved = new Set(targets.flatMap((target) => target.given ? [target.given] : []))
-    for (const target of targets) {
-      const base = target.given ?? slugify(target.text)
-      if (!base) continue
-      let id = base
-      let occurrence = 1
-      if (target.given) {
-        while (usedIds.has(id)) id = `${base}-${++occurrence}`
-      } else {
-        occurrence = occurrences.get(base) ?? 0
-        do id = ++occurrence === 1 ? base : `${base}-${occurrence}`
-        while (usedIds.has(id) || reserved.has(id))
-        occurrences.set(base, occurrence)
-      }
-      usedIds.add(id)
-      target.assign(id)
-    }
+    const { ids: headingIds, used: usedIds } = numberHeadingIds(targets.map((target) => ({ base: target.given ?? slugify(target.text), explicit: !!target.given })))
+    targets.forEach((target, index) => {
+      const id = headingIds[index]
+      if (id) target.assign(id)
+    })
+    // A field takes the id Mintlify gives it, numbered after the headings and skipping every id an author wrote or a component makes.
+    const ids = numberFieldIds(fields.map((field) => field.base), usedIds, [...authoredIds, ...componentGeneratedIds])
+    fields.forEach((field, index) => field.assign(ids[index]))
   }
 }
 

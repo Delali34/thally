@@ -206,6 +206,50 @@ describe('site-wide scripts, styles and fonts', () => {
     expect(messages.some((message) => /"B".*was not found/.test(message))).toBe(true)
   })
 
+  // docs.json of dub.co: a variable font the site hosts itself. Thally's `fonts` setting loads Google Fonts by family, so naming
+  // "Satoshi" makes every page request fonts.googleapis.com/css2?family=Satoshi, which answers 400.
+  const dubFonts = { heading: { family: 'Satoshi', source: '/fonts/Satoshi-Variable.woff2', format: 'woff2', weight: 700 } }
+
+  it('does not name the family of a self-hosted font, keeps its file, and says what to do instead', () => {
+    const bundle = site({
+      'docs.json': JSON.stringify({ navigation: { pages: ['intro'] }, fonts: { ...dubFonts, body: { family: 'Inter' } } }),
+      'intro.mdx': page('Intro'),
+      'fonts/Satoshi-Variable.woff2': 'font',
+    })
+    expect(bundle.docsConfig.fonts).toEqual({ body: { family: 'Inter' } })
+    expect(bundle.assets.map((asset) => asset.path)).toEqual(['fonts/Satoshi-Variable.woff2'])
+    const warnings = bundle.warnings.map((warning) => warning.message).filter((message) => message.includes('Self-hosted font'))
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain('"Satoshi" was not applied')
+    expect(warnings[0]).toContain('its file was copied to public/fonts/Satoshi-Variable.woff2')
+    for (const instruction of ['@font-face', '"stylesheets"', '--font-heading', '--font-sans']) expect(warnings[0]).toContain(instruction)
+    expect(warnings[0]).not.toContain('Inter')
+    expect(warnings[0]).not.toContain('still mapped')
+    const docsJson = JSON.parse(String(renderMigrationFiles(bundle).find((file) => file.path === 'docs.json')?.content))
+    expect(docsJson.fonts).toEqual({ body: { family: 'Inter' } })
+  })
+
+  it('names no family for a self-hosted font written at the top level, or hosted at another address', () => {
+    for (const fonts of [
+      { family: 'Mine', source: '/fonts/mine.woff2', format: 'woff2' },
+      { body: { family: 'Remote', source: 'https://cdn.example/r.woff2', format: 'woff2' } },
+      { heading: { family: 'Missing', source: '/fonts/missing.woff2', format: 'woff2' } },
+    ]) {
+      const bundle = site({ 'docs.json': JSON.stringify({ navigation: { pages: ['intro'] }, fonts }), 'intro.mdx': page('Intro'), 'fonts/mine.woff2': 'font' })
+      expect(bundle.docsConfig.fonts, JSON.stringify(fonts)).toBeUndefined()
+      expect(bundle.warnings.filter((warning) => warning.message.includes('Self-hosted font'))).toHaveLength(1)
+    }
+  })
+
+  it('keeps the family of a font whose source is Google Fonts itself, and says nothing about it', () => {
+    const bundle = site({
+      'docs.json': JSON.stringify({ navigation: { pages: ['intro'] }, fonts: { body: { family: 'Inter', source: 'https://fonts.gstatic.com/s/inter/v13/x.woff2', format: 'woff2' } } }),
+      'intro.mdx': page('Intro'),
+    })
+    expect(bundle.docsConfig.fonts).toEqual({ body: { family: 'Inter' } })
+    expect(bundle.warnings.some((warning) => warning.message.includes('font'))).toBe(false)
+  })
+
   it('applies the asset size cap to scripts', () => {
     const bundle = site({
       'docs.json': JSON.stringify({ navigation: { pages: ['intro'] } }),
@@ -981,6 +1025,51 @@ describe('custom stylesheet migration', () => {
     expect(warnings[0].source).toBe('style.css')
     expect(warnings[0].message).toMatch(/Skipped 1 stylesheet selector/)
     expect(bundle.docsConfig.stylesheets).toBeUndefined()
+  })
+
+  it('reports a rule nested inside another rule, which Thally cannot confine to the page content', () => {
+    const bundle = site({
+      'docs.json': JSON.stringify({ navigation: { pages: ['a'] } }),
+      'a.mdx': '---\ntitle: A\n---\n\n<div className="widget">Hi</div>\n',
+      'style.css': '.widget { color: red; &:hover { color: blue } :is(&, :root) .lucide { display: none } }\n',
+    })
+    const warnings = cssWarnings(bundle)
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0].message).toMatch(/Skipped 2 rules nested inside other rules/)
+  })
+
+  it('reports a registered custom property it left out', () => {
+    const bundle = site({
+      'docs.json': JSON.stringify({ navigation: { pages: ['a'] } }),
+      'a.mdx': '---\ntitle: A\n---\n\n<div className="widget">Hi</div>\n',
+      'style.css': '@property --docs-bg { syntax: "<color>"; inherits: false; initial-value: red }\n.widget { color: red }\n',
+    })
+    const warnings = cssWarnings(bundle)
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0].message).toMatch(/Left out of the style\.css stylesheet: @property --docs-bg/)
+  })
+
+  it('gives the keyframes of the stylesheet a prefix of the site\'s own, so none replaces one of the runtime', () => {
+    const bundle = site({
+      'docs.json': JSON.stringify({ navigation: { pages: ['a'] } }),
+      'a.mdx': '---\ntitle: A\n---\n\n<div className="widget">Hi</div>\n',
+      'style.css': '@keyframes spin { to { opacity: 1 } }\n.widget { animation: spin 1s }\n',
+    })
+    const sheet = bundle.assets.find((asset) => /migrated\/[0-9a-f]{12}\/style\.css$/.test(asset.path))
+    const prefix = /migrated\/([0-9a-f]{12})\/style\.css$/.exec(sheet?.path ?? '')?.[1]
+    expect(String(sheet?.content)).toContain(`@keyframes src-${prefix}-spin`)
+    expect(String(sheet?.content)).toContain(`animation: src-${prefix}-spin 1s`)
+  })
+
+  it('counts the at-rules it left out in the same warning as the selectors', () => {
+    const bundle = site({
+      'docs.json': JSON.stringify({ navigation: { pages: ['a'] } }),
+      'a.mdx': '---\ntitle: A\n---\n\n<div className="widget">Hi</div>\n',
+      'style.css': '@page { margin: 0 }\n@counter-style unused { system: cyclic; symbols: "a" }\n#navbar { color: red }\n.widget { color: red }\n',
+    })
+    const warnings = cssWarnings(bundle)
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0].message).toMatch(/Skipped 1 stylesheet selector .* and 2 at-rules \(@page, @counter-style unused\)/)
   })
 
   it('does not warn when there is no stylesheet', () => {

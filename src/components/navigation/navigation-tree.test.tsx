@@ -42,6 +42,29 @@ describe('sidebar current page', () => {
   })
 })
 
+describe('sidebar entries for redirected pages', () => {
+  const nodes = [
+    { type: 'page', item: { id: 'agent', title: 'infisical agent', href: '/cli/reference/agent', redirectTo: '/cli/reference#agent' } },
+    { type: 'page', item: { id: 'site', title: 'Website', href: '/website', redirectTo: 'https://example.com/site' } },
+  ] as Array<NavigationNode>
+
+  it('links to where the redirect ends and keeps the page route for the active state', () => {
+    const html = renderToStaticMarkup(<NavigationTree nodes={nodes} pathname="/cli/reference/agent" />)
+    expect(html).toContain('href="/cli/reference#agent" aria-current="page"')
+    expect(html).not.toContain('href="/cli/reference/agent"')
+    // The page the redirect lands on does not select the entry that leads to it.
+    expect(renderToStaticMarkup(<NavigationTree nodes={nodes} pathname="/cli/reference" />)).not.toContain('aria-current')
+  })
+
+  it('opens an external destination as an external link', () => {
+    const html = renderToStaticMarkup(<NavigationTree nodes={nodes} pathname="/" />)
+    const link = html.match(/<a [^>]*href="https:\/\/example\.com\/site"[^>]*>/)?.[0]
+    expect(link).toContain('target="_blank"')
+    expect(link).toContain('rel="noreferrer"')
+    expect(html.match(/target="_blank"/g)).toHaveLength(1)
+  })
+})
+
 describe('sidebar API method pills', () => {
   it('prefixes operation pages with their complete HTTP method', () => {
     const nodes = [

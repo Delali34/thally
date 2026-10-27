@@ -166,6 +166,8 @@ export interface MigrationPage {
   navigationId: string
   locale?: string
   title: string
+  /** Set on a page that names an OpenAPI operation, whose title came from its file name because the source gave it none: the bound operation can title it instead. */
+  titleFromFileName?: true
   /** Authored display H1 when the source uses a different metadata title. */
   headingTitle?: string
   navTitle?: string
@@ -180,7 +182,7 @@ export interface MigrationPage {
   mode?: 'default' | 'wide' | 'custom' | 'center' | 'home'
   hidden?: boolean
   noindex?: boolean
-  /** Mintlify frontmatter `url`: a web address the page's sidebar entry leaves for, which the page's own path redirects to. */
+  /** Mintlify frontmatter `url`: a web address, or a path of the site, that the page's sidebar entry leaves for and the page's own path redirects to. */
   externalUrl?: string
   /**
    * Reader access groups (frontmatter `groups`): trimmed, non-empty names the
@@ -273,6 +275,12 @@ export interface MigrationBundle {
    * URLs are those pages, so nothing is redirected from them.
    */
   localApiMounts?: Array<{ filename: string; directory: string; tab?: string; endpointOperations?: Array<string> }>
+  /**
+   * The `api.source` of each hidden tab the migrator made for a spec only pages name. The tabs are told apart by data that stays beside
+   * docs.json, never in it: a bundle sent between threads keeps a tab's data and nothing else, and an author may give any tab any label.
+   * Present only alongside remote specs, which hydration binds to tabs once the bundle has been sent.
+   */
+  pageOnlySpecs?: Array<string>
   /** Customer-owned component source and registry; paths are repository-relative. */
   componentFiles?: Array<RenderedMigrationFile>
   /**

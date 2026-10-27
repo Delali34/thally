@@ -34,6 +34,7 @@ export { slugify, updateAnchorId } from './slugify.js'
 // Content pipeline.
 export {
   parseMdxContent,
+  parseMdxTree,
   projectMdxAudience,
   getContentDocument,
   loadContentDocument,

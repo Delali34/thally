@@ -240,10 +240,14 @@ Defaults to the current directory if no path is given.
 | Page listed in `docs.json` but no MDX file found | Error |
 | Page reused in more than one `docs.json` section | Warning |
 | Tab with no groups and no `href` | Error |
+| MDX syntax error in a page or in a `snippets/` file, such as a JSX attribute with escaped quotes (it cannot be parsed, so it cannot render) | Error |
 | MDX file not listed in `docs.json` (orphan) | Warning |
 | Missing `title` in frontmatter | Warning |
 | Missing `description` in frontmatter | Warning |
 | Empty or near-empty page body | Warning |
+| Redirect from a link-only page that ends at a missing page or loops | Error |
+
+A page that only stands in for a link elsewhere (a `noindex` page whose own address redirects to another site or to a path on this one, which a migrated Mintlify `url` entry becomes) is not checked for a `description` or a body, because no visitor reads it. That holds only while the redirect leads somewhere: if it ends at a page that does not exist, or comes back to itself, the check reports the broken redirect and keeps the notices about the page.
 
 ```bash
 # Check the current project
@@ -257,6 +261,8 @@ npx create-thally-docs check --fix
 ```
 
 The CLI exits with code `1` if any errors are found, `0` if the project is clean or only has warnings.
+
+The MDX check reads each file with the parser the site renders with, so it catches syntax errors only. A page that parses can still fail to compile, for example when it declares two default exports.
 
 ### Options
 

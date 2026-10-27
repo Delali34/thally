@@ -76,6 +76,16 @@ const languageNames: Record<string, string> = {
   vue: 'Vue',
 }
 
+/**
+ * A prop read off a child element holds whatever its author wrote, so only a
+ * string counts as a source, a language or an icon name; anything else is
+ * ignored as if it were absent. A label or a title that is JSX is not text,
+ * and a panel that draws it as a node is fine to keep it.
+ */
+function textOnly(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined
+}
+
 /** Resolve authored labels and known fence grammars consistently across sample wrappers. */
 export function getPanelTitle({
   title,
@@ -215,7 +225,7 @@ function CodePanel({
   const [expanded, setExpanded] = useState<boolean | null>(null)
   const preId = useId()
   const preRef = useRef<HTMLPreElement>(null)
-  useCompiledParameterLinks(preRef, code ?? findCodePayload(children) ?? '')
+  useCompiledParameterLinks(preRef, textOnly(code) ?? findCodePayload(children) ?? '')
   const renderableChildren = getRenderableChildren(children)
   if (!renderableChildren.length) {
     return null
@@ -228,7 +238,7 @@ function CodePanel({
   function getLanguageClassName() {
     const probe = renderableChildren.find((child) => isValidElement(child))
     if (!probe) return ''
-    const className = (probe.props as { className?: string }).className ?? ''
+    const className = textOnly((probe.props as { className?: unknown }).className) ?? ''
     const match = className.match(/language-[\w-]+/)
     return match?.[0] ?? ''
   }
@@ -237,10 +247,10 @@ function CodePanel({
 
   let resolvedTag = tag
   let resolvedLabel = label
-  let resolvedCode = code
-  let resolvedLanguage = language
+  let resolvedCode = textOnly(code)
+  let resolvedLanguage = textOnly(language)
   let resolvedWrap = isFlagOn(wrap)
-  let resolvedIcon = icon
+  let resolvedIcon = textOnly(icon)
   let resolvedLines = isFlagOn(lines)
   let resolvedExpandable = isFlagOn(expandable)
   let resolvedNocopy = isFlagOn(nocopy)
@@ -266,10 +276,10 @@ function CodePanel({
     }
     resolvedTag = props.tag ?? resolvedTag
     resolvedLabel = props.label ?? props.title ?? resolvedLabel
-    resolvedCode = props.code ?? resolvedCode
-    resolvedLanguage = props.language ?? resolvedLanguage
+    resolvedCode = textOnly(props.code) ?? resolvedCode
+    resolvedLanguage = textOnly(props.language) ?? resolvedLanguage
     resolvedWrap = resolvedWrap || isFlagOn(props.wrap)
-    resolvedIcon = props.icon ?? resolvedIcon
+    resolvedIcon = textOnly(props.icon) ?? resolvedIcon
     resolvedLines = resolvedLines || isFlagOn(props.lines)
     resolvedExpandable = resolvedExpandable || isFlagOn(props.expandable)
     resolvedNocopy = resolvedNocopy || isFlagOn(props.nocopy)
@@ -373,8 +383,12 @@ export function CodeGroup({
 }: ComponentPropsWithoutRef<typeof CodePanel> & { title?: string; selection?: 'language' | 'status'; menuLabel?: string }) {
   const t = useApiLabels()
   const items = useMemo(() => getRenderableChildren(children), [children])
-  const languages = useMemo(() => items.map((child) => getPanelTitle(isValidElement(child) ? child.props as { title?: string; tag?: string; language?: string } : {})), [items])
-  const aliases = items.map((child, index) => [languages[index], isValidElement(child) ? (child.props as { language?: string }).language : undefined].filter((value): value is string => Boolean(value)).map(normalizeDocsLanguage))
+  // The menu names each sample in text; a title or tag that is JSX is drawn by the panel itself, never normalised here.
+  const languages = useMemo(() => items.map((child) => {
+    const { title, tag, language } = isValidElement(child) ? child.props as Record<string, unknown> : {}
+    return getPanelTitle({ title: textOnly(title), tag: textOnly(tag), language: textOnly(language) })
+  }), [items])
+  const aliases = items.map((child, index) => [languages[index], isValidElement(child) ? textOnly((child.props as { language?: unknown }).language) : undefined].filter((value): value is string => Boolean(value)).map(normalizeDocsLanguage))
   const [preferredLanguage, setPreferredLanguage] = useDocsLanguage(aliases.flat())
   const matchingIndex = aliases.findIndex((names) => names.includes(preferredLanguage))
   const [selectedStatus, setSelectedStatus] = useState(0)
@@ -383,14 +397,14 @@ export function CodeGroup({
   const selected = items[selectedIndex]
   const hasVariants = items.length > 1
   const hasGroupHeader = Boolean(title || hasVariants)
-  const selectedProps = isValidElement(selected) ? selected.props as { code?: string; nocopy?: boolean | string; language?: string; icon?: string } : {}
+  const selectedIcon = isValidElement(selected) ? textOnly((selected.props as { icon?: unknown }).icon) : undefined
 
   return (
     <CodeGroupContext.Provider value={true}>
       <div className={`thally-docs-code relative my-5 overflow-hidden rounded-xl border${selection === 'status' ? ' thally-response-example' : ''}`}>
         <div className="not-prose">
           {hasGroupHeader && <div className="thally-code-header thally-code-group-header !pr-[104px]">
-            {selectedProps.icon && <Icon icon={selectedProps.icon} size={14} className="h-3.5 w-3.5 text-muted-foreground" />}
+            {selectedIcon && <Icon icon={selectedIcon} size={14} className="h-3.5 w-3.5 text-muted-foreground" />}
             <span className="thally-code-title text-xs font-semibold">{title ?? 'Code'}</span>
             {hasVariants && selection === 'status' && <div role="tablist" aria-label={t('responseStatus')} className="tc-statuses">{languages.map((label, index) => <button type="button" role="tab" key={index} id={`${groupId}-tab-${index}`} aria-controls={`${groupId}-panel-${index}`} aria-selected={index === selectedIndex} tabIndex={index === selectedIndex ? 0 : -1} className={`tc-st${/^[45]/.test(label) ? ' err' : ''}`} onClick={() => setSelectedStatus(index)} onKeyDown={(event) => {
               if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return

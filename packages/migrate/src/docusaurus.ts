@@ -16,6 +16,7 @@ import { parse as parseYaml } from 'yaml'
 
 import type { MarkdownPageIdentity } from './mdx.js'
 import { isRedirectPathSafe, translateRedirectWildcards } from './navigation.js'
+import { skippedRedirectsWarning } from './redirects.js'
 import { pageIdFromReference, resolveWithin, slugifySegment, withinRealRoot } from './path.js'
 import type {
   MigrationDocsConfig,
@@ -707,21 +708,27 @@ function redirectEntriesFromObjectLiteralText(
   }
   if (!Array.isArray(parsed)) return []
   const entries: Array<{ source: string; destination: string }> = []
+  const unsafeRedirects: Array<string> = []
   for (const raw of parsed) {
     const entry = objectValue(raw)
     if (!entry || typeof entry.to !== 'string') continue
     const froms = Array.isArray(entry.from) ? entry.from : [entry.from]
     for (const from of froms) {
       if (typeof from !== 'string') continue
-      if (!isRedirectPathSafe(from, entry.to)) continue
+      if (!isRedirectPathSafe(from, entry.to)) {
+        unsafeRedirects.push(from)
+        continue
+      }
       const translated = translateRedirectWildcards(from, entry.to)
-      if (!translated) {
-        warnings.push({ code: 'unsupported-config', message: `Redirect from ${from} uses a wildcard Next.js cannot express and was dropped.` })
+      if ('warning' in translated) {
+        warnings.push({ code: 'unsupported-config', message: translated.warning })
         continue
       }
       entries.push(translated)
     }
   }
+  const unsafeRedirectWarning = skippedRedirectsWarning(unsafeRedirects)
+  if (unsafeRedirectWarning) warnings.push(unsafeRedirectWarning)
   return entries
 }
 

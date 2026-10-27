@@ -7,7 +7,7 @@
  * also re-exported from the main barrel; the two entries share compiled chunks,
  * so mixing them never duplicates code.
  */
-export { parseMdxContent } from './parse.js'
+export { parseMdxContent, parseMdxTree } from './parse.js'
 export { projectMdxAudience } from './audience.js'
 export { markdownToPlainText } from './plain-text.js'
 export { isSafeContentIdentifier } from './identifiers.js'

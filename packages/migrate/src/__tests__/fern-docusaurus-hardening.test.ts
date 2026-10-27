@@ -342,6 +342,43 @@ describe('Docusaurus redirects', () => {
     const root = docusaurusSite({ 'docusaurus.config.js': configWith(`{ from: '/a', to: '${to}' }`) })
     expect(readDocusaurusRedirects(root, [])).toEqual([])
   })
+
+  it('names every rejected redirect in one warning, including each path of a list', () => {
+    const root = docusaurusSite({ 'docusaurus.config.js': configWith("{ from: ['/a', '/b'], to: '//evil.example' }, { from: '/c', to: 'javascript:alert(1)' }, { from: '/ok', to: '/fine' }") })
+    const warnings: Array<{ message: string }> = []
+    expect(readDocusaurusRedirects(root, warnings as never)).toEqual([{ source: '/ok', destination: '/fine' }])
+    expect(warnings.map((warning) => warning.message)).toEqual([
+      'Skipped 3 redirects from /a, /b, /c: a redirect must start at a path on this site (one beginning with a single /) and lead to a path on this site or to an http:// or https:// address. Check these redirects in the source docs and add any that are still needed to docs.json.',
+    ])
+  })
+
+  it('keeps a destination that is an absolute http(s) address, and says nothing', () => {
+    const root = docusaurusSite({ 'docusaurus.config.js': configWith("{ from: '/a', to: 'https://example.com/b' }") })
+    const warnings: Array<{ message: string }> = []
+    expect(readDocusaurusRedirects(root, warnings as never)).toEqual([{ source: '/a', destination: 'https://example.com/b' }])
+    expect(warnings).toEqual([])
+  })
+})
+
+describe('Docusaurus and Fern redirects with a colon outside the path, or inside a path segment', () => {
+  it('keeps a Docusaurus redirect whose destination query holds a colon, and names the real reason for one it drops', () => {
+    const root = docusaurusSite({ 'docusaurus.config.js': "module.exports = { plugins: [['@docusaurus/plugin-client-redirects', { redirects: [{ from: '/a', to: 'https://example.com/?next=https://other.com' }, { from: '/wiki/Category:Foo', to: '/x' }] }]] }" })
+    const warnings: Array<{ message: string }> = []
+    expect(readDocusaurusRedirects(root, warnings as never)).toEqual([{ source: '/a', destination: 'https://example.com/?next=https://other.com' }])
+    expect(warnings.map((warning) => warning.message)).toEqual([expect.stringMatching(/^Redirect from \/wiki\/Category:Foo has a path segment, "Category:Foo", with a ":" in it/)])
+  })
+
+  it('does the same for Fern', () => {
+    const result = projectFernNavigation({
+      fernRoot: tmpdir(),
+      config: { navigation: [], redirects: [
+        { source: '/a', destination: 'https://example.com/?next=https://other.com' },
+        { source: '/wiki/Category:Foo', destination: '/x' },
+      ] },
+    })
+    expect(result.docsConfig.redirects).toEqual([{ source: '/a', destination: 'https://example.com/?next=https://other.com', permanent: true }])
+    expect(result.warnings.map((warning) => warning.message).filter((message) => message.startsWith('Redirect from'))).toEqual([expect.stringMatching(/^Redirect from \/wiki\/Category:Foo has a path segment, "Category:Foo", with a ":" in it/)])
+  })
 })
 
 describe('inlined partial size cap', () => {

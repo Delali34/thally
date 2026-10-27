@@ -36,17 +36,76 @@ export function resolveIconLibrary(value: unknown): IconLibrary {
 }
 
 /**
- * Font Awesome brand slugs that have no inline equivalent yet. They resolve to
- * the Font Awesome brands set under every library so migrated Mintlify content
- * keeps its logos.
+ * The names Font Awesome Free 7.3.1 ships in its `brands` set (aliases included), listed from
+ * the package's `svgs/brands` directory. Each resolves to its brands file under every library,
+ * so migrated Mintlify content keeps its logos (`hubspot`, `stripe-s`, `webflow`); without
+ * this a name Free ships only as a brand is requested from `solid`, which has no such file.
+ * An inline brand mark still wins over the file where one exists. `font-awesome`,
+ * `font-awesome-flag`, `font-awesome-logo-full` and `web-awesome` are left out: Free also
+ * ships them in `solid` (as a flag, for the first three), and a name given with no style
+ * means that glyph. An explicit `brands` style still reaches the logo.
  */
-export const FONT_AWESOME_BRAND_NAMES: ReadonlySet<string> = new Set([
-  'amazon', 'atlassian', 'aws', 'behance', 'bitcoin', 'chrome', 'codepen', 'confluence', 'dev',
-  'dribbble', 'dropbox', 'edge', 'ethereum', 'facebook', 'firefox', 'google', 'google-drive',
-  'hashnode', 'instagram', 'jira', 'linkedin', 'medium', 'microsoft', 'openai', 'paypal',
-  'pinterest', 'reddit', 'safari', 'salesforce', 'slack', 'spotify', 'stack-overflow', 'telegram',
-  'tiktok', 'trello', 'twitch', 'unity', 'whatsapp', 'windows',
-])
+export const FONT_AWESOME_BRAND_NAMES: ReadonlySet<string> = new Set(`
+  11ty 42-group 500px a11y-project accessible-icon accusoft adn adversal affiliatetheme airbnb algolia alipay
+  amazon amazon-pay amilia android angellist angrycreative angular app-store app-store-ios apper apple apple-pay
+  arch-linux artstation asymmetrik atlassian audible autoprefixer avianex aviato aws bandcamp battle-net behance
+  behance-square bgg bilibili bimobject bitbucket bitcoin bity black-tie blackberry blogger blogger-b bluesky
+  bluetooth bluetooth-b board-game-geek bootstrap bots brave brave-reverse btc buffer build-awesome
+  buromobelexperte buy-n-large buysellads canadian-maple-leaf cash-app cc-amazon-pay cc-amex cc-apple-pay
+  cc-diners-club cc-discover cc-jcb cc-mastercard cc-paypal cc-stripe cc-visa centercode centos chrome
+  chromecast circle-zulip cloudflare cloudscale cloudsmith cloudversify cmplid codeberg codepen codiepie
+  confluence connectdevelop contao copilot cotton-bureau cpanel creative-commons creative-commons-by
+  creative-commons-nc creative-commons-nc-eu creative-commons-nc-jp creative-commons-nd creative-commons-pd
+  creative-commons-pd-alt creative-commons-remix creative-commons-sa creative-commons-sampling
+  creative-commons-sampling-plus creative-commons-share creative-commons-zero critical-role css css3 css3-alt
+  cuttlefish d-and-d d-and-d-beyond dailymotion dart-lang dashcube debian deezer delicious deploydog deskpro dev
+  deviantart devpost dhl diaspora digg digital-ocean discord discourse disqus dochub docker dolibarr
+  draft2digital dribbble dribbble-square dropbox drupal duolingo dyalog earlybirds ebay edge edge-legacy
+  elementor eleventy ello ember empire envira erlang ethereum etsy evernote expeditedssl facebook facebook-f
+  facebook-messenger facebook-square fantasy-flight-games fedex fediverse fedora figma files-pinwheel firefox
+  firefox-browser first-order first-order-alt firstdraft flickr flipboard flutter fly font-awesome-alt fonticons
+  fonticons-fi forgejo fort-awesome fort-awesome-alt forumbee foursquare free-code-camp freebsd fulcrum
+  galactic-republic galactic-senate get-pocket gg gg-circle git git-alt git-square gitee github github-alt
+  github-square gitkraken gitlab gitlab-square gitter glide glide-g globaleaks gofore golang goodreads
+  goodreads-g google google-drive google-pay google-play google-plus google-plus-g google-plus-square
+  google-scholar google-wallet gratipay grav gripfire grunt guilded gulp hacker-news hacker-news-square
+  hackerrank hashnode hips hire-a-helper hive hooli hornbill hotjar houzz html5 hubspot hugging-face ideal imdb
+  innosoft instagram instagram-square instalod intercom internet-archive internet-explorer invision ioxhost
+  itch-io itunes itunes-note java jedi-order jenkins jira joget joomla js js-square jsfiddle julia jxl kaggle
+  kakao-talk keybase keycdn kickstarter kickstarter-k ko-fi korvue kubernetes laravel lastfm lastfm-square
+  leanpub leetcode less lets-encrypt letterboxd line linkedin linkedin-in linktree linode linux lumon lumon-drop
+  lyft magento mailchimp mandalorian markdown mastodon matrix mattermost maxcdn mdb medapps medium medium-m
+  medrt meetup megaport mendeley meta microblog microsoft mintbit mix mixcloud mixer mizuni modx monero napster
+  neos nextcloud nfc-directional nfc-symbol nimblr node node-js notion npm ns8 nutritionix obs-studio obsidian
+  octopus-deploy odnoklassniki odnoklassniki-square odysee old-republic openai opencart openid openstreetmap
+  opensuse opera optin-monster orcid osi padlet page4 pagelines palfed pandora patreon paypal perbyte periscope
+  phabricator phoenix-framework phoenix-squadron php pied-piper pied-piper-alt pied-piper-hat pied-piper-pp
+  pied-piper-square pinterest pinterest-p pinterest-square pix pixelfed pixiv playstation postgresql
+  product-hunt pushed python qq quinscape quora r-project raspberry-pi ravelry react reacteurope readme rebel
+  red-river reddit reddit-alien reddit-square redhat rendact renren replyd researchgate resolving rev
+  roblox-creator-studio rocketchat rockrms ror rust safari salesforce sass scaleway schlix screenpal scribd
+  searchengin sellcast sellsy servicestack shirtsinbulk shoelace shopify shopware signal-messenger simplybuilt
+  sistrix sith sitrox sketch skyatlas skype slack slack-hash slideshare snapchat snapchat-ghost snapchat-square
+  solana soundcloud sourcetree space-awesome speakap speaker-deck spotify square-behance square-bluesky
+  square-build-awesome-stroke square-deskpro square-dribbble square-facebook square-figma square-font-awesome
+  square-font-awesome-stroke square-git square-github square-gitlab square-google-plus square-hacker-news
+  square-instagram square-js square-kickstarter square-lastfm square-letterboxd square-linkedin
+  square-odnoklassniki square-pied-piper square-pinterest square-reddit square-snapchat square-steam
+  square-threads square-tumblr square-twitter square-upwork square-viadeo square-vimeo square-web-awesome
+  square-web-awesome-stroke square-whatsapp square-x-twitter square-xing square-youtube squarespace
+  stack-exchange stack-overflow stackpath staylinked steam steam-square steam-symbol sticker-mule storybook
+  strava stripe stripe-s stubber studiovinari stumbleupon stumbleupon-circle substack superpowers supple
+  supportnow suse svelte swift symfony symfonycasts tailwind-css teamspeak telegram telegram-plane tencent-weibo
+  tesla tex the-red-yeti themeco themeisle think-peaks threads threema tidal tiktok tor-browser trade-federation
+  trello tumblr tumblr-square twitch twitter twitter-square typescript typo3 uber ubuntu uikit ultralytics
+  ultralytics-hub ultralytics-yolo umbraco uncharted uniregistry unison unity unreal-engine unsplash untappd ups
+  upwork usb usps ussunnah vaadin venmo venmo-v viacoin viadeo viadeo-square viber vim vimeo vimeo-square
+  vimeo-v vine visual-studio vk vnv vsco vuejs w3c watchman-monitoring waze webflow weebly weibo weixin whatsapp
+  whatsapp-square whmcs wikipedia-w windows wirsindhandwerk wix wizards-of-the-coast wodu wolf-pack-battalion
+  wordpress wordpress-simple wpbeginner wpexplorer wpforms wpressr wsh x-twitter xbox xing xing-square xmpp xrp
+  xrpl y-combinator yahoo yammer yandex yandex-international yarn yelp yoast youtube youtube-shorts
+  youtube-square zhihu zoom zulip
+`.split(/\s+/).filter(Boolean))
 
 /**
  * Font Awesome Pro-only names (Mintlify's default set is Pro) mapped to the
@@ -63,6 +122,9 @@ export const FONT_AWESOME_PRO_FALLBACKS: Readonly<Record<string, string>> = {
   'rectangle-terminal': 'lucide:square-terminal', 'messages-question': 'lucide:message-circle-question',
   'message-bot': 'lucide:bot-message-square', books: 'lucide:library',
   'code-change': 'code-compare',
+  // Names the Dub docs use.
+  'arrow-progress': 'lucide:arrow-right-to-line', 'grid-2': 'table-cells-large', window: 'lucide:app-window',
+  'user-crown': 'lucide:user-star',
   'alarm-exclamation': 'lucide:alarm-clock', 'bullseye-pointer': 'lucide:target', 'diagram-subtask': 'lucide:list-tree',
   'gauge-simple-low': 'lucide:gauge', 'message-lines': 'lucide:message-square-text', 'microchip-ai': 'lucide:cpu',
   'rectangle-history': 'lucide:gallery-vertical-end', snake: 'lucide:worm', 'spinner-third': 'lucide:loader',

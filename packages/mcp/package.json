@@ -1,6 +1,6 @@
 {
   "name": "@thallylabs/mcp",
-  "version": "0.10.124",
+  "version": "0.10.125",
   "description": "MCP server for managing Thally docs and tracing product changes into evidence-backed updates for human review.",
   "type": "module",
   "engines": {
@@ -38,8 +38,8 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.36.0",
     "@modelcontextprotocol/sdk": "^1.15.0",
-    "@thallylabs/core": "0.2.17",
-    "create-thally-docs": "0.10.122",
+    "@thallylabs/core": "0.2.18",
+    "create-thally-docs": "0.10.123",
     "p-limit": "^6.1.0",
     "yaml": "^2.8.2",
     "zod": "^3.0.0"

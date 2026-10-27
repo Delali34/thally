@@ -9,7 +9,7 @@ function response(url: string, body: string, contentType: string) {
 }
 
 describe('public URL migration', () => {
-  async function migrateFlightFixture(integrations?: unknown) {
+  async function migrateFlightFixture(integrations?: unknown, extraConfig: Record<string, unknown> = {}) {
     const sourceUrl = 'https://product.test/docs/introduction'
     const navigation = {
       global: null,
@@ -43,6 +43,7 @@ describe('public URL migration', () => {
       footer: { links: [{ header: 'Docs', items: [{ label: 'Home', href: '/introduction' }] }] },
       navigation: { pages: [] },
       ...(integrations ? { integrations } : {}),
+      ...extraConfig,
     }
     const flight = [
       `18:["$","$Provider",null,{"value":{"docsConfig":${JSON.stringify(docsConfig)}}}]`,
@@ -127,6 +128,15 @@ describe('public URL migration', () => {
     expect(unsupported).toHaveLength(1)
     expect(unsupported[0].message).toMatch(/segment/)
     expect(JSON.stringify(bundle.warnings)).not.toMatch(/AMPSECRET|SEGSECRET/)
+  })
+
+  it('does not name the family of a self-hosted font from the embedded config, and says it was not applied', async () => {
+    const bundle = await migrateFlightFixture(undefined, { fonts: { heading: { family: 'Satoshi', source: '/fonts/Satoshi-Variable.woff2', format: 'woff2' }, body: { family: 'Inter' } } })
+    expect(bundle.docsConfig.fonts).toEqual({ body: { family: 'Inter' } })
+    const warnings = bundle.warnings.map((warning) => warning.message).filter((message) => message.includes('Self-hosted font'))
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain('"Satoshi" was not applied')
+    expect(warnings[0]).toContain('a site migrated from its URL does not copy font files')
   })
 
   it('leaves integrations unset, with no analytics warning, when the embedded config has none', async () => {

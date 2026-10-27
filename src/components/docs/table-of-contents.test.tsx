@@ -40,6 +40,10 @@ describe('table of contents scroll tracking', () => {
     expect(renderToStaticMarkup(<TableOfContents />)).toContain('id="table-of-contents-content"')
   })
 
+  it('names the landmark the way Mintlify site scripts look it up', () => {
+    expect(renderToStaticMarkup(<TableOfContents />)).toMatch(/<aside id="table-of-contents-content" aria-label="On this page"/)
+  })
+
   it('does not mark a heading current before scroll tracking resolves it', () => {
     expect(renderToStaticMarkup(<TableOfContents />)).not.toContain('aria-current')
   })
