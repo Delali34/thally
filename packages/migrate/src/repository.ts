@@ -49,6 +49,7 @@ import {
   rewriteDocusaurusLinks,
   resolveDocusaurusPageIdentity,
   type DocusaurusPageDescriptor,
+  type DocusaurusSiteSettings,
   type DocusaurusSidebars,
 } from './docusaurus.js'
 import type { FernApiSection } from './fern.js'
@@ -4414,6 +4415,72 @@ function componentSourceIdentity(sourceUrl: string, repositoryDir: string, siteR
 }
 
 /** Import an already-available repository directory into a canonical bundle. */
+/**
+ * Project name for a Docusaurus migration, in the order the source itself would
+ * trust it. A config whose `title` only exists at build time leaves the
+ * projection empty; scaffolding the starter's placeholder in that case makes a
+ * successful import look like a named site, so fall back to the source's own
+ * name and say where it came from. The checkout directory is not a source name
+ * (migration clones into a temporary "repository" path), so the repository is
+ * read from the source URL instead.
+ */
+interface DocusaurusProjectName {
+  name: string
+  /** Set when the name came from the source rather than its config. */
+  origin?: string
+}
+
+/** The source's own package name, without a scope that names the publisher. */
+function sourcePackageName(repositoryDir: string): string | undefined {
+  try {
+    // Package metadata is untrusted source input too: a symlink must not turn
+    // the branding fallback into a read outside the checkout, and a special or
+    // oversized file must not block or exhaust a migration.
+    const path = withinRealRoot(resolveWithin(repositoryDir, 'package.json'), repositoryDir)
+    const metadata = lstatSync(path)
+    if (!metadata.isFile() || metadata.size > MAX_PAGE_BYTES) return undefined
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as { name?: unknown }
+    if (typeof parsed.name !== 'string') return undefined
+    return parsed.name.split('/').pop()?.trim() || undefined
+  } catch {
+    return undefined
+  }
+}
+
+function docusaurusProjectName(
+  settings: DocusaurusSiteSettings,
+  repositoryDir: string,
+  sourceUrl: string,
+): DocusaurusProjectName | undefined {
+  const configured = settings.navbarTitle ?? settings.name
+  if (configured) return { name: configured }
+  const packageName = sourcePackageName(repositoryDir)
+  if (packageName) return { name: packageName, origin: 'the source package.json name' }
+  const sourceName = (() => {
+    try {
+      const segment = new URL(sourceUrl).pathname.split('/').filter(Boolean).pop()
+      return segment ? decodeURIComponent(segment).replace(/\.git$/i, '') : undefined
+    } catch {
+      return undefined
+    }
+  })()
+  if (sourceName) return { name: sourceName, origin: 'the source repository name' }
+  const sourceHost = (() => {
+    try {
+      return new URL(sourceUrl).hostname || undefined
+    } catch {
+      return undefined
+    }
+  })()
+  return sourceHost ? { name: sourceHost, origin: 'the source host' } : undefined
+}
+
+const DOCUSAURUS_IDENTITY_LABELS = {
+  title: 'site title',
+  tagline: 'site tagline',
+  navbarTitle: 'navbar title',
+} as const
+
 export function migrateRepository(options: RepositoryMigrationOptions): MigrationBundle {
   const repositoryDir = options.repositoryDir
   const platform = options.platform ?? detectRepositoryPlatform(repositoryDir, options.docsDir)
@@ -6597,7 +6664,20 @@ export function migrateRepository(options: RepositoryMigrationOptions): Migratio
     ? readDocusaurusSiteSettings(docusaurusProjectRoot!)
     : undefined
   const presentation = docusaurusSettings ? readDocusaurusPresentation(docusaurusProjectRoot!) : undefined
+  const docusaurusIdentity = docusaurusSettings
+    ? docusaurusProjectName(docusaurusSettings, repositoryDir, options.sourceUrl)
+    : undefined
   if (docusaurusSettings) {
+    for (const field of docusaurusSettings.unresolvedIdentity ?? []) {
+      const namesTheProject = field === 'title' || field === 'navbarTitle'
+      const fallback = namesTheProject && docusaurusIdentity?.origin
+        ? ` The project name was taken from ${docusaurusIdentity.origin}.`
+        : ''
+      warnings.push({
+        code: 'unsupported-config',
+        message: `The Docusaurus ${DOCUSAURUS_IDENTITY_LABELS[field]} could not be read without running the config and was left out of the migration.${fallback} Use a string literal, or plain data in an imported module, to import it.`,
+      })
+    }
     if (presentation) {
       assets.push({ path: '_thally/source-theme.css', content: Buffer.from(presentation.css) })
       docsConfig = { ...docsConfig, stylesheets: [...(docsConfig.stylesheets ?? []), '/_thally/source-theme.css'], ...(presentation.headingFont ? { fonts: { ...docsConfig.fonts, heading: { family: presentation.headingFont, weight: ['400', '500', '600', '700'] } } } : {}) }
@@ -6896,9 +6976,9 @@ export function migrateRepository(options: RepositoryMigrationOptions): Migratio
         ...(typeof fernRawConfig.title === 'string' ? { name: fernRawConfig.title } : {}),
         ...(themeColors ? { colors: themeColors } : {}),
       },
-    } : docusaurusSettings && (docusaurusSettings.name || docusaurusSettings.description || themeColors) ? {
+    } : docusaurusSettings && (docusaurusIdentity?.name || docusaurusSettings.description || themeColors) ? {
       site: {
-        ...(docusaurusSettings.navbarTitle || docusaurusSettings.name ? { name: docusaurusSettings.navbarTitle ?? docusaurusSettings.name } : {}),
+        ...(docusaurusIdentity?.name ? { name: docusaurusIdentity.name } : {}),
         ...(docusaurusSettings.description ? { description: docusaurusSettings.description } : {}),
         ...(themeColors ? { colors: themeColors } : {}),
       },

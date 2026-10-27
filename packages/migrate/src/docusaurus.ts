@@ -934,6 +934,12 @@ export interface DocusaurusSiteSettings {
   footerLinks: NonNullable<MigrationDocsConfig['footer']>['links']
   copyright?: string
   banner?: MigrationDocsConfig['banner']
+  /**
+   * Identity properties the config declares but that only exist at build time.
+   * The caller reports these so a project never acquires a placeholder name
+   * without the migration saying why.
+   */
+  unresolvedIdentity?: Array<'title' | 'tagline' | 'navbarTitle'>
 }
 
 function propertyStart(source: string, name: string): number {
@@ -950,7 +956,163 @@ function propertyStart(source: string, name: string): number {
   return -1
 }
 
-function staticStringBindings(source: string): Map<string, string> {
+/**
+ * Resolve a config-relative import to a readable module file. Package
+ * specifiers are deliberately not followed: their contents belong to the
+ * source's dependencies, and reading `node_modules` during a migration would
+ * make the imported identity depend on whatever the checkout happened to
+ * install.
+ */
+function staticModulePath(repositoryRoot: string, specifier: string): string | null {
+  if (!specifier.startsWith('.')) return null
+  try {
+    const relativePath = specifier.replace(/^\.\/+/, '')
+    return ['', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.json']
+      .map((extension) => withinRealRoot(resolveWithin(repositoryRoot, `${relativePath}${extension}`), repositoryRoot))
+      .find((candidate) => existsSync(candidate) && lstatSync(candidate).isFile()) ?? null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Top-level string properties of a data-only object literal. JSON5 already
+ * covers the shapes Docusaurus data files use (unquoted keys, single quotes,
+ * trailing commas, comments). A literal holding functions, spreads, or computed
+ * values cannot be represented without executing the module, so nothing from it
+ * is reported rather than part of it.
+ */
+function staticObjectStrings(objectText: string): Map<string, string> {
+  const fields = new Map<string, string>()
+  try {
+    const parsed = JSON5.parse(objectText) as unknown
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return fields
+    for (const [key, value] of Object.entries(parsed)) {
+      if (typeof value === 'string') fields.set(key, value)
+    }
+  } catch {
+    return fields
+  }
+  return fields
+}
+
+/** The object literal behind `export default`, including `export default site`. */
+function defaultExportObjectLiteralText(source: string): string | null {
+  const exported = /\bexport\s+default\s+/.exec(source)
+  if (!exported) return null
+  const start = exported.index + exported[0].length
+  const literal = matchingObjectLiteral(source, start)
+  if (literal) return literal
+  const identifier = source.slice(start).match(/^([A-Za-z_$][\w$]*)/)?.[1]
+  if (!identifier) return null
+  const declaration = new RegExp(
+    `\\b(?:const|let|var)\\s+${identifier}\\b(?:\\s*:\\s*[^=;]+)?\\s*=\\s*`,
+  ).exec(source)
+  return declaration ? matchingObjectLiteral(source, declaration.index + declaration[0].length) : null
+}
+
+/** The string literal behind `export const NAME = '...'`. */
+function namedExportStringText(source: string, name: string): string | undefined {
+  const match = new RegExp(
+    `\\bexport\\s+(?:const|let|var)\\s+${name}\\b(?:\\s*:\\s*[^=;]+)?\\s*=\\s*`,
+  ).exec(source)
+  if (!match) return undefined
+  const quoted = source.slice(match.index + match[0].length)
+    .match(/^("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')/)
+  if (!quoted) return undefined
+  try {
+    const parsed = JSON5.parse(quoted[1]) as unknown
+    return typeof parsed === 'string' ? parsed : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * String values a config can name through a local import, flattened to the
+ * reference a config would write for them. `import site from './site.json'`
+ * exposes `site.title`; `import { SITE_NAME } from './constants'` exposes
+ * `SITE_NAME`. Only plain data is read, and only strings are exposed.
+ */
+function staticImportBindings(source: string, repositoryRoot: string): Map<string, string> {
+  const bindings = new Map<string, string>()
+  const addObject = (local: string, specifier: string, exported: 'default' | string): void => {
+    const modulePath = staticModulePath(repositoryRoot, specifier)
+    if (!modulePath) return
+    const moduleSource = readBoundedText(modulePath)
+    const objectText = extname(modulePath).toLowerCase() === '.json'
+      ? moduleSource
+      : exported === 'default'
+        ? defaultExportObjectLiteralText(moduleSource)
+        : namedExportObjectLiteralText(moduleSource, exported)
+    if (!objectText) return
+    for (const [key, value] of staticObjectStrings(objectText)) {
+      bindings.set(`${local}.${key}`, value)
+    }
+  }
+  const addString = (local: string, specifier: string, exported: string): void => {
+    const modulePath = staticModulePath(repositoryRoot, specifier)
+    if (!modulePath || extname(modulePath).toLowerCase() === '.json') return
+    const value = namedExportStringText(readBoundedText(modulePath), exported)
+    if (value !== undefined) bindings.set(local, value)
+  }
+  // `import * as site` exposes every named export, with the default export
+  // reachable as `site.default`. Reading only the default object would answer
+  // `site.TITLE` with a default-object key instead of the named export.
+  const addNamespace = (local: string, specifier: string): void => {
+    const modulePath = staticModulePath(repositoryRoot, specifier)
+    if (!modulePath) return
+    const moduleSource = readBoundedText(modulePath)
+    if (extname(modulePath).toLowerCase() === '.json') {
+      // Bundlers synthesize named exports from a JSON module's top-level keys.
+      for (const [key, value] of staticObjectStrings(moduleSource)) {
+        bindings.set(`${local}.${key}`, value)
+      }
+      return
+    }
+    const defaultText = defaultExportObjectLiteralText(moduleSource)
+    if (defaultText) {
+      for (const [key, value] of staticObjectStrings(defaultText)) {
+        bindings.set(`${local}.default.${key}`, value)
+      }
+    }
+    for (const match of moduleSource.matchAll(/\bexport\s+(?:const|let|var)\s+([A-Za-z_$][\w$]*)\b/g)) {
+      const name = match[1]
+      const value = namedExportStringText(moduleSource, name)
+      if (value !== undefined) bindings.set(`${local}.${name}`, value)
+      const objectText = namedExportObjectLiteralText(moduleSource, name)
+      if (!objectText) continue
+      for (const [key, objectValue] of staticObjectStrings(objectText)) {
+        bindings.set(`${local}.${name}.${key}`, objectValue)
+      }
+    }
+  }
+  // `import site from './site.json'`, and the default half of a mixed import.
+  for (const match of source.matchAll(
+    /\bimport\s+([A-Za-z_$][\w$]*)\s*(?:,\s*\{[^}]*\})?\s+from\s*(['"])([^'"]+)\2/g,
+  )) {
+    addObject(match[1], match[3], 'default')
+  }
+  // `import * as site from './site'`.
+  for (const match of source.matchAll(
+    /\bimport\s+\*\s+as\s+([A-Za-z_$][\w$]*)\s+from\s*(['"])([^'"]+)\2/g,
+  )) {
+    addNamespace(match[1], match[3])
+  }
+  // `import { site, SITE_NAME as heading } from './site'`.
+  for (const match of source.matchAll(/\bimport\s*\{([^}]*)\}\s*from\s*(['"])([^'"]+)\2/g)) {
+    for (const entry of match[1].split(',')) {
+      const [imported, alias] = entry.split(/\s+as\s+/).map((part) => part.trim())
+      if (!imported || !/^[A-Za-z_$][\w$]*$/.test(imported)) continue
+      const local = alias && /^[A-Za-z_$][\w$]*$/.test(alias) ? alias : imported
+      addObject(local, match[3], imported)
+      addString(local, match[3], imported)
+    }
+  }
+  return bindings
+}
+
+function staticStringBindings(source: string, repositoryRoot?: string): Map<string, string> {
   const bindings = new Map<string, string>()
   for (const match of source.matchAll(/\bconst\s+([A-Z][A-Z0-9_]*)\s*=\s*((?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'))/g)) {
     try {
@@ -958,6 +1120,11 @@ function staticStringBindings(source: string): Map<string, string> {
       if (typeof value === 'string') bindings.set(match[1], value)
     } catch {
       // Executable or malformed declarations cannot become imported links.
+    }
+  }
+  if (repositoryRoot) {
+    for (const [reference, value] of staticImportBindings(source, repositoryRoot)) {
+      bindings.set(reference, value)
     }
   }
   return bindings
@@ -1013,8 +1180,12 @@ function staticStringField(source: string, name: string, bindings?: Map<string, 
   if (start < 0) return undefined
   const quoted = source.slice(start).match(/^("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')/)
   if (!quoted) {
-    const binding = source.slice(start).match(/^([A-Z][A-Z0-9_]*)\b/)?.[1]
-    return binding ? bindings?.get(binding) : undefined
+    // A config may name a constant (`SITE_TITLE`) or a property of an imported
+    // data module (`site.title`). Both resolve through the static bindings map;
+    // anything else stays undefined so the caller can report it.
+    const reference = source.slice(start)
+      .match(/^([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)/)?.[1]
+    return reference ? bindings?.get(reference) : undefined
   }
   try {
     const parsed = JSON5.parse(quoted[1]) as unknown
@@ -1030,12 +1201,12 @@ export function readDocusaurusSiteSettings(repositoryRoot: string): DocusaurusSi
   const configPath = findDocusaurusConfigPath(repositoryRoot)
   if (!configPath) return empty
   const source = readBoundedText(configPath)
-  const bindings = staticStringBindings(source)
+  const bindings = staticStringBindings(source, repositoryRoot)
   const presets = staticArrayField(source, 'presets')
   const classicDocs = presets && [...presets.matchAll(/["']?docs["']?\s*:\s*/g)]
     .map((match) => matchingObjectLiteral(presets, (match.index ?? 0) + match[0].length))
     .find((object): object is string => Boolean(object))
-  const docsRouteBasePath = classicDocs && staticStringField(classicDocs, 'routeBasePath') || 'docs'
+  const docsRouteBasePath = classicDocs && staticStringField(classicDocs, 'routeBasePath', bindings) || 'docs'
   const themeStart = propertyStart(source, 'themeConfig')
   const theme = themeStart < 0 ? null : matchingObjectLiteral(source, themeStart)
   const colorModeStart = theme ? propertyStart(theme, 'colorMode') : -1
@@ -1087,21 +1258,31 @@ export function readDocusaurusSiteSettings(repositoryRoot: string): DocusaurusSi
   const announcementContent = announcement && staticStringField(announcement, 'content')
     || announcement?.slice(propertyStart(announcement, 'content')).match(/^`([^`]+)`/)?.[1]
   const bannerContent = announcementContent ? announcementMarkdown(announcementContent) : ''
+  const name = staticStringField(source, 'title', bindings)
+  const description = staticStringField(source, 'tagline', bindings)
+  const navbarTitle = navbar ? staticStringField(navbar, 'title', bindings) : undefined
+  // A property that exists but resolves to nothing only exists at build time.
+  // Reporting it is what keeps a placeholder project name from looking intended.
+  const unresolvedIdentity: NonNullable<DocusaurusSiteSettings['unresolvedIdentity']> = []
+  if (!name && propertyStart(source, 'title') >= 0) unresolvedIdentity.push('title')
+  if (!description && propertyStart(source, 'tagline') >= 0) unresolvedIdentity.push('tagline')
+  if (!navbarTitle && navbar && propertyStart(navbar, 'title') >= 0) unresolvedIdentity.push('navbarTitle')
   return {
     ...(bannerContent ? { banner: { content: bannerContent, dismissible: !/isCloseable\s*:\s*false/.test(announcement!), ...(staticStringField(announcement!, 'id') ? { id: staticStringField(announcement!, 'id') } : {}) } } : {}),
-    name: staticStringField(source, 'title'),
-    description: staticStringField(source, 'tagline'),
-    ...(navbar && staticStringField(navbar, 'title') ? { navbarTitle: staticStringField(navbar, 'title') } : {}),
+    ...(name ? { name } : {}),
+    ...(description ? { description } : {}),
+    ...(navbarTitle ? { navbarTitle } : {}),
+    ...(unresolvedIdentity.length > 0 ? { unresolvedIdentity } : {}),
     defaultColorMode,
     docsRouteBasePath,
-    ...(logo && staticStringField(logo, 'src') ? {
+    ...(logo && staticStringField(logo, 'src', bindings) ? {
       logo: {
-        light: staticStringField(logo, 'src')!,
-        ...(staticStringField(logo, 'srcDark') ? { dark: staticStringField(logo, 'srcDark') } : {}),
-        showTitle: Boolean(navbar && staticStringField(navbar, 'title')),
+        light: staticStringField(logo, 'src', bindings)!,
+        ...(staticStringField(logo, 'srcDark', bindings) ? { dark: staticStringField(logo, 'srcDark', bindings) } : {}),
+        showTitle: Boolean(navbarTitle),
       },
     } : {}),
-    ...(staticStringField(source, 'favicon') ? { favicon: staticStringField(source, 'favicon') } : {}),
+    ...(staticStringField(source, 'favicon', bindings) ? { favicon: staticStringField(source, 'favicon', bindings) } : {}),
     navbarLinks,
     footerLinks,
     ...(copyright ? { copyright } : {}),
