@@ -9,7 +9,9 @@ vi.mock('@/lib/cloud-link/client', () => ({
   connectCloudSite: mocks.connectCloudSite,
 }))
 
-import { getExternalSiteUrl, POST } from '../route'
+import * as handshakeRoute from '../route'
+import { POST } from '../route'
+import { getExternalSiteUrl } from '@/lib/cloud-link/handshake-request'
 
 describe('POST /api/cloud/handshake', () => {
   beforeEach(() => {
@@ -18,6 +20,10 @@ describe('POST /api/cloud/handshake', () => {
   })
 
   afterEach(() => vi.unstubAllEnvs())
+
+  it('exports only supported Next.js route entrypoints and configuration', () => {
+    expect(Object.keys(handshakeRoute).sort()).toEqual(['POST', 'runtime'])
+  })
 
   it('reports the forwarded deployment origin to the server-only client', async () => {
     mocks.connectCloudSite.mockResolvedValue({ status: 'connected' })

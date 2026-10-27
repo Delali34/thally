@@ -12,7 +12,7 @@ import type {
   OperationOverride,
   ResolvedSpec,
 } from '@/lib/openapi/types'
-import { getApiPlaygroundCredentials } from '@/data/docs'
+import { getApiMdxConfig, getApiPlaygroundCredentials } from '@/data/docs'
 import { HTTP_METHODS, buildOperationKey, isExtensionSet } from '@/lib/openapi/operation-keys'
 import { buildSchemaExample } from '@/lib/openapi/schema-example'
 import { isObj, operationVisibility, viewPathEntry } from '@/lib/openapi/path-items'
@@ -34,6 +34,7 @@ export function normalizeSpec(resolved: ResolvedSpec): NormalizedSpec {
     securitySchemes && typeof securitySchemes.securitySchemes === 'object'
       ? (securitySchemes.securitySchemes as Record<string, RawObject>)
       : {}
+  const implicitAuth = implicitAuthFor()
   const operations: Array<NormalizedOperation> = []
 
   const paths = (resolved.document as RawObject).paths
@@ -70,6 +71,7 @@ export function normalizeSpec(resolved: ResolvedSpec): NormalizedSpec {
             config: resolved.config,
             documentSecurity: (resolved.document as RawObject).security,
             securitySchemes: rawSecuritySchemes,
+            implicitAuth,
             hidden: visibility === 'hidden',
             isWebhook: false,
             resolveRef,
@@ -147,6 +149,8 @@ interface NormalizeOperationOptions {
   specServers: Array<NormalizedServer>
   documentSecurity?: unknown
   securitySchemes: Record<string, RawObject>
+  /** Credentials for an operation whose spec declares no `security` at all; never given to webhooks. */
+  implicitAuth?: ImplicitAuth | null
   config: ApiSpecConfig
   hidden: boolean
   isWebhook: boolean
@@ -170,11 +174,13 @@ function normalizeOperation(options: NormalizeOperationOptions): NormalizedOpera
 
   const pathLevelParameters = options.sharedParameters
   const operationParameters = extractParameters(options.rawOperation.parameters)
-  const { groupedParameters, parameterPrefill } = normalizeParameters([...pathLevelParameters, ...operationParameters], options.resolveRef)
+  const { groupedParameters, parameterPrefill } = normalizeParameters([...pathLevelParameters, ...operationParameters], options.resolveRef, options.deepResolve)
   const { body: requestBody, sample: requestBodySample } = normalizeRequestBody(options.rawOperation.requestBody, options.resolveRef, options.deepResolve)
   const responses = normalizeResponses(options.rawOperation.responses, options.resolveRef, options.deepResolve)
-  const security = normalizeSecurity(options.rawOperation.security ?? options.documentSecurity)
-  const authSchemes = buildAuthSchemes(security, options.securitySchemes, options.resolveRef)
+  const declaredSecurity = options.rawOperation.security ?? options.documentSecurity
+  const implicit = declaredSecurity === undefined || declaredSecurity === null ? options.implicitAuth : undefined
+  const security = normalizeSecurity(implicit ? implicit.security : declaredSecurity)
+  const authSchemes = buildAuthSchemes(security, implicit?.schemes ?? options.securitySchemes, options.resolveRef)
 
   const operationServers = normalizeServers(options.rawOperation.servers)
   const servers =
@@ -241,6 +247,7 @@ function extractParameters(raw: unknown): Array<RawObject> {
 function normalizeParameters(
   params: Array<RawObject>,
   resolveRef: (ref: string) => RawObject | null,
+  deepResolve: (schema: RawObject) => RawObject,
 ): {
   groupedParameters: Record<'path' | 'query' | 'header' | 'cookie', Array<NormalizedParameter>>
   parameterPrefill: Record<'path' | 'query' | 'header' | 'cookie', Record<string, string>>
@@ -272,12 +279,15 @@ function normalizeParameters(
   deduped.forEach((param) => {
     const location = param.in
     if (location === 'path' || location === 'query' || location === 'header' || location === 'cookie') {
+      // Resolved like a body schema, so a `$ref` schema shows its own type, description and values.
+      const schema = isObj(param.schema) ? deepResolve(param.schema) : undefined
       const normalizedParameter: NormalizedParameter = {
         name: param.name as string,
         in: location,
         required: Boolean(param.required),
-        description: typeof param.description === 'string' ? param.description : undefined,
-        schema: typeof param.schema === 'object' ? (param.schema as Record<string, unknown>) : undefined,
+        // The parameter's own description wins; some specs only put it on the schema.
+        description: typeof param.description === 'string' ? param.description : typeof schema?.description === 'string' ? schema.description : undefined,
+        schema,
       }
       grouped[location].push(normalizedParameter)
       prefill[location][normalizedParameter.name] = buildParameterSampleValue(normalizedParameter.schema, resolveRef, normalizedParameter.required)
@@ -391,6 +401,20 @@ const MAX_REF_EXPANSIONS = 200_000
 const MAX_CYCLE_ENTRIES = 1000
 
 /**
+ * A `$ref` node's own `description` and `title` win over the ones on the schema it points at, as Mintlify shows
+ * `{ "$ref": "#/components/schemas/Group", "description": "The newly created group" }`. Any other sibling of a `$ref` is still ignored.
+ * `resolved` is shared by every reference to that schema, so the override is applied to a copy.
+ */
+function withRefSiblings(node: RawObject, resolved: RawObject): RawObject {
+  if (typeof node.$ref !== 'string' || resolved === node) return resolved
+  const text = (value: unknown): string | undefined => (typeof value === 'string' && value.trim() ? value : undefined)
+  const title = text(node.title)
+  const description = text(node.description)
+  if (title === undefined && description === undefined) return resolved
+  return { ...resolved, ...(title === undefined ? {} : { title }), ...(description === undefined ? {} : { description }) }
+}
+
+/**
  * Builds a schema deep-resolver bound to one spec document. Resolves every
  * $ref pointer it finds — including refs inside properties, items, and
  * allOf/anyOf/oneOf members — recursively. Circular references are broken by
@@ -445,7 +469,7 @@ function createDeepResolver(resolveRef: (ref: string) => RawObject | null) {
     if (depth >= MAX_DEPTH) return { type: 'object', description: '[Too deeply nested to show]' }
     depth++
     try {
-      return resolveNode(schema)
+      return withRefSiblings(schema, resolveNode(schema))
     } finally {
       depth--
     }
@@ -553,6 +577,24 @@ function normalizeExamples(raw: unknown): Array<{ key: string; summary?: string;
       value: 'value' in example ? example.value : example,
     }))
     .filter((example) => example.value !== undefined)
+}
+
+interface ImplicitAuth {
+  security: Array<RawObject>
+  schemes: Record<string, RawObject>
+}
+
+/**
+ * The credential for operations whose spec has no `security` at root or on the operation, as Mintlify shows it:
+ * the site's docs.json `api.mdx.auth`, which the site author declared for every API page. Nothing is inferred from
+ * the spec's own components. A spec that declares `security` (even `[]`, a public operation) never reaches this.
+ */
+function implicitAuthFor(): ImplicitAuth | null {
+  const auth = getApiMdxConfig().auth
+  const name = auth?.method === 'key' ? auth.name : 'Authorization'
+  if (!auth || !name) return null
+  const scheme = auth.method === 'key' ? { type: 'apiKey', in: 'header', name } : { type: 'http', scheme: auth.method }
+  return { security: [{ [name]: [] }], schemes: { [name]: scheme } }
 }
 
 function normalizeSecurity(raw: unknown): Array<Array<NormalizedSecurityRequirement>> {

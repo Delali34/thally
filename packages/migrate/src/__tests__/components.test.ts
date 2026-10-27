@@ -8,7 +8,7 @@ import { dirname, join, relative } from 'node:path'
 import ts from 'typescript'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { createComponentMigrator, declarationsReferenceBrowserGlobal, hasAnyFunctionValuedProp, mergeComponentRegistry, propsTargetExtractedClientComponent, SCAFFOLD_PROVIDED_IMPORTS } from '../components.js'
+import { createComponentMigrator, declarationsReferenceBrowserGlobal, hasAnyFunctionValuedProp, hasClientDirective, mergeComponentRegistry, propsTargetExtractedClientComponent, SCAFFOLD_PROVIDED_IMPORTS } from '../components.js'
 import { migrateRepository } from '../repository.js'
 import { renderMigrationFiles } from '../render.js'
 import type { MigrationWarning } from '../types.js'
@@ -25,6 +25,30 @@ function fixture(files: Record<string, string>): string {
   return root
 }
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
+
+describe('hasClientDirective', () => {
+  it.each([
+    ["'use client'"],
+    ['"use client";'],
+    ['\uFEFF"use client"'],
+    ["// @ts-nocheck\n'use client';\n"],
+    ["/* license */\n'use client'"],
+    ['\uFEFF/**\n * Docs\n */\n// note\n  "use client";'],
+  ])('finds the directive in %j', (source) => {
+    expect(hasClientDirective(source)).toBe(true)
+  })
+
+  it.each([
+    ['export const a = 1\n"use client"'],
+    ['// "use client"\nexport const a = 1'],
+    ['/* "use client" */'],
+    ['/* a */ export const a = 1 /* b */ "use client"'],
+    ['"use clients"'],
+    [''],
+  ])('does not find one in %j', (source) => {
+    expect(hasClientDirective(source)).toBe(false)
+  })
+})
 
 describe('repository component migration', () => {
   it('resolves extensionless declaration dependencies used by typed components', () => {
@@ -1031,6 +1055,295 @@ describe('repository component migration', () => {
     expect(warnings[0].message).toContain('basic code block')
   })
 
+  it('passes an imported function to a client component through a client adapter, not from the page', () => {
+    const root = fixture({
+      'browser.jsx': 'export const Browser = ({ items, badges, label, children }) => { const [open] = useState(true); return <ul>{open && items.map((item) => <li key={item}>{badges(item)}{label(item)}{children}</li>)}</ul> }',
+      'catalog.jsx': 'export const items = ["a"];\nexport const badgesFor = (item) => [item];\nexport function labelFor(item) { return item }\nexport const zeroArgument = () => ["z"];',
+    })
+    const warnings: Array<MigrationWarning> = []
+    const migrator = createComponentMigrator(root, root, warnings, 'https://github.com/example/docs')
+    const source = [
+      "import { Browser } from './browser.jsx'",
+      "import { items, badgesFor, labelFor, zeroArgument } from './catalog.jsx'",
+      '',
+      '<Browser items={items} badges={badgesFor} label={labelFor} extra={zeroArgument}>',
+      '  Body text.',
+      '</Browser>',
+    ].join('\n')
+    const body = migrator.transform(source, join(root, 'index.mdx'))
+    // The page keeps passing data; the functions are resolved inside the client module.
+    expect(body).toMatch(/<Migrated[a-f0-9]+ items=\{items\}\s*>/)
+    expect(body).toMatch(/<\/Migrated[a-f0-9]+>/)
+    expect(body).not.toMatch(/badges=\{|label=\{|extra=\{/)
+    const adapter = migrator.files().find((file) => file.path.includes('/callback-'))!
+    expect(String(adapter.content)).toMatch(/^'use client';/)
+    expect(adapter.content).toContain('badges={')
+    expect(adapter.content).toContain('label={')
+    expect(adapter.content).toContain('extra={')
+    expect(adapter.content).toMatch(/import \{ badgesFor as callback0 \} from "\.\/[^"]*catalog\.jsx";/)
+    expect(adapter.content).toMatch(/import \{ labelFor as callback1 \} from "\.\/[^"]*catalog\.jsx";/)
+    expect(adapter.content).toContain('<Original {...props} badges={callback0} label={callback1} extra={callback2}>')
+    expect(warnings).toEqual([])
+  })
+
+  it('also resolves a default-exported function inside the client adapter', () => {
+    const root = fixture({
+      'browser.jsx': 'export const Browser = ({ format }) => { const [open] = useState(true); return open ? <p>{format("x")}</p> : null }',
+      'format.js': 'export default function format(value) { return value }',
+    })
+    const migrator = createComponentMigrator(root, root, [], 'https://github.com/example/docs')
+    const body = migrator.transform("import { Browser } from './browser.jsx'\nimport format from './format.js'\n\n<Browser format={format} />", join(root, 'index.mdx'))
+    expect(body).not.toContain('format={format}')
+    const adapter = migrator.files().find((file) => file.path.includes('/callback-'))!
+    expect(adapter.content).toMatch(/import callback0 from "\.\/[^"]*format\.js";/)
+    expect(adapter.content).toContain('format={callback0}')
+  })
+
+  describe('moving a function prop into a client adapter keeps what a later prop or spread overrides', () => {
+    const browser = 'export const Viewer = ({ format }) => { const [open] = useState(true); return open ? <p>{typeof format === "function" ? format("x") : format}</p> : null }'
+    const migrate = (tag: string) => {
+      const root = fixture({ 'viewer.jsx': browser, 'format.js': 'export default function format(value) { return value }' })
+      const warnings: Array<MigrationWarning> = []
+      const migrator = createComponentMigrator(root, root, warnings, 'https://github.com/example/docs')
+      const body = migrator.transform(`import { Viewer } from './viewer.jsx'\nimport format from './format.js'\n\n${tag}`, join(root, 'index.mdx'))
+      return { body, warnings, adapter: migrator.files().find((file) => file.path.includes('/callback-')) }
+    }
+
+    it('does not move a function that a later spread overrides, and says why', () => {
+      const { body, warnings, adapter } = migrate('<Viewer format={format} {...{ format: "text" }} />')
+      expect(adapter).toBeUndefined()
+      expect(body).toContain('format={format} {...{ format: "text" }}')
+      expect(warnings.map((warning) => warning.message).join('\n')).toMatch(/format.*later prop or spread/)
+    })
+
+    it('does not move a function that a later prop of the same name overrides', () => {
+      const { body, adapter } = migrate('<Viewer format={format} format="text" />')
+      expect(adapter).toBeUndefined()
+      expect(body).toContain('format={format} format="text"')
+    })
+
+    it('still moves a function that follows the spread, which it overrides in either place', () => {
+      const { body, adapter } = migrate('<Viewer {...{ format: "text" }} format={format} />')
+      expect(body).not.toContain('format={format}')
+      expect(adapter?.content).toContain('<Original {...props} format={callback0}>')
+    })
+
+    it('moves a function nothing overrides and leaves only the overridden one', () => {
+      const { body, adapter } = migrate('<Viewer format={format} {...{ format: "text" }} label={format} />')
+      expect(body).toContain('format={format}')
+      expect(body).not.toContain('label={format}')
+      expect(adapter?.content).toContain('<Original {...props} label={callback0}>')
+    })
+
+    it('keeps a page-local callback passive rather than moving it over a later spread', () => {
+      const root = fixture({ 'playground.jsx': 'export const Playground = ({ children, CodeBlockComponent }) => <section><CodeBlockComponent>sample</CodeBlockComponent>{children}</section>' })
+      const warnings: Array<MigrationWarning> = []
+      const migrator = createComponentMigrator(root, root, warnings, 'https://github.com/example/docs')
+      const source = "import { Playground } from './playground.jsx'\n\nexport const WidgetCodeBlock = ({ children, ...props }) => (<CodeBlock {...props}>{children}</CodeBlock>);\n\n<Playground CodeBlockComponent={WidgetCodeBlock} {...{ CodeBlockComponent: 'pre' }}><Warning>Keep this.</Warning></Playground>"
+      const body = migrator.transform(source, join(root, 'index.mdx'))
+      expect(migrator.files().some((file) => file.path.includes('/callback-'))).toBe(false)
+      expect(body).toContain('<Warning>Keep this.</Warning>')
+      expect(warnings.some((warning) => warning.message.includes('Interactive <Playground>'))).toBe(true)
+    })
+  })
+
+  it('leaves an imported function that is only called in a page expression as it is', () => {
+    const root = fixture({
+      'browser.jsx': 'export const Browser = ({ items }) => { const [open] = useState(true); return <ul>{open && items.map((item) => <li key={item}>{item}</li>)}</ul> }',
+      'catalog.jsx': 'export const names = ["a"];\nexport const upper = (item) => item.toUpperCase();',
+    })
+    const warnings: Array<MigrationWarning> = []
+    const migrator = createComponentMigrator(root, root, warnings, 'https://github.com/example/docs')
+    const source = "import { Browser } from './browser.jsx'\nimport { names, upper } from './catalog.jsx'\n\n<Browser items={names} />\n\n{upper('x')}"
+    const body = migrator.transform(source, join(root, 'index.mdx'))
+    expect(body).toMatch(/<Migrated[a-f0-9]+ items=\{names\} \/>/)
+    expect(body).toContain("{upper('x')}")
+    expect(migrator.files().some((file) => file.path.includes('/callback-'))).toBe(false)
+  })
+
+  describe('an imported function reaches a client component through its adapter however the module exports it', () => {
+    const viewer = 'export const Viewer = ({ format, items }) => { const [open] = useState(true); return open ? <p>{typeof format === "function" ? format("x") : format}{items}</p> : null }'
+    const migrate = (helpers: string, importClause: string, tag = '<Viewer format={format} />') => {
+      const root = fixture({ 'viewer.jsx': viewer, 'helpers.js': helpers })
+      const warnings: Array<MigrationWarning> = []
+      const migrator = createComponentMigrator(root, root, warnings, 'https://github.com/example/docs')
+      const body = migrator.transform(`import { Viewer } from './viewer.jsx'\nimport ${importClause} from './helpers.js'\n\n${tag}`, join(root, 'index.mdx'))
+      return { body, warnings, adapter: migrator.files().find((file) => file.path.includes('/callback-')) }
+    }
+
+    for (const [name, helpers, importClause, imported] of [
+      ['a default export of a local function', 'const format = (value) => value.toUpperCase()\nexport default format', 'format', 'default'],
+      ['a named export list', 'const format = (value) => value.toUpperCase()\nexport { format }', '{ format }', 'format'],
+      ['a renamed export', 'const make = (value) => value.toUpperCase()\nexport { make as f }', '{ f as format }', 'f'],
+      ['a function declaration exported as default later', 'function format(value) { return value }\nexport default format', 'format', 'default'],
+      ['a let that is reassigned to a function', 'let f = 0\nf = () => "changed"\nexport { f as format }', '{ format }', 'format'],
+      ['a var exported where it is declared and reassigned', 'export var format = 0\nformat = (value) => value', '{ format }', 'format'],
+    ] as const) {
+      it(`moves the function of ${name}`, () => {
+        const { body, adapter } = migrate(helpers, importClause)
+        expect(body).not.toContain('format={format}')
+        expect(adapter?.content).toContain('format={callback0}')
+        expect(adapter?.content).toContain(imported === 'default' ? 'import callback0 from' : `import { ${imported} as callback0 } from`)
+      })
+    }
+
+    it('moves an export it cannot classify, which is safe to import inside a client module', () => {
+      const { body, warnings, adapter } = migrate('const make = () => (value) => value\nexport const format = make()', '{ format }')
+      expect(body).not.toContain('format={format}')
+      expect(adapter?.content).toContain('format={callback0}')
+      expect(warnings).toEqual([])
+    })
+
+    it('keeps a const literal on the page but not a let, which a later assignment may change', () => {
+      const constant = migrate('const items = ["a", "b"]\nexport { items }', '{ items }', '<Viewer items={items} />')
+      expect(constant.adapter).toBeUndefined()
+      const mutable = migrate('let items = ["a", "b"]\nexport { items }', '{ items }', '<Viewer items={items} />')
+      expect(mutable.body).not.toContain('items={items}')
+      expect(mutable.adapter?.content).toContain('items={callback0}')
+    })
+
+    it('keeps plain data on the page, however it is exported', () => {
+      const { body, adapter } = migrate('const items = ["a", "b"]\nexport { items }', '{ items }', '<Viewer items={items} />')
+      expect(body).toMatch(/<Migrated[a-f0-9]+ items=\{items\} \/>/)
+      expect(adapter).toBeUndefined()
+    })
+  })
+
+  describe('a function passed as children is never moved into a client adapter', () => {
+    const widget = 'export const Widget = ({ children, label }) => { const [open] = useState(true); return open ? <p>{typeof children === "function" ? children("x") : children}{label}</p> : null }'
+    const migrate = (tag: string) => {
+      const root = fixture({ 'widget.jsx': widget, 'format.js': 'export default function format(value) { return value }' })
+      const warnings: Array<MigrationWarning> = []
+      const migrator = createComponentMigrator(root, root, warnings, 'https://github.com/example/docs')
+      const body = migrator.transform(`import { Widget } from './widget.jsx'\nimport format from './format.js'\n\n${tag}`, join(root, 'index.mdx'))
+      return { body, warnings, adapter: migrator.files().find((file) => file.path.includes('/callback-')) }
+    }
+
+    it('keeps the imported function on the tag and says why', () => {
+      const { body, warnings, adapter } = migrate('<Widget children={format} />')
+      // The adapter would hand its own (empty) children to the component after the moved one and replace it.
+      expect(adapter).toBeUndefined()
+      expect(body).toMatch(/<Migrated[a-f0-9]+ children=\{format\} \/>/)
+      expect(warnings.map((warning) => warning.message).join('\n')).toMatch(/children.*not moved|not moved.*children/)
+    })
+
+    it('still moves another function prop of the same tag', () => {
+      const { body, warnings, adapter } = migrate('<Widget children={format} label={format} />')
+      expect(body).toContain('children={format}')
+      expect(body).not.toContain('label={format}')
+      expect(adapter?.content).toContain('<Original {...props} label={callback0}>')
+      expect(adapter?.content).not.toContain('children={')
+      expect(warnings.map((warning) => warning.message).join('\n')).toMatch(/children/)
+    })
+
+    it('keeps a page-local callback passed as children passive rather than moving it', () => {
+      const root = fixture({ 'playground.jsx': 'export const Playground = ({ children }) => <section>{children}</section>' })
+      const warnings: Array<MigrationWarning> = []
+      const migrator = createComponentMigrator(root, root, warnings, 'https://github.com/example/docs')
+      const source = "import { Playground } from './playground.jsx'\n\nexport const WidgetCodeBlock = ({ children, ...props }) => (<CodeBlock {...props}>{children}</CodeBlock>);\n\n<Playground children={WidgetCodeBlock}><Warning>Keep this.</Warning></Playground>"
+      const body = migrator.transform(source, join(root, 'index.mdx'))
+      expect(migrator.files().some((file) => file.path.includes('/callback-'))).toBe(false)
+      expect(body).toContain('<Warning>Keep this.</Warning>')
+      expect(warnings.some((warning) => warning.message.includes('Interactive <Playground>'))).toBe(true)
+    })
+  })
+
+  it('leaves an imported function that is passed to a server component on the page', () => {
+    const root = fixture({
+      'widget.jsx': 'export default async function Widget({ format }) { return <p>{format(await Promise.resolve("x"))}</p> }',
+      'helpers.js': 'export const format = (value) => value.toUpperCase()',
+    })
+    const warnings: Array<MigrationWarning> = []
+    const migrator = createComponentMigrator(root, root, warnings, 'https://github.com/example/docs')
+    const body = migrator.transform("import Widget from './widget.jsx'\nimport { format } from './helpers.js'\n\n<Widget format={format} />", join(root, 'index.mdx'))
+    // A server component takes the function as it always did; wrapping it would make it an unsupported async client component.
+    expect(body).toMatch(/<Migrated[a-f0-9]+ format=\{format\} \/>/)
+    expect(migrator.files().some((file) => file.path.includes('/callback-'))).toBe(false)
+    expect(String(migrator.files().find((file) => file.path.endsWith('/widget.jsx'))!.content)).not.toContain("'use client'")
+    expect(warnings).toEqual([])
+  })
+
+  describe('one adapter carries every function a tag passes into a client component', () => {
+    const widget = 'export const Widget = ({ f, g, C, children }) => { const [open] = useState(true); return open ? <p>{f("x")}{g ? g("y") : null}{children}</p> : null }'
+    const render = 'export const render = ({ children, ...props }) => (<div {...props}>{children}</div>);'
+    const migrate = (widgetSource: string, source: string, extra: Record<string, string> = {}) => {
+      const root = fixture({ 'widget.jsx': widgetSource, 'format.js': 'export default function format(value) { return value }', ...extra })
+      const warnings: Array<MigrationWarning> = []
+      const migrator = createComponentMigrator(root, root, warnings, 'https://github.com/example/docs')
+      const body = migrator.transform(`import { Widget } from './widget.jsx'\nimport format from './format.js'\n\n${source}`, join(root, 'index.mdx'))
+      return { body, warnings, adapters: migrator.files().filter((file) => file.path.includes('/callback-')) }
+    }
+
+    it('moves a page-local callback and an imported function of one tag into the same adapter', () => {
+      const { body, adapters } = migrate(widget, `${render}\n\n<Widget f={render} g={format}>Body.</Widget>`)
+      expect(body).not.toMatch(/f=\{render\}|g=\{format\}/)
+      expect(body).toMatch(/<Migrated[a-f0-9]+\s*>Body\.<\/Migrated[a-f0-9]+>/)
+      expect(adapters).toHaveLength(1)
+      expect(adapters[0].content).toContain('export const render =')
+      expect(adapters[0].content).toMatch(/import callback0 from "\.\/[^"]*format\.js";/)
+      expect(adapters[0].content).toContain('<Original {...props} f={render} g={callback0}>')
+    })
+
+    it('takes the adapter for a component the page also uses as a value', () => {
+      const { body, adapters } = migrate(widget, '<Widget f={format} C={Widget}>Body.</Widget>')
+      // The component is a function too: it travels through the adapter with `f`, not from the page.
+      expect(body).not.toMatch(/f=\{format\}|C=\{Widget\}/)
+      expect(body).toMatch(/<Migrated[a-f0-9]+\s*>Body\.<\/Migrated[a-f0-9]+>/)
+      expect(adapters).toHaveLength(1)
+      expect(adapters[0].content).toContain('<Original {...props} f={callback0} C={callback1}>')
+    })
+
+    it('keeps a mixed tag passive when its page-local callback cannot move, whatever else it passes', () => {
+      const { body, warnings, adapters } = migrate(widget, "export const bad = ({ children }) => { const [n] = useState(0); return <b>{n}{children}</b> };\n\n<Widget f={bad} g={format}><Warning>Keep this.</Warning></Widget>")
+      expect(adapters).toEqual([])
+      expect(body).toContain('<Warning>Keep this.</Warning>')
+      expect(body).not.toContain('g={format}')
+      expect(warnings.some((warning) => warning.message.includes('Interactive <Widget>'))).toBe(true)
+    })
+
+    it('leaves a page-local callback passed to an async server component as authored', () => {
+      const root = fixture({ 'widget.jsx': 'export default async function Widget({ f }) { return <p>{f(await Promise.resolve("x"))}</p> }' })
+      const warnings: Array<MigrationWarning> = []
+      const migrator = createComponentMigrator(root, root, warnings, 'https://github.com/example/docs')
+      const body = migrator.transform(`import Widget from './widget.jsx'\n\n${render}\n\n<Widget f={render} />`, join(root, 'index.mdx'))
+      // Wrapped in a 'use client' adapter it would be an async client component, which Next.js cannot run.
+      expect(migrator.files().some((file) => file.path.includes('/callback-'))).toBe(false)
+      expect(body).toMatch(/<Migrated[a-f0-9]+ f=\{render\} \/>/)
+      expect(String(migrator.files().find((file) => file.path.endsWith('/widget.jsx'))!.content)).not.toContain("'use client'")
+      expect(warnings).toEqual([])
+    })
+  })
+
+  it('names callback adapters and the component registry the same on every run, wherever the repository is cloned', () => {
+    const files = {
+      'docs.json': JSON.stringify({ navigation: { pages: ['home'] } }),
+      'home.mdx': [
+        '---', 'title: Home', '---', '',
+        "import { Playground } from './snippets/playground.jsx'",
+        "import { Viewer } from './snippets/viewer.jsx'",
+        "import format from './snippets/format.js'", '',
+        'export const WidgetCodeBlock = ({ children, ...props }) => (<CodeBlock {...props}>{children}</CodeBlock>);', '',
+        '<Playground CodeBlockComponent={WidgetCodeBlock}><Warning>Keep this.</Warning></Playground>', '',
+        '<Viewer format={format} />', '',
+      ].join('\n'),
+      'snippets/playground.jsx': 'export const Playground = ({ children, CodeBlockComponent }) => <section><CodeBlockComponent>sample</CodeBlockComponent>{children}</section>',
+      'snippets/viewer.jsx': 'export const Viewer = ({ format }) => { const [open] = useState(true); return open ? <p>{format("x")}</p> : null }',
+      'snippets/format.js': 'export default function format(value) { return value }',
+    }
+    const migrate = () => {
+      const bundle = migrateRepository({ repositoryDir: fixture(files), sourceUrl: 'https://github.com/example/docs' })
+      const rendered = renderMigrationFiles(bundle)
+      return {
+        body: bundle.pages.find((page) => page.id === 'home')!.body,
+        paths: rendered.map((file) => file.path).sort(),
+        registry: String(rendered.find((file) => file.path === 'src/mdx/custom-components.tsx')!.content),
+      }
+    }
+    const first = migrate()
+    expect(first.paths.filter((path) => path.includes('/callback-'))).toHaveLength(2)
+    expect(migrate()).toEqual(first)
+  })
+
   it('removes a React hook import unused outside fenced examples', () => {
     const root = fixture({})
     const warnings: Array<MigrationWarning> = []
@@ -1886,5 +2199,80 @@ describe('SCAFFOLD_PROVIDED_IMPORTS drift guard', () => {
       expect(dependencies.has(name), `${name} is not in root package.json dependencies`).toBe(true)
       expect(new RegExp(`from ['"]${name}(?:/[^'"]*)?['"]`).test(runtimeSource), `${name} is not imported by synced runtime code`).toBe(true)
     }
+  })
+})
+
+describe('the names a client adapter binds never take one the page declared', () => {
+  const widget = 'export const Widget = ({ f, g, children }) => { const [open] = useState(true); return open ? <p>{f("x")}{g ? g("y") : null}{children}</p> : null }'
+  const adapterFor = (name: string, tag = `<Widget f={${name}} g={format}>Body.</Widget>`) => {
+    const root = fixture({ 'widget.jsx': widget, 'format.js': 'export default function format(value) { return value }' })
+    const warnings: Array<MigrationWarning> = []
+    const migrator = createComponentMigrator(root, root, warnings, 'https://github.com/example/docs')
+    const source = `import { Widget } from './widget.jsx'\nimport format from './format.js'\n\nexport const ${name} = ({children}) => (<div>{children}</div>);\n\n${tag}`
+    migrator.transform(source, join(root, 'index.mdx'))
+    const files = migrator.files()
+    const adapter = files.find((file) => file.path.includes('/callback-'))
+    return { warnings, content: String(adapter?.content), registry: String(files.find((file) => file.path === 'src/mdx/custom-components.tsx')?.content) }
+  }
+  // Declaring a name twice is an early error for any JavaScript parser, so the migrated site would not build.
+  const parses = (content: string) => expect(() => transformSync(content, { loader: 'jsx' })).not.toThrow()
+
+  it('renames the imported function when the page callback is called callback0', () => {
+    const { warnings, content } = adapterFor('callback0')
+    parses(content)
+    expect(content).toContain('export const callback0 =')
+    expect(content).toMatch(/import callback0_ from "\.\/[^"]*format\.js";/)
+    expect(content).toContain('<Original {...props} f={callback0} g={callback0_}>')
+    expect(warnings).toEqual([])
+  })
+
+  it('renames the component the adapter wraps when the page callback is called Original', () => {
+    const { content } = adapterFor('Original')
+    parses(content)
+    expect(content).toMatch(/import \{ Widget as Original_ \} from/)
+    expect(content).toContain('<Original_ {...props} f={Original} g={callback0}>{children}</Original_>')
+  })
+
+  it('renames the adapter when the page callback is called CallbackWrapper, and registers it by the new name', () => {
+    const { content, registry } = adapterFor('CallbackWrapper')
+    parses(content)
+    expect(content).toContain('export function CallbackWrapper_(')
+    expect(content).toContain('f={CallbackWrapper}')
+    expect(registry).toMatch(/CallbackWrapper_ as Migrated[a-f0-9]+/)
+  })
+
+  it('keeps f the page callback when it is called children or props, which the adapter also binds', () => {
+    for (const name of ['children', 'props']) {
+      const { content } = adapterFor(name)
+      parses(content)
+      expect(content).toContain(`f={${name}} g={callback0}`)
+      expect(content).toContain(name === 'children' ? '({ children: children_, ...props })' : '({ children, ...props_ })')
+    }
+  })
+
+  it('keeps clear of every name the copied statement declares, not only the one the tag passes', () => {
+    const run = (declaration: string, tag: string) => {
+      const root = fixture({ 'widget.jsx': widget, 'format.js': 'export default function format(value) { return value }' })
+      const migrator = createComponentMigrator(root, root, [], 'https://github.com/example/docs')
+      migrator.transform(`import { Widget } from './widget.jsx'\nimport format from './format.js'\n\n${declaration}\n\n${tag}`, join(root, 'index.mdx'))
+      return String(migrator.files().find((file) => file.path.includes('/callback-'))?.content)
+    }
+    // `callback0_` is declared beside `callback0`, so the imported function must not take it.
+    const second = run('export const callback0 = ({children}) => (<div>{children}</div>), callback0_ = ({children}) => (<span>{children}</span>);',
+      '<Widget f={callback0} g={format}>Body.</Widget>')
+    parses(second)
+    expect(second).toMatch(/import callback0__ from "\.\/[^"]*format\.js";/)
+    expect(second).toContain('<Original {...props} f={callback0} g={callback0__}>')
+    // The same for the other names the adapter binds, and whatever the first name an unused one takes.
+    const others = run('export const Original = ({children}) => (<div>{children}</div>), Original_ = ({children}) => (<b>{children}</b>), CallbackWrapper_ = ({children}) => (<i>{children}</i>);',
+      '<Widget f={Original} g={format}>Body.</Widget>')
+    parses(others)
+    expect(others).toMatch(/import \{ Widget as Original__ \} from/)
+    expect(others).toContain('<Original__ {...props} f={Original} g={callback0}>{children}</Original__>')
+  })
+
+  it('leaves every name as it was when the page declares none of them', () => {
+    const { content } = adapterFor('render')
+    expect(content).toContain('export function CallbackWrapper({ children, ...props }) { return <Original {...props} f={render} g={callback0}>{children}</Original>; }')
   })
 })

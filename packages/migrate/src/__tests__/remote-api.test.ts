@@ -115,7 +115,7 @@ describe('remote OpenAPI hydration', () => {
     expect(result.warnings).toEqual([])
   })
 
-  it('does not guess a redirect when operation labels collide', async () => {
+  it('guesses a redirect to the first of two operations whose labels repeat, as Mintlify numbers the later ones', async () => {
     const duplicate = JSON.stringify({
       openapi: '3.0.0', info: { title: 'Example', version: '1' },
       paths: {
@@ -125,7 +125,8 @@ describe('remote OpenAPI hydration', () => {
     })
     const result = await hydrateRemoteApiSpecs(bundle(), async (url) => ({ finalUrl: url, body: duplicate, contentType: 'application/json' }))
     expect(result.assets).toHaveLength(1)
-    expect(result.docsConfig.redirects).toBeUndefined()
+    // The first keeps the URL; the second is `list-users-1`, which nothing links to.
+    expect(result.docsConfig.redirects).toEqual([{ source: '/api-reference/scim/list-users', destination: '/api/default/users/get', permanent: false }])
   })
 })
 
@@ -329,6 +330,35 @@ describe('remote OpenAPI spec mounted under Mintlify directories', () => {
     expect(result.docsConfig.redirects).toContainEqual({ source: '/api-reference/projects/create-project', destination: '/api/default/v2/projects-createproject/post' })
   })
 
+  it('keeps a page link to an endpoint URL as the link its page wrote, instead of treating it as a redirect that hides the page', async () => {
+    const input = mountedBundle()
+    const target = '/compute/api-reference/projects/create-project'
+    input.pages.push({ id: 'jump', navigationId: 'jump', title: 'Jump', description: '', keywords: [], body: '', source: 'jump.mdx', noindex: true, externalUrl: target })
+    input.docsConfig.redirects = [...(input.docsConfig.redirects ?? []), { source: '/jump', destination: target, permanent: false }]
+    const result = await hydrateRemoteApiSpecs(input, fetcher)
+    expect(result.docsConfig.redirects).toContainEqual({ source: '/jump', destination: target, permanent: false })
+    expect(result.warnings.filter((warning) => warning.message.includes('/jump'))).toEqual([])
+  })
+
+  it('reports and drops a link that closes a loop with the redirects the download adds', async () => {
+    const input = mountedBundle()
+    const target = '/compute/api-reference/projects/create-project'
+    const endpoint = '/api/default/v2/projects-createproject/post'
+    input.pages.push({ id: 'jump', navigationId: 'jump', title: 'Jump', description: '', keywords: [], body: '', source: 'jump.mdx', noindex: true, externalUrl: target })
+    // The endpoint URL goes to the page that links back to it: after the download, endpoint -> /jump -> target -> endpoint.
+    input.docsConfig.redirects = [
+      ...(input.docsConfig.redirects ?? []),
+      { source: endpoint, destination: '/jump' },
+      { source: '/jump', destination: target, permanent: false },
+    ]
+    const result = await hydrateRemoteApiSpecs(input, fetcher)
+    const redirects = new Map((result.docsConfig.redirects ?? []).map((redirect) => [redirect.source, redirect.destination]))
+    expect(redirects.get(target)).toBe(endpoint)
+    expect(redirects.get(endpoint)).toBe('/jump')
+    expect(redirects.has('/jump')).toBe(false)
+    expect(result.warnings.filter((warning) => /circle/.test(warning.message) && warning.message.includes('/jump'))).toHaveLength(1)
+  })
+
   it('rewrites body links to endpoint URLs', async () => {
     const result = await hydrateRemoteApiSpecs(mountedBundle(), fetcher)
     expect(result.pages[0].body).toContain('[create](/api/default/v2/projects-createproject/post)')
@@ -519,7 +549,7 @@ describe('remote OpenAPI spec body links written with a trailing slash, a query 
     input.docsConfig = { ...input.docsConfig, redirects: [{ source: '/api-reference/scim/list-users/', destination: '/guide' }] }
     const scimSpec = JSON.stringify({ openapi: '3.0.0', info: { title: 'Example', version: '1' }, paths: { '/users': { get: { summary: 'List users', tags: ['SCIM'] } } } })
     const result = await hydrateRemoteApiSpecs(input, async (url) => ({ finalUrl: url, body: scimSpec, contentType: 'application/json' }))
-    expect(result.docsConfig.redirects).toEqual([{ source: '/api-reference/scim/list-users/', destination: '/guide' }])
+    expect(result.docsConfig.redirects).toEqual([{ source: '/api-reference/scim/list-users', destination: '/guide' }])
     expect(result.pages[0].body).toBe('[List users](/api-reference/scim/list-users)')
   })
 
@@ -1005,7 +1035,7 @@ describe('remote OpenAPI spec whose listed operations Mintlify served as pages',
     const pageUrls = new Set(result.pages.map((page) => `/${page.id}`))
     expect(redirects.filter((redirect) => pageUrls.has(redirect.source))).toEqual([])
     expect(redirects.filter((redirect) => redirect.source.startsWith('/api/') || redirect.destination.startsWith('/api/'))).toEqual([])
-    expect(redirects).toContainEqual({ source: '/old-create-key', destination: '/api-management/api-reference/keys/create-api-key' })
+    expect(redirects).toContainEqual({ source: '/old-create-key', destination: '/api-management/api-reference/keys/create-api-key', permanent: true })
     // A folder of pages with no page of its own opens on its first page, as for any other page of the navigation.
     expect(redirects.find((redirect) => redirect.source === '/api-management/api-reference/keys')?.destination).toBe('/api-management/api-reference/keys/create-api-key')
     expect(redirects.find((redirect) => redirect.source === '/platform/api-reference')?.destination).toBe('/platform/api-reference/domains/create-domain')

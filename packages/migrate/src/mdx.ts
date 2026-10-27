@@ -1,6 +1,8 @@
 /** Markdown/MDX normalization that preserves every component Thally supports. */
 
 import type * as acorn from 'acorn'
+// @ts-expect-error eslint-scope ships no types; the one function used here is typed where it is called.
+import { analyze } from 'eslint-scope'
 import { posix } from 'node:path'
 import { compileSync } from '@mdx-js/mdx'
 import { nameToEmoji } from 'gemoji'
@@ -13,6 +15,7 @@ import { isThallyBuiltinComponent } from './builtin-components.js'
 import { pageScopeNames, unresolvedExpressionNames } from './inline-extraction.js'
 import { playgroundDisplay } from './mintlify-extras.js'
 import { parseFrontmatter } from './frontmatter.js'
+import { SOURCE_PAGE_ATTRIBUTE } from './source-styles.js'
 import { normalizeMintlifyCodeFences } from './fence-meta.js'
 import type { MigrationPage, MigrationPlatform } from './types.js'
 
@@ -41,19 +44,40 @@ interface DescriptionNode {
 
 const descriptionParser = unified().use(remarkParse).use(remarkGfm).use(remarkMdx)
 
-function plainText(node: DescriptionNode): string {
+/** `elements`, when given, leaves out every JSX element and what it holds, and is set once one is met. */
+function plainText(node: DescriptionNode, elements?: { found: boolean }): string {
+  if (elements && (node.type === 'mdxJsxTextElement' || node.type === 'mdxJsxFlowElement')) {
+    elements.found = true
+    return ''
+  }
   if (node.type === 'text' || node.type === 'inlineCode') return node.value ?? ''
   if (node.type === 'image') return node.alt ?? ''
   if (node.type === 'break') return ' '
-  return (node.children ?? []).map(plainText).join('')
+  return (node.children ?? []).map((child) => plainText(child, elements)).join('')
+}
+
+function headingText(content: string, definitions?: ReadonlyMap<string, string>, elements?: { found: boolean }): string {
+  const references = [...content.matchAll(/\[([^\]\n]+)\]/g)]
+    .map((match) => definitions?.get(match[1].trim().replace(/\s+/g, ' ').toLowerCase()) ?? '').join('\n')
+  try { return plainText(descriptionParser.parse(`# ${content}\n\n${references}`) as DescriptionNode, elements).trim() }
+  catch { return content }
 }
 
 /** Read visible inline text without including JSX attributes or Markdown syntax. */
 export function mdxVisibleText(content: string, definitions?: ReadonlyMap<string, string>): string {
-  const references = [...content.matchAll(/\[([^\]\n]+)\]/g)]
-    .map((match) => definitions?.get(match[1].trim().replace(/\s+/g, ' ').toLowerCase()) ?? '').join('\n')
-  try { return plainText(descriptionParser.parse(`# ${content}\n\n${references}`) as DescriptionNode).trim() }
-  catch { return content }
+  return headingText(content, definitions)
+}
+
+/**
+ * The text the renderer builds a heading's id from: the heading's own text, without its inline components and what they hold
+ * (`Setup <Badge>Pro</Badge>` reads "Setup"). Undefined when the heading has no inline component, or when nothing an id is made of
+ * is left, so the caller reads the heading's whole text as it always did.
+ */
+export function mdxTextWithoutInlineElements(content: string, definitions?: ReadonlyMap<string, string>): string | undefined {
+  if (!/<[A-Za-z]/.test(content)) return undefined
+  const elements = { found: false }
+  const text = headingText(content, definitions, elements)
+  return elements.found && /[\p{L}\p{M}\p{N}]/u.test(text) ? text : undefined
 }
 
 function firstParagraph(content: string): string {
@@ -78,6 +102,35 @@ function firstParagraph(content: string): string {
     // empty generated description is safer than exposing source-code fragments.
     return ''
   }
+}
+
+interface PositionedNode extends DescriptionNode {
+  position?: { start: { offset?: number }; end: { offset?: number } }
+}
+
+// Plain CommonMark: a description is not MDX, so `<` and `{` in it must not fail the parse, and a bare address is not a link.
+const linkParser = unified().use(remarkParse)
+
+/**
+ * `text` with each Markdown link (`[text](url)`, `<https://...>`) replaced by the source of its text, so inline code, emphasis and
+ * everything else stay as written. A link is read the way Markdown reads it, so one inside a code span, an escaped bracket, an image
+ * and a bracket pair with no `(url)` are not links. Unchanged when it has none.
+ */
+function withoutMarkdownLinks(text: string): string {
+  const links: Array<{ start: number; end: number; textStart: number; textEnd: number }> = []
+  const collect = (node: PositionedNode): void => {
+    if (node.type === 'link') {
+      const first = (node.children?.[0] as PositionedNode | undefined)?.position?.start.offset
+      const last = (node.children?.at(-1) as PositionedNode | undefined)?.position?.end.offset
+      const start = node.position?.start.offset
+      const end = node.position?.end.offset
+      if (start !== undefined && end !== undefined) links.push({ start, end, textStart: first ?? start, textEnd: last ?? start })
+      return
+    }
+    for (const child of node.children ?? []) collect(child)
+  }
+  collect(linkParser.parse(text) as PositionedNode)
+  return links.reduceRight((result, link) => result.slice(0, link.start) + result.slice(link.textStart, link.textEnd) + result.slice(link.end), text)
 }
 
 function docusaurusAdmonitionTag(kind: string): 'Error' | 'Info' | 'Note' | 'Warning' {
@@ -345,20 +398,23 @@ function headingIdMarker(id: string): string {
 }
 
 /** Characters Mintlify keeps in an id besides letters, marks and digits; the ones around which it also places a dash. */
-const HEADING_ID_WORD = /[\p{L}\p{M}\p{N}_+&/@\u2019\u201c\u201d\u2014\u2013\u2192]/u
+const HEADING_ID_WORD = /[\p{L}\p{M}\p{N}_+&/@%=<>|\u2019\u201c\u201d\u2014\u2013\u2192\u2026]/u
 
 /**
  * The id Mintlify gives a heading with no explicit `{#id}`, from its rendered
  * text. Derived from the live ids of two Mintlify sites: whitespace and `-`
  * become one dash, as does a `.` before a word, a `(` between a word and a
  * word or `{` (`start(body`), and a `)` glued to what follows it (`()`+`:`).
- * `{`, `:` and `"` drop out but end a run of dashes, so `(`, `{`, space gives
- * two. `+ & / _ @`, typographic quotes and dashes and arrows are kept, other
+ * `{`, `:`, `,` and `"` drop out but end a run of dashes, so `(`, `{`, space gives
+ * two, as does `), ` (`lower(x), upper(x)` is `lower-x--upper-x`). `+ & / _ @ % = < > |`,
+ * typographic quotes and dashes, arrows and the ellipsis are kept, other
  * punctuation and emoji are dropped, and repeats are numbered `-2`, `-3`, ...
- * by the renderer.
+ * by the renderer. Read from other sites' ids: a `.` before a `,` makes a dash
+ * (`e.g., x` is `e-g--x`), and `(s)` after a word is the plural (`domain(s)` is
+ * `domains`).
  */
 export function mintlifyHeadingSlug(text: string): string {
-  const chars = [...text.replace(/[\u200b*]/g, '').normalize('NFC').trim().toLowerCase()]
+  const chars = [...text.replace(/[\u200b*]/g, '').replace(/(?<=[\p{L}\p{M}\p{N}_])\(s\)(?![\p{L}\p{M}\p{N}_])/gu, 's').normalize('NFC').trim().toLowerCase()]
   const isWord = (char: string | undefined): boolean => char !== undefined && HEADING_ID_WORD.test(char)
   let id = ''
   let afterDash = false
@@ -372,14 +428,14 @@ export function mintlifyHeadingSlug(text: string): string {
       afterDash = false
     } else if (
       /[\s-]/.test(char)
-      || (char === '.' && isWord(after))
+      || (char === '.' && (isWord(after) || after === ','))
       || (char === '(' && isWord(before) && (isWord(after) || after === '{'))
       || (char === ')' && after !== undefined && !/\s/.test(after))
     ) {
       if (id && !afterDash) id += '-'
       afterDash = true
       endsWithDash = true
-    } else if (char === '{' || char === ':' || char === '"') {
+    } else if (char === '{' || char === ':' || char === '"' || char === ',') {
       afterDash = false
     }
   })
@@ -391,27 +447,110 @@ function thallyHeadingSlug(text: string): string {
   return text.normalize('NFC').toLowerCase().replace(/[^\p{L}\p{M}\p{N}]+/gu, '-').replace(/(^-|-$)/g, '')
 }
 
-/** Mintlify typesets straight quotes in heading text, and its ids keep the typographic characters. */
+/**
+ * Mintlify typesets straight quotes in heading text, and its ids keep the typographic characters. A heading that opens with a straight
+ * double quote and does not end with one gets a closing quote first (2 of 2 such headings on a live site); one quoted from end to end
+ * keeps its opening quote (another live site).
+ */
 function typesetQuotes(text: string): string {
+  const opensClosed = text.startsWith('"') && !text.trimEnd().endsWith('"')
   return text.split(/(`[^`]*`|<[^>]*>|\]\([^)]*\))/).map((part, index) => {
     if (index % 2) return part
     return part
-      .replace(/(^|[\s([{\u2014\u2013])"/g, '$1\u201c').replace(/"/g, '\u201d')
-      .replace(/(^|[\s([{\u2014\u2013\u201c])'(?=\S)/g, '$1\u2018').replace(/'/g, '\u2019')
+      // The leading quote of such a heading is left straight here, so the next step closes it.
+      .replace(/(^|[\s([{\u2014\u2013])"/g, (match, before: string) => (opensClosed && index === 0 && before === '' ? match : `${before}\u201c`))
+      .replace(/"/g, '\u201d')
+      .replace(/(^|[\s([{\u2014\u2013\u201c])'(?=\S)(?!&lt;|<)/g, '$1\u2018').replace(/'/g, '\u2019')
   }).join('')
+}
+
+/** Mintlify typesets `...` as an ellipsis in a heading's text, not in its code, and its id keeps it (`f(x, ...)` is `f-x-…`). */
+function typesetEllipses(text: string): string {
+  return text.split(/(`[^`]*`|<[^>]*>|\]\([^)]*\))/).map((part, index) => (index % 2 ? part : part.replace(/\.{3}/g, '\u2026'))).join('')
 }
 
 /** Visible text of a heading's inline Markdown. */
 function plainHeadingText(source: string): string {
-  return source
+  // A link's text can hold code (`[`Scrape`](/n8n)`), and the split below would cut the link in three and leave its target in the text,
+  // so a link that holds code spans goes first. A code span is skipped whole: link syntax inside it is text.
+  const unlinked = !source.includes('`') ? source
+    : source.replace(/(`[^`]*`)|!?\[((?:`[^`]*`|[^\]`])*)\]\([^)]*\)/g, (_match: string, code?: string, text = '') => code ?? text)
+  // What a code span holds is text, whatever it looks like: no comment, link, tag or emphasis is read inside it (`Option<T>` keeps its `<T>`).
+  return unlinked.split(/(`[^`]*`)/).map((part, index) => (index % 2 ? part.slice(1, -1) : part
     // An authored MDX comment is not rendered, so Mintlify's id never sees it.
     .replace(/\{\/\*[\s\S]*?\*\/\}/g, ' ')
     .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/<\/?[A-Za-z][^>]*>/g, '')
-    .replace(/`([^`]*)`/g, '$1')
     .replace(/(?<!\\)(\*\*|__|~~|\*)/g, '')
     .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
-    .replace(/\\([\\`*_{}[\]()#+.!&<>|~-])/g, '$1')
+    .replace(/\\([\\`*_{}[\]()#+.!&<>|~-])/g, '$1'))).join('')
+}
+
+interface IdClaimNode extends DescriptionNode {
+  depth?: number
+  attributes?: Array<{ type: string; name?: string; value?: unknown }>
+  children?: Array<IdClaimNode>
+  position?: { start: { line: number } }
+}
+
+/** A string an attribute holds, written as `"x"` or as a static expression (`{"x"}`, `{'x'}`, `{`x`}`); undefined for anything computed. */
+function staticAttributeString(value: unknown): string | undefined {
+  if (typeof value === 'string') return value
+  const expression = (value as { value?: unknown } | null)?.value
+  if (typeof expression !== 'string') return undefined
+  return expression.match(/^\s*(?:"([^"\\]*)"|'([^'\\]*)'|`((?:[^`\\$]|\$(?!\{))*)`)\s*$/)?.slice(1).find((part) => part !== undefined)
+}
+
+/**
+ * Who could own which id on a page, read from the page as the renderer parses it (headings at any depth, the `title` and `id`
+ * attributes of any component, ids written in a heading), not from its lines: a line inside a code block, a heading in a blockquote
+ * and an attribute over several lines all read as what they are. Ids are compared without a trailing `-N`, which numbering adds.
+ * `free(id, line)` is true when the heading at `line` is a heading of the page and nothing but that heading's own text could own `id`
+ * (an anchor or title on the same line is something else); a page that does not parse has no free id.
+ */
+function pageIdClaims(body: string): { free: (id: string, line: number) => boolean } {
+  let tree: IdClaimNode
+  try { tree = descriptionParser.parse(body) as IdClaimNode } catch { return { free: () => false } }
+  const owners = new Map<string, { owner: string; shared: boolean }>()
+  const headingLines = new Set<number>()
+  let claims = 0
+  const root = (id: string): string => id.toLowerCase().replace(/-\d+$/, '')
+  const claim = (owner: string, ...ids: Array<string>): void => {
+    for (const id of ids) {
+      const key = root(id)
+      const held = owners.get(key)
+      if (!key) continue
+      if (!held) owners.set(key, { owner, shared: false })
+      else if (held.owner !== owner) held.shared = true
+    }
+  }
+  const visit = (node: IdClaimNode): void => {
+    const line = node.position?.start.line ?? 0
+    if (node.type === 'heading' && (node.depth ?? 0) >= 2) {
+      headingLines.add(line)
+      const text = typesetQuotes(plainText(node))
+      claim(`heading ${line}`, mintlifyHeadingSlug(text), thallyHeadingSlug(text), thallyHeadingSlug(plainText(node, { found: false })))
+      for (const child of node.children ?? []) {
+        const authored = child.type === 'mdxTextExpression' ? child.value?.match(/^\s*\/\*\s*#(\S+?)\s*\*\/\s*$/)?.[1] : undefined
+        if (authored) claim(`claim ${claims++}`, authored)
+      }
+    } else if (node.type === 'mdxJsxFlowElement' || node.type === 'mdxJsxTextElement') {
+      for (const { type, name, value } of node.attributes ?? []) {
+        const text = type === 'mdxJsxAttribute' ? staticAttributeString(value) : undefined
+        if (text === undefined) continue
+        if (name === 'id') claim(`claim ${claims++}`, text)
+        else if (name === 'title') claim(`claim ${claims++}`, mintlifyHeadingSlug(text), thallyHeadingSlug(text))
+      }
+    }
+    for (const child of node.children ?? []) visit(child)
+  }
+  visit(tree)
+  return {
+    free: (id, line) => {
+      const held = owners.get(root(id))
+      return headingLines.has(line) && (!held || (held.owner === `heading ${line}` && !held.shared))
+    },
+  }
 }
 
 /**
@@ -419,10 +558,15 @@ function plainHeadingText(source: string): string {
  * `#anchor` links from the source still land. Only headings whose id differs
  * from Thally's own slug get a marker, which leaves every other anchor alone.
  * Straight quotes in heading text are typeset as Mintlify does.
+ *
+ * The renderer builds an id from a heading's own text, without its inline components and what they hold, which Mintlify's id keeps
+ * (`Setup <Badge>Pro</Badge>`: `setup` against `setup-pro`). Such a heading is marked too, unless something else on the page
+ * could own that id: a marker reserves its id for the whole page, so it would move the other holder's anchor.
  */
 export function markMintlifyHeadings(body: string): string {
   let fence: string | undefined
-  return body.split('\n').map((line) => {
+  let claims: ReturnType<typeof pageIdClaims> | undefined
+  return body.split('\n').map((line, index) => {
     const marker = line.match(/^ {0,3}(`{3,}|~{3,})/)
     if (marker) {
       if (!fence) fence = marker[1]
@@ -438,8 +582,13 @@ export function markMintlifyHeadings(body: string): string {
     const source = typesetQuotes(explicit ? explicit[1] : heading[2])
     if (explicit) return `${heading[1]}${source}${explicit[2]}`
     const text = plainHeadingText(source)
-    const id = mintlifyHeadingSlug(text)
-    return `${heading[1]}${source}${id && id !== thallyHeadingSlug(text) ? ` ${headingIdMarker(id)}` : ''}`
+    const id = mintlifyHeadingSlug(plainHeadingText(typesetEllipses(source)))
+    let marked = id !== thallyHeadingSlug(text)
+    if (id && !marked) {
+      const visible = mdxTextWithoutInlineElements(source)
+      if (visible !== undefined && id !== thallyHeadingSlug(visible)) marked = (claims ??= pageIdClaims(body)).free(id, index + 1)
+    }
+    return `${heading[1]}${source}${id && marked ? ` ${headingIdMarker(id)}` : ''}`
   }).join('\n')
 }
 
@@ -498,43 +647,304 @@ interface MdxOffsetNode {
   position?: { start: { offset?: number }; end: { offset?: number } }
 }
 
-/** Bind static partial invocation props inside expressions, preserving literals and code examples. */
-export function bindSnippetProps(body: string, properties: ReadonlyMap<string, string>): string {
-  if (!body.includes('props') || properties.size === 0) return body
-  let tree: unknown
-  try { tree = descriptionParser.parse(body) } catch { return body }
-  const edits: Array<{ start: number; end: number; value: string }> = []
-  const inspectExpression = (value: unknown): void => {
-    if (!value || typeof value !== 'object') return
-    const node = value as acorn.AnyNode
-    if (node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression' || node.type === 'FunctionDeclaration') {
-      const names = new Set<string>()
-      node.params.forEach((param) => collectPatternNames(param, names))
-      if (names.has('props')) return
+/** An ESTree node as scope analysis sees it: JSX nodes are not in acorn's own types. */
+interface EstreeNode {
+  type: string
+  start: number
+  end: number
+  name?: string
+  shorthand?: boolean
+  computed?: boolean
+  object?: unknown
+  property?: { type: string; name?: string; value?: unknown }
+  operator?: string
+  left?: EstreeNode
+  right?: EstreeNode
+  argument?: EstreeNode
+  test?: EstreeNode
+  expression?: EstreeNode
+  consequent?: EstreeNode
+  alternate?: EstreeNode
+  value?: unknown
+  regex?: unknown
+  bigint?: unknown
+}
+
+/** The ESTree nodes directly under `node`. */
+function estreeChildren(node: EstreeNode): Array<EstreeNode> {
+  return Object.values(node).flatMap((child) => Array.isArray(child) ? child : [child])
+    .filter((entry): entry is EstreeNode => Boolean(entry) && typeof entry === 'object' && typeof entry.type === 'string')
+}
+
+/** What a fully static expression comes to: a primitive, or the JSX element or fragment it selects. */
+type StaticValue = string | number | boolean | null | { jsx: EstreeNode }
+
+interface SourceEdit { start: number; end: number; value: string }
+
+/** `text` starts at `offset` in the source the edits are positioned in. */
+function applyEdits(text: string, edits: ReadonlyArray<SourceEdit>, offset = 0): string {
+  return [...edits].sort((a, b) => b.start - a.start).reduce((out, edit) => out.slice(0, edit.start - offset) + edit.value + out.slice(edit.end - offset), text)
+}
+
+/**
+ * What `node` comes to when nothing in it is left to run, or undefined when anything is. Static means a string, number,
+ * boolean or null literal, a bound prop (`literals`, by the span it stood on) and `=== !== == != && || ! ?:` over those. JSX is
+ * carried as the value an operator selects and never looked into. Both sides of an operator must be static even when one would
+ * decide the result alone: a part that cannot be read is not guessed at.
+ */
+function foldStatic(node: EstreeNode, literals: ReadonlyMap<string, string>): { value: StaticValue } | undefined {
+  const primitive = (child: EstreeNode | undefined): { value: string | number | boolean | null } | undefined => {
+    const folded = child && foldStatic(child, literals)
+    return folded && (typeof folded.value !== 'object' || folded.value === null) ? { value: folded.value } : undefined
+  }
+  const truthy = (value: StaticValue): boolean => typeof value === 'object' && value !== null ? true : Boolean(value)
+  switch (node.type) {
+    case 'Literal': {
+      const value = node.value
+      return !node.regex && !node.bigint && (value === null || ['string', 'number', 'boolean'].includes(typeof value))
+        ? { value: value as string | number | boolean | null } : undefined
     }
-    if (node.type === 'MemberExpression' && node.object.type === 'Identifier' && node.object.name === 'props') {
-      const key = !node.computed && node.property.type === 'Identifier' ? node.property.name
-        : node.computed && node.property.type === 'Literal' && typeof node.property.value === 'string' ? node.property.value : undefined
-      const replacement = key === undefined ? undefined : properties.get(key)
-      if (replacement !== undefined && body.slice(node.start, node.end).startsWith('props')) {
-        edits.push({ start: node.start, end: node.end, value: JSON.stringify(replacement) })
-        return
+    case 'Identifier':
+    case 'MemberExpression': {
+      const bound = literals.get(`${node.start}:${node.end}`)
+      return bound === undefined ? undefined : { value: bound }
+    }
+    case 'JSXElement':
+    case 'JSXFragment':
+      return { value: { jsx: node } }
+    case 'UnaryExpression': {
+      const argument = node.operator === '!' ? primitive(node.argument) : undefined
+      return argument && { value: !argument.value }
+    }
+    case 'BinaryExpression': {
+      const [left, right] = [primitive(node.left), primitive(node.right)]
+      if (!left || !right) return undefined
+      switch (node.operator) {
+        case '===': return { value: left.value === right.value }
+        case '!==': return { value: left.value !== right.value }
+        case '==': return { value: left.value == right.value }
+        case '!=': return { value: left.value != right.value }
+        default: return undefined
       }
     }
-    for (const child of Object.values(value)) {
-      if (Array.isArray(child)) child.forEach(inspectExpression)
-      else if (child && typeof child === 'object') inspectExpression(child)
+    case 'LogicalExpression': {
+      const [left, right] = [node.left && foldStatic(node.left, literals), node.right && foldStatic(node.right, literals)]
+      if (!left || !right || (node.operator !== '&&' && node.operator !== '||')) return undefined
+      return truthy(left.value) === (node.operator === '&&') ? right : left
+    }
+    case 'ConditionalExpression': {
+      const [test, consequent, alternate] = [node.test, node.consequent, node.alternate].map((child) => child && foldStatic(child, literals))
+      return test && consequent && alternate ? (truthy(test.value) ? consequent : alternate) : undefined
+    }
+    default:
+      return undefined
+  }
+}
+
+/** A string that stays plain text when written as Markdown: no marker, link, entity, tag or brace in it. */
+const PLAIN_TEXT = /^\p{L}(?:[\p{L}\p{N} ,.;'?%$=+-]*[\p{L}\p{N}.])?$/u
+
+/**
+ * Bind static partial invocation props inside expressions, preserving literals and code examples.
+ * A snippet reads its props as variables (`{mode === "x" && ...}`) or as `props.mode`; both become
+ * the literal value. A prop binds only where scope analysis finds the reference free: it resolves
+ * to no declaration of the expression (labels, `var` hoisting, parameter defaults, class blocks,
+ * catch clauses and shadowing are all the analyzer's), and is not a name the snippet declares at the
+ * top of its own module (`export const mode = ...`, a function, a class, an import). `props` is a
+ * name like any other: `props.mode` binds only where `props` is free. An object key, a member name
+ * and a class member name are not references, so they are left alone too.
+ *
+ * An expression the binding leaves with nothing to run (only literals, bound props, `=== !== == != && || ! ?:` and JSX)
+ * is decided here, because the Thally runtime reads literals only and would render nothing for it: it becomes the JSX
+ * branch it selects as MDX content, plain text, or nothing. Anything else in it, and any expression the binding did not
+ * touch, stays as written.
+ *
+ * A lone `{name}` (a whole expression of one name, in text or as an attribute value) follows the same
+ * rules; in text it becomes the value itself in a Markdown snippet and `{"value"}` in a JSX one, and
+ * `{children}` always becomes the children as written, inside an expression as well. Text no
+ * expression covers (inline code, a link destination) has its `{name}` replaced as it always was,
+ * except inside a fenced code block.
+ */
+export function bindSnippetProps(body: string, properties: ReadonlyMap<string, string>): string {
+  if (properties.size === 0 || (!body.includes('props') && ![...properties.keys()].some((name) => body.includes(name)))) return body
+  const isJsx = /<[A-Za-z][A-Za-z0-9]*/.test(body)
+  let tree: unknown
+  try { tree = descriptionParser.parse(body) } catch { tree = undefined }
+  const edits: Array<SourceEdit> = []
+  /** Where the snippet's expressions are: the text between is not code, and is bound by name. */
+  const covered: Array<[number, number]> = []
+  // What the snippet declares at the top of its own module is not a free variable anywhere in it.
+  const moduleNames = new Set<string>()
+  const collectModuleNames = (value: unknown): void => {
+    if (!value || typeof value !== 'object') return
+    const node = value as MdxOffsetNode
+    if (node.type === 'mdxjsEsm') collectEsmBindings(node, moduleNames)
+    node.children?.forEach(collectModuleNames)
+  }
+  collectModuleNames(tree)
+  /** Bind the props `program` reads without declaring them. A page's ESM binds only `props.name`: its own names are its own. */
+  const bindFreeReferences = (program: acorn.Program, variables: boolean, literals: Map<string, string>): void => {
+    const parents = new Map<unknown, EstreeNode>()
+    const link = (node: EstreeNode): void => {
+      for (const child of estreeChildren(node)) { parents.set(child, node); link(child) }
+    }
+    link(program as unknown as EstreeNode)
+    // The references that resolve to no declaration anywhere in the program. `ecmaVersion` is a number: anything else is read as ES5, which has no block scope.
+    const free: Array<{ identifier: acorn.Identifier }> = analyze(program, { ecmaVersion: 2022, sourceType: 'module' }).globalScope.through
+    for (const { identifier } of free) {
+      const { name, start, end } = identifier
+      if (moduleNames.has(name)) continue
+      const parent = parents.get(identifier)
+      if (name === 'props' && parent?.type === 'MemberExpression' && parent.object === identifier) {
+        const key = !parent.computed && parent.property?.type === 'Identifier' ? parent.property.name
+          : parent.computed && parent.property?.type === 'Literal' && typeof parent.property.value === 'string' ? parent.property.value : undefined
+        const replacement = key === undefined ? undefined : properties.get(key)
+        if (replacement !== undefined && body.slice(parent.start, parent.end).startsWith('props')) {
+          edits.push({ start: parent.start, end: parent.end, value: JSON.stringify(replacement) })
+          literals.set(`${parent.start}:${parent.end}`, replacement)
+          continue
+        }
+      }
+      const bound = properties.get(name)
+      if (!variables || bound === undefined) continue
+      if (name !== 'children') {
+        // `{ mode }` keeps its key; every other reference is replaced where it stands.
+        if (parent?.type === 'Property' && parent.shorthand) edits.push({ start: parent.start, end: parent.end, value: `${name}: ${JSON.stringify(bound)}` })
+        else {
+          edits.push({ start, end, value: JSON.stringify(bound) })
+          literals.set(`${start}:${end}`, bound)
+        }
+      } else if (parent?.type === 'JSXExpressionContainer' && ['JSXElement', 'JSXFragment'].includes(parents.get(parent)?.type ?? '')) {
+        // The children a call gives a snippet are text of the page, as a lone `{children}` has always been.
+        edits.push({ start: parent.start, end: parent.end, value: bound })
+      }
     }
   }
-  const visit = (value: unknown): void => {
+  /**
+   * The edit that puts `text` where the block expression `[start, end]` stood. That expression was a block of its own, so the lines it now
+   * touches are set off from `text` by a blank line, as it set them off: left as it is, a text or a JSX element would join the paragraph
+   * above or below it. A blank line stays as it is, and what leaves nothing leaves a blank line already. A blank line the edit makes or
+   * leaves is empty, or is a quote's `>` alone: the indent of the container it is in is not needed on it, and would only trail.
+   */
+  const asBlock = (text: string, start: number, end: number): SourceEdit => {
+    const above = body.slice(0, start).split('\n')
+    const prefix = above.pop() ?? ''
+    const touches = (line: string | undefined): boolean => line !== undefined && /[^\s>]/.test(line)
+    const eol = body.includes('\r\n') ? '\r\n' : '\n'
+    // The blank line of the container the expression is in: a quote's `>`, a list item's indent, in the page's own line ending.
+    const blank = `${eol}${prefix.replace(/[^ \t>]/g, ' ').trimEnd()}`
+    const alone = /^[ \t>]*$/.test(prefix)
+    const before = text !== '' && alone && touches(above.pop())
+    // The line the expression stood on is a blank line when it leaves nothing, and the blank line above the text when `before`: its indent
+    // is part of the edit, so that it can go, and `before` puts it back on the line that takes the text.
+    const indent = alone && (before || text === '') ? prefix.length - prefix.trimEnd().length : 0
+    return {
+      start: start - indent,
+      end,
+      value: text && `${before ? `${eol}${prefix}` : ''}${text}${touches(body.slice(end).split('\n', 2)[1]) ? blank : ''}`,
+    }
+  }
+  /**
+   * `jsx` as MDX content, bound. An expression in it that the binding made static (a child or an attribute, as in the page itself)
+   * is decided in turn, and one that still has something to run, or that the page wrote static itself, stays as bound.
+   */
+  const keepJsx = (jsx: EstreeNode, bound: ReadonlyArray<SourceEdit>, literals: ReadonlyMap<string, string>): string => {
+    const folds: Array<SourceEdit> = []
+    const within = (edit: SourceEdit, [from, to]: [number, number]): boolean => edit.start >= from && edit.end <= to
+    const walk = (node: EstreeNode, inAttribute: boolean): void => {
+      if (node.type !== 'JSXExpressionContainer') {
+        for (const child of estreeChildren(node)) walk(child, node.type === 'JSXAttribute')
+        return
+      }
+      // On a line of its own, as `asBlock` reads it: after a quote's `>` or an indent, and before a line ending of either kind.
+      const alone = /(?:^|\n)[ \t>]*$/.test(body.slice(0, node.start)) && /^[ \t]*\r?(?:\n|$)/.test(body.slice(node.end))
+      // A lone `{name}` is bound where it stands, as it is outside this JSX: it is not a condition.
+      const fold = node.expression && node.expression.type !== 'Identifier' && bound.some((edit) => within(edit, [node.start, node.end]))
+        ? foldExpression(node.expression, bound, literals, [node.start, node.end], inAttribute, alone && !inAttribute) : undefined
+      if (fold) folds.push(fold)
+    }
+    walk(jsx, false)
+    return applyEdits(body.slice(jsx.start, jsx.end), [...bound.filter((edit) => within(edit, [jsx.start, jsx.end]) && !folds.some((fold) => within(edit, [fold.start, fold.end]))), ...folds], jsx.start)
+  }
+  /**
+   * The edit that puts the value of `expression`, whose props are bound, where it stood at `[start, end]`, or undefined when
+   * anything in it is still left to run. A text expression becomes the JSX it selects as MDX content, plain text, or nothing; an
+   * attribute's expression becomes a literal and is left alone when it selects JSX. A `flow` expression stays a block.
+   */
+  const foldExpression = (expression: EstreeNode, bound: ReadonlyArray<SourceEdit>, literals: ReadonlyMap<string, string>, [start, end]: [number, number], inAttribute: boolean, flow: boolean): SourceEdit | undefined => {
+    const folded = foldStatic(expression, literals)
+    if (!folded) return undefined
+    const { value } = folded
+    const place = (text: string): SourceEdit => flow ? asBlock(text, start, end) : { start, end, value: text }
+    if (typeof value === 'object' && value !== null) return inAttribute ? undefined : place(keepJsx(value.jsx, bound, literals))
+    if (inAttribute) return { start, end, value: `{${JSON.stringify(value)}}` }
+    if (typeof value === 'boolean' || value === null || value === '') return place('')
+    return place(typeof value === 'string' && PLAIN_TEXT.test(value) ? value : `{${JSON.stringify(value)}}`)
+  }
+  const foldBound = (program: acorn.Program, bound: ReadonlyArray<SourceEdit>, literals: ReadonlyMap<string, string>, span: [number, number], inAttribute: boolean, flow: boolean): SourceEdit | undefined => {
+    const [statement] = program.body
+    return program.body.length === 1 && statement.type === 'ExpressionStatement'
+      ? foldExpression(statement.expression as unknown as EstreeNode, bound, literals, span, inAttribute, flow) : undefined
+  }
+  /** `span` is where an attribute's value expression sits, which the value node itself does not say. */
+  const visit = (value: unknown, span?: [number, number]): void => {
     if (!value || typeof value !== 'object') return
-    const node = value as MdxOffsetNode & { attributes?: Array<{ value?: unknown }> }
-    if (node.data?.estree) inspectExpression(node.data.estree)
-    for (const attribute of node.attributes ?? []) visit(attribute.value)
+    const node = value as MdxOffsetNode & { attributes?: Array<{ value?: unknown; position?: MdxOffsetNode['position'] }> }
+    const program = node.data?.estree
+    if (program) {
+      const start = span?.[0] ?? node.position?.start.offset
+      const end = span?.[1] ?? node.position?.end.offset
+      if (start !== undefined && end !== undefined) covered.push([start, end])
+      const [statement] = program.body
+      const lone = node.type !== 'mdxjsEsm' && program.body.length === 1 && statement.type === 'ExpressionStatement' && statement.expression.type === 'Identifier'
+        ? statement.expression : undefined
+      if (lone) {
+        const bound = moduleNames.has(lone.name) ? undefined : properties.get(lone.name)
+        if (bound === undefined) {
+          // Not a prop of this call, or the snippet's own name: it stays an expression.
+        } else if (span || (isJsx && lone.name !== 'children')) edits.push({ start: lone.start, end: lone.end, value: JSON.stringify(bound) })
+        else if (start !== undefined && end !== undefined) edits.push(node.type === 'mdxFlowExpression' ? asBlock(bound, start, end) : { start, end, value: bound })
+      } else {
+        const first = edits.length
+        const literals = new Map<string, string>()
+        bindFreeReferences(program, node.type !== 'mdxjsEsm', literals)
+        // An expression the binding has made static is its value; one that still has something to run stays as bound.
+        const folded = node.type !== 'mdxjsEsm' && edits.length > first && start !== undefined && end !== undefined
+          ? foldBound(program, edits.slice(first), literals, span ?? [start, end], Boolean(span), node.type === 'mdxFlowExpression') : undefined
+        if (folded) edits.splice(first, edits.length - first, folded)
+      }
+    }
+    for (const attribute of node.attributes ?? []) {
+      const from = attribute.position?.start.offset
+      const to = attribute.position?.end.offset
+      const brace = from === undefined ? -1 : body.indexOf('{', from)
+      visit(attribute.value, to !== undefined && brace >= 0 && brace < to ? [brace, to] : undefined)
+    }
     for (const child of node.children ?? []) visit(child)
   }
   visit(tree)
-  return edits.sort((a, b) => b.start - a.start).reduce((text, edit) => text.slice(0, edit.start) + edit.value + text.slice(edit.end), body)
+  let fence = ''
+  let lineStart = 0
+  for (const line of body.split('\n')) {
+    const start = lineStart
+    lineStart += line.length + 1
+    const marker = line.match(/^\s*(`{3,}|~{3,})(.*?)\r?$/)
+    if (marker) {
+      // A fence closes on the same character, at least as long, with nothing after it: a shorter one or one with an info string is code.
+      if (!fence) fence = marker[1]
+      else if (marker[1][0] === fence[0] && marker[1].length >= fence.length && !marker[2].trim()) fence = ''
+      continue
+    }
+    if (fence) continue
+    for (const match of line.matchAll(/\{([A-Za-z_][A-Za-z0-9_]*)\}/g)) {
+      const at = start + match.index
+      const bound = properties.get(match[1])
+      if (bound === undefined || covered.some(([from, to]) => from <= at && at < to)) continue
+      // Preserve MDX expression syntax: a literal replacement inside JSX would turn `<a href={url}>` into invalid `href=https://...`.
+      edits.push({ start: at, end: at + match[0].length, value: match[1] === 'children' || !isJsx ? bound : `{${JSON.stringify(bound)}}` })
+    }
+  }
+  return applyEdits(body, edits)
 }
 
 /** Use a page's leading H1 as its title without rendering it twice. */
@@ -705,7 +1115,10 @@ const FENCE_OPEN = /^(`{3,}|~{3,})/
  * line here because `protectMathBlocks` processes text line by line; a tag
  * split across lines is already opaque to it for other reasons.
  */
-function maskInlineSpansForMath(line: string): { masked: string; unmask: (text: string) => string } {
+function maskInlineSpansForMath(rawLine: string): { masked: string; unmask: (text: string) => string } {
+  // NUL is never valid in MDX; strip it so it cannot collide with the
+  // placeholder markers (same rule as `maskCode`).
+  const line = rawLine.replace(/\u0000/g, '')
   const blocks: Array<string> = []
   const stash = (text: string): string => {
     blocks.push(text)
@@ -725,10 +1138,12 @@ function maskInlineSpansForMath(line: string): { masked: string; unmask: (text: 
   // template-literal interpolation (`${...}`), not a JSX container, and the
   // caller's own `$(?!{)` guard needs to see the literal `{` to reject it.
   const masked = [tagMasked, tagMasked].reduce((text) => text.replace(/(?<!\$)\{[^{}]*\}/g, stash), tagMasked)
-  return {
-    masked,
-    unmask: (text) => text.replace(/\u0000(\d+)\u0000/g, (_match, index: string) => blocks[Number(index)]),
-  }
+  // A tag or `{...}` container is stashed after the code spans inside it, so
+  // its block still holds their placeholders: unmask each block too. A single
+  // pass left `\u00000\u0000` in the page, which `maskCode` later stripped to a
+  // bare `0` (a prop like `code: \`x$y\`` silently became `code: 0`).
+  const unmask = (text: string): string => text.replace(/\u0000(\d+)\u0000/g, (_match, index: string) => unmask(blocks[Number(index)]))
+  return { masked, unmask }
 }
 
 /**
@@ -1208,6 +1623,44 @@ export function closeOpenFence(body: string): string {
 }
 
 /**
+ * Indent every line of an inlined snippet after the first by `indent`, the
+ * column its tag started at, so a multi-line snippet stays inside the element
+ * or list item that held the tag (its first line already sits there). Lines
+ * inside a JS expression, an ESM block or a JSX attribute are left alone:
+ * indenting them would change the text of a multi-line template literal. So is
+ * every line of a fenced code block, fences included: the code stays exactly as
+ * written. A snippet that does not parse as MDX on its own is returned unchanged.
+ */
+export function indentSnippetLines(snippet: string, indent: string): string {
+  if (!indent || !snippet.includes('\n')) return snippet
+  let tree: MdxOffsetNode
+  try { tree = descriptionParser.parse(snippet) as MdxOffsetNode } catch { return snippet }
+  const verbatim: Array<[number, number]> = []
+  const fenced: Array<[number, number]> = []
+  const keep = (node: { position?: MdxOffsetNode['position'] }, into = verbatim): void => {
+    const start = node.position?.start.offset
+    const end = node.position?.end.offset
+    if (start !== undefined && end !== undefined) into.push([start, end])
+  }
+  const visit = (node: MdxOffsetNode & { attributes?: Array<{ position?: MdxOffsetNode['position'] }> }): void => {
+    if (node.type === 'mdxFlowExpression' || node.type === 'mdxTextExpression' || node.type === 'mdxjsEsm') keep(node)
+    if (node.type === 'code') keep(node, fenced)
+    node.attributes?.forEach((attribute) => keep(attribute))
+    node.children?.forEach(visit)
+  }
+  visit(tree)
+  let lineStart = 0
+  return snippet.split('\n').map((line, index) => {
+    const start = lineStart
+    lineStart += line.length + 1
+    // A continuation line that begins inside a verbatim span is part of its text, and any line of a code block is code.
+    if (index === 0 || line.trim() === '' || verbatim.some(([from, to]) => from < start && start < to)
+      || fenced.some(([from, to]) => from < start + line.length + 1 && start < to)) return line
+    return indent + line
+  }).join('\n')
+}
+
+/**
  * Apply a textual rename to the WHOLE body outside fenced/inline code (via
  * `maskCode`), so a match may span multiple lines.
  */
@@ -1341,7 +1794,36 @@ function normalizeFernFileTrees(body: string): string {
  * analysis too, before that pass ever gets a chance to run.
  */
 export function normalizeHtmlComments(body: string): string {
-  return replaceOutsideCode(body, (whole) => whole.replace(/<!--([\s\S]*?)-->/g, (_match, comment: string) => mdxComment(comment)))
+  return replaceOutsideCode(unwrapHtmlCommentInMdxComment(body), (whole) => whole.replace(/<!--([\s\S]*?)-->/g, (_match, comment: string) => mdxComment(comment)))
+}
+
+/**
+ * An MDX comment whose whole content is one HTML comment (`{/* <!-- note --> *\/}`) becomes an MDX comment with that text (`{/* note *\/}`),
+ * outside code. Converting the HTML comment inside it would nest one MDX comment in another: the first `*\/}` closes the outer comment
+ * and the rest of it shows on the page, where Mintlify renders nothing. Nothing else changes: an HTML comment that shares an MDX comment
+ * with other text is still converted as before. The text between the markers holds neither `-->` nor `*\/`.
+ */
+function unwrapHtmlCommentInMdxComment(body: string): string {
+  return replaceOutsideCode(body, (text) => {
+    const opener = /\{\s*\/\*\s*<!--/g
+    const closer = /\s*\*\/\s*\}/y
+    let out = ''
+    let copied = 0
+    // The next `-->` and `*/` at or after the current opener (-1: none left). Each is searched for again only once an opener has passed it, so the scan stays linear.
+    let dash = -2
+    let star = -2
+    for (let found = opener.exec(text); found; found = opener.exec(text)) {
+      const inner = opener.lastIndex
+      if (dash !== -1 && dash < inner) dash = text.indexOf('-->', inner)
+      if (dash === -1) break
+      if (star !== -1 && star < inner) star = text.indexOf('*/', inner)
+      closer.lastIndex = dash + 3
+      if ((star !== -1 && star < dash) || !closer.test(text)) continue
+      out += `${text.slice(copied, found.index)}{/*${text.slice(inner, dash)}*/}`
+      copied = opener.lastIndex = closer.lastIndex
+    }
+    return out + text.slice(copied)
+  })
 }
 
 /**
@@ -2271,6 +2753,7 @@ export function normalizeMdx(body: string, platform?: MigrationPlatform, unwrapM
     rewritten = rewritten.replace(/^\n{2,}/, '\n')
   }
   if (runMintlify) rewritten = normalizeMintlifyParameterAnchors(rewritten)
+  rewritten = unwrapHtmlCommentInMdxComment(rewritten)
   rewritten = replaceOutsideCode(rewritten, (segment) => {
     let result = convertHtmlStyleAttributes(segment)
       .replace(/<!--([\s\S]*?)-->/g, (_match, content: string) => mdxComment(content))
@@ -2358,9 +2841,33 @@ export function normalizeMdx(body: string, platform?: MigrationPlatform, unwrapM
   return normalizeFlowParagraphContainers(normalized)
 }
 
-/** A Mintlify page whose frontmatter `url` is a web address is a link in the sidebar: visiting its path leaves for that address. */
+/**
+ * The root-relative `url` values that become a link: the whole value must match, nothing is rewritten.
+ * - pathname: `/` and then plain segments (`[A-Za-z0-9._~-]+`) separated by single slashes, with an optional trailing slash;
+ * - query (optional): `?` and plain `key=value` text, where `%` is only ever a valid `%XX` escape;
+ * - fragment (optional): `#` and an element id (`[A-Za-z0-9._~-]+`).
+ * Anything else (`//`, `:`, `+`, `*`, parentheses, braces, an encoded slash, `?q=https://x`) keeps the page as content:
+ * Next.js reads path-to-regexp syntax in a redirect destination's pathname and fragment, reads `:name` in its query,
+ * and collapses repeated slashes, so a value outside this grammar cannot be judged, or served, safely.
+ */
+const SITE_PATH_LINK = /^\/(?:[A-Za-z0-9._~-]+(?:\/[A-Za-z0-9._~-]+)*\/?)?(?:\?(?:[A-Za-z0-9._~=&-]|%[0-9A-Fa-f]{2})*)?(?:#[A-Za-z0-9._~-]+)?$/
+/** Next.js builds a redirect destination longer than 4096 characters into an error; the grammar's own values are far shorter. */
+const MAX_SITE_PATH_LINK_LENGTH = 2000
+
+/** The `url` as a link to a path of this site, or undefined when it is outside the grammar above. */
+function sitePathLink(url: string): string | undefined {
+  // `__ESC_` is Next.js's own escape marker: a destination holding it passes the build check and then fails when a request reaches it.
+  if (url.length > MAX_SITE_PATH_LINK_LENGTH || url.includes('__ESC_') || !SITE_PATH_LINK.test(url)) return undefined
+  return url.split(/[?#]/, 1)[0].split('/').some((segment) => segment === '.' || segment === '..') ? undefined : url
+}
+
+/**
+ * A Mintlify page whose frontmatter `url` is a web address, or a path of its own site (`/local-development#turso-cli`),
+ * is a link in the sidebar: visiting its path leaves for that address.
+ */
 function externalPageUrl(value: unknown): string | undefined {
   const url = typeof value === 'string' ? value.trim() : ''
+  if (url.startsWith('/')) return sitePathLink(url)
   if (!/^https?:\/\/[^\s]+$/i.test(url)) return undefined
   try {
     new URL(url)
@@ -2411,9 +2918,9 @@ export function parseMarkdownPage(input: {
     ? parsed.data.keywords.filter((value): value is string => typeof value === 'string')
     : []
   const heading = leadingPageHeading(body)
-  const title = typeof parsed.data.title === 'string' && parsed.data.title.trim()
-    ? parsed.data.title.trim()
-    : heading?.title ?? titleFromId(identity.navigationId)
+  const authoredTitle = typeof parsed.data.title === 'string' && parsed.data.title.trim() ? parsed.data.title.trim() : heading?.title
+  const title = authoredTitle ?? titleFromId(identity.navigationId)
+  const namesOperation = typeof parsed.data.openapi === 'string' && Boolean(parsed.data.openapi.trim())
   const sidebarTitle = input.platform === 'docusaurus' ? parsed.data.sidebar_label : parsed.data.sidebarTitle
   const navTitle = typeof sidebarTitle === 'string' && sidebarTitle.trim()
     ? sidebarTitle.trim()
@@ -2443,23 +2950,27 @@ export function parseMarkdownPage(input: {
     : ['default', 'wide', 'custom', 'center', 'home'].includes(sourceMode ?? '')
       ? sourceMode as MigrationPage['mode']
       : undefined
+  // A `url` that starts like a path of this site but is outside the grammar of `SITE_PATH_LINK` is reported; the page keeps its own content.
+  if (input.platform === 'mintlify' && typeof parsed.data.url === 'string' && parsed.data.url.trim().startsWith('/') && !externalPageUrl(parsed.data.url)) {
+    const shown = parsed.data.url.trim()
+    input.warn?.(`Page "${identity.id}": its "url" frontmatter ${JSON.stringify(shown.length > 80 ? `${shown.slice(0, 80)}...` : shown)} was not turned into a link, so the page was kept with its own content. Only a site path made of letters, digits and . _ ~ - segments, with an optional ?key=value query and #id fragment, can become a link.`)
+  }
   const externalUrl = input.platform === 'mintlify' ? externalPageUrl(parsed.data.url) : undefined
-  const description = typeof parsed.data.description === 'string' && parsed.data.description.trim()
-    ? parsed.data.description.trim()
-    // An API reference page is described by its operation, not by its prose.
-    : typeof parsed.data.openapi === 'string' && parsed.data.openapi.trim()
-      ? ''
-      : firstParagraph(body)
+  const authoredDescription = typeof parsed.data.description === 'string' && parsed.data.description.trim() ? parsed.data.description.trim() : undefined
+  // An API reference page is described by its operation, not by its prose.
+  const description = authoredDescription ?? (namesOperation ? '' : firstParagraph(body))
   const page: MigrationPage = {
     id: identity.id,
     navigationId: identity.navigationId,
     locale: identity.locale,
     title,
+    ...(authoredTitle === undefined && namesOperation ? { titleFromFileName: true as const } : {}),
     navTitle,
     icon,
     iconType,
     description,
-    ...(input.platform === 'docusaurus' || input.platform === 'fern'
+    // A description taken from the body is the paragraph the body already shows, so it must not also appear under the title.
+    ...(input.platform === 'docusaurus' || input.platform === 'fern' || (authoredDescription === undefined && description !== '')
       ? { descriptionPlacement: 'body' as const }
       : {}),
     badge,
@@ -2475,6 +2986,13 @@ export function parseMarkdownPage(input: {
     body,
     source: input.source,
     ...(parsed.error ? { frontmatterError: parsed.error } : {}),
+  }
+  // Thally shows an authored description as plain text (with inline code), so the raw `[text](url)` of a link would be shown as typed.
+  const writtenDescription = typeof parsed.data.description === 'string' ? parsed.data.description.trim() : ''
+  const plainDescription = withoutMarkdownLinks(writtenDescription)
+  if (plainDescription !== writtenDescription) {
+    page.description = plainDescription
+    input.warn?.(`Page "${identity.id}": its description had links, which Thally shows as plain text; the link text was kept.`)
   }
   resolvePageDisplayHeading(page, input.platform)
   return page
@@ -2511,4 +3029,17 @@ function apiFrontmatter(
     else warn?.('The page\'s "authMethod" frontmatter is not one of bearer, basic, key, none and was dropped.')
   }
   return result
+}
+
+/**
+ * `body` with everything after its imports and exports wrapped in an element that carries `SOURCE_PAGE_ATTRIBUTE`, or undefined when
+ * there is nothing to wrap or the page cannot take a wrapper: an export that follows the content cannot sit inside an element.
+ */
+export function wrapPageContent(body: string): string | undefined {
+  let nodes: Array<MdxOffsetNode>
+  try { nodes = (descriptionParser.parse(body) as MdxOffsetNode).children ?? [] } catch { return undefined }
+  const first = nodes.findIndex((node) => node.type !== 'mdxjsEsm')
+  const start = first < 0 ? undefined : nodes[first].position?.start.offset
+  if (start === undefined || nodes.slice(first).some((node) => node.type === 'mdxjsEsm')) return undefined
+  return `${body.slice(0, start)}<div ${SOURCE_PAGE_ATTRIBUTE}>\n\n${body.slice(start).trimEnd()}\n\n</div>\n`
 }

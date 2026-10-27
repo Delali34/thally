@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm'
 import remarkMdx from 'remark-mdx'
 import { toString as mdastToString } from 'mdast-util-to-string'
 import type { Root, RootContent } from 'mdast'
-import { plainInlineText, slugify, updateAnchorId } from '../slugify.js'
+import { constantString, plainInlineText, slugify, updateAnchorId } from '../slugify.js'
 import type {
   ContentCodeBlock,
   ContentUpdate,
@@ -21,7 +21,14 @@ import { mdxToMarkdown } from './to-markdown.js'
 // every structured projection below is derived from the same tree.
 const processor = unified().use(remarkParse).use(remarkGfm).use(remarkMdx)
 
-function parseToTree(markdown: string): Root {
+/**
+ * The syntax tree of a page as the renderer reads it: MDX with GitHub-flavored
+ * Markdown (the renderer's `remarkPlugins`), so a tight `a~b~c` is a strikethrough
+ * and `[^1]` a footnote reference. A page MDX cannot read falls back to Markdown
+ * with GFM. Tools that need what the renderer sees in a page, such as the ids it
+ * gives headings, parse it with this.
+ */
+export function parseMdxTree(markdown: string): Root {
   try {
     return processor.parse(markdown) as Root
   } catch {
@@ -69,7 +76,7 @@ function collectExplicitIds(nodes: ReadonlyArray<RootContent>, into: Set<string>
       if (node.name === 'Step') {
         const own = titleSizeOf(node)
         const depth = STEP_HEADING_DEPTH.get((own === undefined ? stepSize : own) ?? '')
-        const id = stringAttribute(node, 'id')?.trim() || undefined
+        const id = stepIdOf(node)?.trim() || undefined
         // Reserve only titles the heading pass will number, so plain steps cannot shift anchors.
         if (depth && stringAttribute(node, 'title')?.trim() && id) into.add(id)
       }
@@ -258,6 +265,13 @@ function titleSizeOf(node: JsxElement): string | null | undefined {
   return attribute.type === 'mdxJsxAttribute' && typeof attribute.value === 'string' ? attribute.value : null
 }
 
+/** A step's `id` as the renderer's heading pass reads it: a literal or a constant string in braces; `null` for any other expression, `undefined` when absent. */
+function stepIdOf(node: JsxElement): string | null | undefined {
+  const attribute = jsxAttribute(node, 'id')
+  if (attribute?.type !== 'mdxJsxAttribute') return undefined
+  return typeof attribute.value === 'string' ? attribute.value : constantString(attribute.value)
+}
+
 /**
  * `stepSize` is the title size the nearest `<Steps>` hands down. A step whose
  * title renders as a heading is a heading here too, numbered with the rest of
@@ -277,8 +291,10 @@ function walk(state: WalkState, nodes: Array<RootContent>, stepSize?: string) {
         const own = titleSizeOf(node)
         const title = stringAttribute(node, 'title')
         const depth = STEP_HEADING_DEPTH.get((own === undefined ? stepSize : own) ?? '')
-        // fall through after: the title still reads as prose, and the body belongs to the new section
-        if (title && depth) startSection(state, depth, plainInlineText(title), stringAttribute(node, 'id')?.trim() || undefined)
+        const id = stepIdOf(node)
+        // fall through after: the title still reads as prose, and the body belongs to the new section.
+        // An id that is not a constant is only known when the page renders: with no anchor to give, the step stays in the section before it.
+        if (title && depth && id !== null) startSection(state, depth, plainInlineText(title), id?.trim() || undefined)
       }
     }
     if (node.type === 'heading') {
@@ -339,7 +355,7 @@ function buildToc(headings: Array<ContentHeading>): Array<ContentTocItem> {
  */
 export function parseMdxContent(markdown: string, audience: ContentAudience = 'all'): ParsedContent {
   const projectedMarkdown = projectMdxAudience(markdown, audience)
-  const tree = parseToTree(projectedMarkdown)
+  const tree = parseMdxTree(projectedMarkdown)
 
   const preamble: ContentSection = { id: '', title: '', depth: 0, headingPath: [], text: '', code: [] }
   const state: WalkState = {

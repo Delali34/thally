@@ -20,6 +20,12 @@ describe('mdxToMarkdown', () => {
     expect(mdxToMarkdown("<Tab title='Node'>x</Tab>")).toContain('#### Node') // single quotes too
   })
 
+  it('keeps the content of a Step with no title and adds no heading for it', () => {
+    const out = mdxToMarkdown('<Steps>\n<Step>\nOnly content.\n</Step>\n</Steps>')
+    expect(out).toBe('Only content.')
+    expect(out).not.toContain('####')
+  })
+
   it('turns callouts into labelled blockquotes and API fields into list items', () => {
     expect(mdxToMarkdown('<Note>Be careful.</Note>')).toContain('> **Note:** Be careful.')
     expect(mdxToMarkdown('<Warning title="Rotate first">Then deploy.</Warning>')).toContain('> **Rotate first:** Then deploy.')

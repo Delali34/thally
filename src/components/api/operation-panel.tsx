@@ -145,7 +145,12 @@ function OperationPanelContent({ operation, children, showDescription = true, sh
                       header={group.location === 'header'}
                       default={resolveDefault(param.schema)}
                     >
-                      {param.description ? <Markdown>{param.description}</Markdown> : null}
+                      {param.description || enumOptions(param.schema) ? (
+                        <>
+                          {param.description ? <Markdown>{param.description}</Markdown> : null}
+                          <AllowedValues schema={param.schema} />
+                        </>
+                      ) : null}
                     </ParamField>
                   ))}
                 </div>
@@ -214,7 +219,7 @@ function SchemaAsParamFields({ schema }: { schema?: Record<string, unknown> }) {
   const t = useApiLabels()
   if (!schema) return null
 
-  const flat = flattenSchema(schema)
+  const flat = listedObject(schema)
   const properties = flat.properties as Record<string, Record<string, unknown>> | undefined
   if (!properties || typeof properties !== 'object') {
     const variants = unionVariants(flat)
@@ -237,7 +242,6 @@ function SchemaAsParamFields({ schema }: { schema?: Record<string, unknown> }) {
         const defaultVal = resolveDefault(flatProp)
         const isRequired = required.includes(name)
         const nested = getNestedProperties(flatProp)
-        const enumValues = Array.isArray(flatProp.enum) ? (flatProp.enum as unknown[]).map(String) : null
 
         return (
           <ParamField
@@ -250,11 +254,7 @@ function SchemaAsParamFields({ schema }: { schema?: Record<string, unknown> }) {
             body
           >
             {description ? <Markdown>{description}</Markdown> : null}
-            {enumValues ? (
-              <p className="mt-1 text-xs text-foreground/50">
-                {t('allowed')}: {enumValues.join(', ')}
-              </p>
-            ) : null}
+            <AllowedValues schema={flatProp} />
             {flatProp.const !== undefined ? (
               <p className="mt-1 text-xs text-foreground/50">
                 {t('allowedValue')}: <code>{JSON.stringify(flatProp.const)}</code>
@@ -270,6 +270,17 @@ function SchemaAsParamFields({ schema }: { schema?: Record<string, unknown> }) {
       })}
     </>
   )
+}
+
+/** The `Allowed:` line under a field that lists its values. */
+function AllowedValues({ schema }: { schema?: Record<string, unknown> }) {
+  const t = useApiLabels()
+  const values = enumOptions(schema)
+  return values ? (
+    <p className="mt-1 text-xs text-foreground/50">
+      {t('allowed')}: {values.join(', ')}
+    </p>
+  ) : null
 }
 
 // ---------------------------------------------------------------------------
@@ -335,7 +346,7 @@ function SchemaAsResponseFields({ schema, depth = 0 }: { schema?: Record<string,
   const t = useApiLabels()
   if (!schema) return null
 
-  const flat = flattenSchema(schema)
+  const flat = listedObject(schema)
   const properties = flat.properties as Record<string, Record<string, unknown>> | undefined
   if (!properties || typeof properties !== 'object') {
     const variants = unionVariants(flat)
@@ -352,16 +363,11 @@ function SchemaAsResponseFields({ schema, depth = 0 }: { schema?: Record<string,
         const description = typeof flatProp.description === 'string' ? flatProp.description : undefined
         const isRequired = required.includes(name)
         const nested = depth < MAX_NESTING && getNestedProperties(flatProp)
-        const enumValues = Array.isArray(flatProp.enum) ? (flatProp.enum as unknown[]).map(String) : null
 
         return (
           <ResponseField key={name} name={name} type={type} required={isRequired} deprecated={flatProp.deprecated === true}>
             {description ? <Markdown>{description}</Markdown> : null}
-            {enumValues ? (
-              <p className="mt-1 text-xs text-foreground/50">
-                {t('allowed')}: {enumValues.join(', ')}
-              </p>
-            ) : null}
+            <AllowedValues schema={flatProp} />
             {flatProp.const !== undefined ? (
               <p className="mt-1 text-xs text-foreground/50">
                 {t('allowedValue')}: <code>{JSON.stringify(flatProp.const)}</code>
@@ -431,7 +437,7 @@ function SchemaVariants({ variants, depth }: { variants: Array<SchemaVariant>; d
       ) : null}
       {description ? <Markdown className={cn(markdownProse, 'mb-2 text-sm text-foreground/70')}>{description}</Markdown> : null}
       {hasFields ? (
-        <SchemaAsResponseFields schema={current.schema} depth={depth} />
+        <SchemaAsResponseFields schema={getNestedSchema(current.schema)} depth={depth} />
       ) : (
         <p className="text-xs text-foreground/60">
           {t('type')}: <code>{resolveSchemaType(current.schema) ?? 'any'}</code>
@@ -478,12 +484,46 @@ function resolveDefault(schema?: Record<string, unknown>): string | undefined {
   return typeof schema.default === 'object' ? JSON.stringify(schema.default) : String(schema.default)
 }
 
+/**
+ * A field's allowed values: its own enum or its array items' enum. A oneOf/anyOf lists values only when every member is
+ * an enum or null, as one list in member order, so a branch is never shown as if it were all of them.
+ */
+function enumOptions(schema?: Record<string, unknown>): Array<string> | null {
+  if (!schema) return null
+  const flat = flattenSchema(schema)
+  if (Array.isArray(flat.enum)) return flat.enum.map(String)
+  if (flat.type === 'array' && flat.items && typeof flat.items === 'object') return enumOptions(flat.items as Record<string, unknown>)
+  const values = new Set<unknown>()
+  for (const { schema: member } of unionVariants(flat) ?? []) {
+    if (Array.isArray(member.enum)) member.enum.forEach((value) => values.add(value))
+    else if (member.type === 'null') values.add(null)
+    else return null
+  }
+  return values.size ? [...values].map(String) : null
+}
+
+/** The value schema of a map (`additionalProperties`), when it says anything. */
+function mapValueSchema(flat: Record<string, unknown>): Record<string, unknown> | null {
+  const value = flat.additionalProperties
+  return value && typeof value === 'object' && Object.keys(value).length > 0 ? (value as Record<string, unknown>) : null
+}
+
 function getNestedProperties(schema: Record<string, unknown>): boolean {
   const flat = flattenSchema(schema)
-  if (flat.properties) return true
+  if (flat.properties || mapValueSchema(flat)) return true
   const variants = unionVariants(flat)
   if (variants) return variants.some((variant) => getNestedProperties(variant.schema))
   return flat.type === 'array' && Boolean(flat.items) && typeof flat.items === 'object' && getNestedProperties(flat.items as Record<string, unknown>)
+}
+
+/**
+ * What a body or response schema lists. A list of objects shows its item's fields as an object
+ * does (as live does), through the same rows, tabs for a union, and Expandable for deeper
+ * levels. An array of anything else stays one row.
+ */
+function listedObject(schema: Record<string, unknown>): Record<string, unknown> {
+  const flat = flattenSchema(schema)
+  return flat.type === 'array' && getNestedProperties(flat) ? getNestedSchema(flat) : flat
 }
 
 function getNestedSchema(schema: Record<string, unknown>): Record<string, unknown> {
@@ -491,5 +531,8 @@ function getNestedSchema(schema: Record<string, unknown>): Record<string, unknow
   if (flat.type === 'array' && flat.items && typeof flat.items === 'object') {
     return getNestedSchema(flat.items as Record<string, unknown>)
   }
-  return flat
+  // A map lists its value schema as one `{key}` row, after any fixed properties; a real property of that name stays.
+  const value = mapValueSchema(flat)
+  const fixed = flat.properties as Record<string, unknown> | undefined
+  return value && !(fixed && '{key}' in fixed) ? { ...flat, properties: { ...fixed, '{key}': value } } : flat
 }

@@ -8,7 +8,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { Icon } from '@/components/mdx/content-icon'
-import { badgeGlyph, type IconStyle } from '@/lib/icon-library'
+import { FONT_AWESOME_BRAND_NAMES, ICON_NAME_PATTERN, badgeGlyph, iconLibraryAssetUrl, type IconStyle } from '@/lib/icon-library'
 
 const words = (list: string) => list.split(/\s+/).filter(Boolean)
 
@@ -125,6 +125,40 @@ describe('Font Awesome icon resolution', () => {
       const kind = resolution(name, style).kind
       expect(['inline', 'brands'], name).toContain(kind)
     }
+  })
+
+  // Dub's docs draw these Free brands, which have no inline mark and no `solid` file: `solid/hubspot.svg` is a 404.
+  it.each(STYLES)('resolves a Free brand without an inline mark to the brands set (style %s)', (style) => {
+    for (const name of ['hubspot', 'stripe-s', 'webflow', 'mailchimp', 'bluesky', 'zoom', 'figma']) {
+      const result = resolution(name, style)
+      expect(result.kind === 'inline' || (result.kind === 'brands' && result.file === name), name).toBe(true)
+    }
+    expect(resolution('hubspot', style)).toEqual({ kind: 'brands', file: 'hubspot' })
+    expect(resolution('github', style)).toEqual({ kind: 'inline' })
+  })
+
+  it('points a brand at its own file in the pinned Free package, whichever library the site picks', () => {
+    const markup = renderToStaticMarkup(createElement(Icon, { icon: 'fa-brands fa-stripe-s' }))
+    const url = 'https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@7.3.1/svgs/brands/stripe-s.svg'
+    for (const library of ['lucide', 'fontawesome', 'tabler']) expect(markup).toContain(`--thally-icon-${library}:url(&quot;${url}&quot;)`)
+  })
+
+  it('lists every brand as a safe icon name, and keeps the names Free also ships as solid glyphs out of it', () => {
+    expect(FONT_AWESOME_BRAND_NAMES.size).toBeGreaterThan(600)
+    for (const name of FONT_AWESOME_BRAND_NAMES) expect(ICON_NAME_PATTERN.test(name), name).toBe(true)
+    // `font-awesome` is the flag in `solid` and the logo in `brands`; an author who names it without a style means the flag.
+    for (const name of ['font-awesome', 'font-awesome-flag', 'font-awesome-logo-full', 'web-awesome']) expect(FONT_AWESOME_BRAND_NAMES.has(name), name).toBe(false)
+    expect(iconLibraryAssetUrl('fontawesome', 'font-awesome', 'brands')).toContain('/svgs/brands/font-awesome.svg')
+  })
+
+  // Pro-only names Dub uses: the mapped glyphs were checked to exist in the pinned Free 7.3.1 and Lucide 1.47.0 packages.
+  it('maps the Pro-only names the Dub docs use to a glyph that exists', () => {
+    expect(Object.fromEntries(['arrow-progress', 'grid-2', 'window', 'user-crown'].map((name) => [name, resolution(name, undefined)]))).toEqual({
+      'arrow-progress': { kind: 'lucide', file: 'arrow-right-to-line' },
+      'grid-2': { kind: 'solid', file: 'table-cells-large' },
+      window: { kind: 'lucide', file: 'app-window' },
+      'user-crown': { kind: 'lucide', file: 'user-star' },
+    })
   })
 
   it('resolves all 91 names to an asset that exists or a glyph, whatever style is requested', () => {

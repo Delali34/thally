@@ -1,7 +1,8 @@
 import { type NextRequest } from 'next/server'
 import { toolMetadata } from '@/lib/mcp/tool-metadata'
 import { resolveSiteConfig, type SiteIdentity } from '@/lib/site-config'
-import { agentIdentitySlug, agentServerName } from '@/lib/agent-identity'
+import { agentIdentitySlug } from '@/lib/agent-identity'
+import { mcpServerCard, oauthProtectedResource } from '@/lib/agent-discovery-responses'
 import { problemResponse } from '@/lib/http/problem'
 import { DOCS_ACCESS_COOKIE } from '@/lib/admin/auth-edge'
 import {
@@ -75,72 +76,6 @@ function apiCatalog(origin: string): Response {
     },
     LINKSET_TYPE,
   )
-}
-
-export function mcpServerCard(
-  origin: string,
-  identity: SiteIdentity,
-  accessMode: DocumentationAccessMode = 'public',
-): Response {
-  const isPasswordProtected = accessMode === 'password'
-  return json({
-    name: agentServerName(identity.name),
-    title: `${identity.name} documentation MCP server`,
-    description:
-      `Read-only MCP server exposing the ${identity.name} documentation site: full-text search, page reads as Markdown, a page index, and an agent-readiness report.`,
-    version: '1.0.0',
-    protocolVersion: '2025-06-18',
-    url: `${origin}/api/mcp`,
-    endpoint: `${origin}/api/mcp`,
-    transport: ['streamable-http'],
-    authentication: isPasswordProtected
-      ? {
-          type: 'cookie',
-          in: 'cookie',
-          name: DOCS_ACCESS_COOKIE,
-          documentation: `${origin}/auth.md`,
-        }
-      : { type: 'none' },
-    capabilities: { tools: { listChanged: false }, resources: { subscribe: false, listChanged: false } },
-    tools: toolMetadata.map((tool) => ({
-      name: tool.name,
-      title: tool.title,
-      description: tool.description,
-      inputSchema: tool.inputSchema,
-      annotations: tool.annotations,
-    })),
-    documentation: `${origin}/auth.md`,
-  })
-}
-
-export function oauthProtectedResource(
-  origin: string,
-  identity: SiteIdentity,
-  accessMode: DocumentationAccessMode = 'public',
-): Response {
-  const isPasswordProtected = accessMode === 'password'
-  // RFC 9728 metadata never advertises an authorization server or OAuth
-  // scopes because neither access mode supports bearer tokens. The namespaced
-  // extension makes the real non-OAuth cookie gate machine-discoverable.
-  return json({
-    resource: origin,
-    resource_name: `${identity.name} documentation`,
-    // RFC 9728 explicitly permits [] to declare that bearer tokens are not
-    // accepted, while `authorization_servers` must be omitted when empty.
-    bearer_methods_supported: [],
-    resource_documentation: `${origin}/auth.md`,
-    ...(isPasswordProtected
-      ? {
-          x_thally_access: {
-            mode: 'password',
-            credential: 'cookie',
-            cookie_name: DOCS_ACCESS_COOKIE,
-            authentication_endpoint: `${origin}/api/access/auth`,
-            interactive_login: `${origin}/access`,
-          },
-        }
-      : {}),
-  })
 }
 
 function oauthAuthorizationServerUnavailable(

@@ -36,8 +36,9 @@ function collectionClaim(collection: SidebarCollection, pathname: string, curren
   if (collection.api) {
     claim = Math.max(claim, pathClaim('/api', pathname), pathClaim('/api', currentPath ?? pathname))
   }
-  for (const section of collection.sections) {
-    for (const item of section.items) {
+  // A page its frontmatter hides is not in the sidebar, but its tab still owns it.
+  for (const items of [...collection.sections.map((section) => section.items), collection.hiddenItems ?? []]) {
+    for (const item of items) {
       // Until the locale snapshot hydrates, the root layout still has primary
       // language hrefs. Those identify the same collection after removing locale.
       claim = Math.max(claim, hrefClaim(item.href, pathname, currentPath, localeRoot))

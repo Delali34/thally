@@ -18,7 +18,7 @@ vi.mock('@/config/api-reference', () => ({
     ],
   },
 }))
-vi.mock('@/data/docs', () => ({ getApiPlaygroundCredentials: () => ({}) }))
+vi.mock('@/data/docs', () => ({ getApiPlaygroundCredentials: () => ({}), getApiMdxConfig: () => ({ servers: [] }) }))
 vi.mock('@/lib/openapi/fetch', () => ({
   getSpecConfig: (config: { specs: Array<{ id: string }> }, id: string) => config.specs.find((s) => s.id === id),
   loadSpec: async (config: { id: string }) => ({

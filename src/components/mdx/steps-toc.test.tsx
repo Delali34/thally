@@ -68,8 +68,31 @@ describe('step titles in the table of contents', () => {
     expect(headings(page(content)).map((entry) => entry.id)).toEqual(['deploy', 'create-a-project', 'deploy-2', 'next-steps'])
   })
 
+  it('renders a step with no title and lists no entry for it, on both compilation paths', async () => {
+    const source = '<Steps titleSize="h3">\n<Step>Only content.</Step>\n<Step title="Deploy">x</Step>\n</Steps>\n\n## Deploy'
+    const expected = [
+      { id: 'deploy', text: 'Deploy', level: 3 },
+      { id: 'deploy-2', text: 'Deploy', level: 2 },
+    ]
+    expect(await toc(source)).toEqual(expected)
+    expect(parseMdxContent(source).headings.map(({ id, text, depth }) => ({ id, text, level: depth }))).toEqual(expected)
+    const { content } = await interpretMDX({ source, components: builtinMdxComponents })
+    expect(headings(page(content))).toEqual(expected)
+    expect(page(content)).toContain('Only content.')
+  })
+
   it('lists nothing for steps without a heading size, as before', async () => {
     expect(await toc('<Steps>\n<Step title="One">x</Step>\n</Steps>\n\n<Steps titleSize="p">\n<Step title="Two">x</Step>\n</Steps>')).toEqual([])
+  })
+
+  it('leaves the id an author gave a plain-text step on its container, out of the outline and the numbering', async () => {
+    const source = '## Deploy\n\n<Steps titleSize="p">\n<Step title="Add a new direct debit method" id="add-new-direct-debit-method">x</Step>\n</Steps>\n\n## Deploy'
+    const { default: Content } = await evaluate(source, { ...runtime, rehypePlugins: [rehypePlugins[2]] } as never)
+    const html = page(createElement(Content, { components: builtinMdxComponents }))
+    expect(html).toMatch(/<div id="add-new-direct-debit-method" class="thally-step /)
+    expect(html.match(/id="add-new-direct-debit-method"/g)).toHaveLength(1)
+    expect(headings(html).map((entry) => entry.id)).toEqual(['deploy', 'deploy-2'])
+    expect(parseMdxContent(source).headings.map((heading) => heading.id)).toEqual(['deploy', 'deploy-2'])
   })
 
   it('numbers the steps a page repeats in every View, so each View carries its own ids', async () => {

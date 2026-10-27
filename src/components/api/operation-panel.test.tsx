@@ -387,3 +387,90 @@ describe('OperationPanel oneOf / anyOf', () => {
     expect(html).not.toContain('>level12<')
   })
 })
+
+describe('OperationPanel arrays of objects', () => {
+  const link = { type: 'object', required: ['url'], properties: { url: { type: 'string' }, tags: { type: 'array', items: { type: 'string' } }, geo: { type: 'object', properties: { country: { type: 'string' } } } } }
+  const error = { title: 'Failure', type: 'object', properties: { error: { type: 'string' } } }
+  const node = { type: 'object', properties: { name: { type: 'string' }, children: { type: 'array', items: { $ref: '#/components/schemas/Node' } } } }
+  const schemas = { Link: link, Failure: error, Node: node, Links: { type: 'array', items: { $ref: '#/components/schemas/Link' } } }
+
+  const spec = (body?: Record<string, unknown>, response?: Record<string, unknown>) => ({
+    openapi: '3.1.0',
+    info: { title: 'T', version: '1' },
+    paths: {
+      '/links': {
+        post: {
+          summary: 'Links',
+          ...(body ? { requestBody: { content: { 'application/json': { schema: body } } } } : {}),
+          responses: response ? { '200': { description: 'A list of links', content: { 'application/json': { schema: response } } } } : {},
+        },
+      },
+    },
+    components: { schemas },
+  })
+  const render = (body?: Record<string, unknown>, response?: Record<string, unknown>) => renderToStaticMarkup(<OperationPanel operation={operationFrom(spec(body, response))} />)
+  /** The name of every field row, in page order. */
+  const rows = (html: string) => [...html.matchAll(/<code class="text-sm font-semibold[^"]*">([^<]*)<\/code>/g)].map((match) => match[1])
+  const flat = ['url', 'tags', 'geo']
+
+  it('shows the fields of a request body array of objects, as it does for an object body', () => {
+    expect(rows(render(link))).toEqual([...flat, 'country'])
+    const html = render({ type: 'array', items: link })
+    expect(rows(html)).toEqual([...flat, 'country'])
+    expect(html).toContain('geo properties')
+    expect(html).toContain('string[]')
+    expect(html).not.toContain('(body)')
+    expect(html.match(/>required</g)).toHaveLength(1)
+  })
+
+  it('shows the fields of a response array of objects', () => {
+    const html = render(undefined, { type: 'array', items: link })
+    expect(rows(html)).toEqual([...flat, 'country'])
+    expect(html).toContain('geo properties')
+  })
+
+  it('follows a $ref to the item, and a $ref to the whole array', () => {
+    const byItem = { type: 'array', items: { $ref: '#/components/schemas/Link' } }
+    const whole = { $ref: '#/components/schemas/Links' }
+    for (const schema of [byItem, whole]) {
+      expect(rows(render(schema))).toEqual([...flat, 'country'])
+      expect(rows(render(undefined, schema))).toEqual([...flat, 'country'])
+    }
+  })
+
+  it('merges an allOf item, and shows a tab per oneOf or anyOf item', () => {
+    const merged = render(undefined, { type: 'array', items: { allOf: [{ $ref: '#/components/schemas/Link' }, { type: 'object', properties: { id: { type: 'string' } } }] } })
+    expect(rows(merged)).toEqual(['url', 'tags', 'geo', 'country', 'id'])
+    for (const key of ['oneOf', 'anyOf']) {
+      const html = render(undefined, { type: 'array', items: { [key]: [{ $ref: '#/components/schemas/Link' }, { $ref: '#/components/schemas/Failure' }] } })
+      expect(html).toMatch(/role="tab"[^>]*>Option 1<\/button>/)
+      expect(html).toMatch(/role="tab"[^>]*>Failure<\/button>/)
+      expect(rows(html)).toEqual([...flat, 'country'])
+    }
+  })
+
+  it('unwraps a list of lists, and still nests an array inside an object', () => {
+    expect(rows(render({ type: 'array', items: { type: 'array', items: link } }))).toEqual([...flat, 'country'])
+    const inside = render({ type: 'object', properties: { links: { type: 'array', items: link }, label: { type: 'string' } } })
+    expect(rows(inside)).toEqual(['links', 'url', 'tags', 'geo', 'country', 'label'])
+    expect(inside).toContain('links properties')
+  })
+
+  it('stops at a recursive item schema', () => {
+    const html = render({ type: 'array', items: { $ref: '#/components/schemas/Node' } }, { type: 'array', items: { $ref: '#/components/schemas/Node' } })
+    expect(rows(html)).toEqual(['name', 'children', 'name', 'children'])
+    expect(html).not.toContain('children properties')
+  })
+
+  it('cuts a deeply nested list off at the same depth limit as nested objects', () => {
+    let item: Record<string, unknown> = { type: 'object', properties: { leaf: { type: 'string' } } }
+    for (let level = 12; level >= 1; level -= 1) item = { type: 'object', properties: { next: { type: 'array', items: item } } }
+    expect(rows(render(undefined, { type: 'array', items: item }))).toEqual(Array(7).fill('next'))
+  })
+
+  it('keeps an array of scalars as one row', () => {
+    const html = render({ type: 'array', items: { type: 'string' } }, { type: 'array', items: { type: 'integer' } })
+    expect(rows(html)).toEqual(['(body)'])
+    expect(html).toContain('string[]')
+  })
+})

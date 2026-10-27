@@ -182,7 +182,10 @@ export function decodeNavigationWire(value: unknown): Array<SidebarCollection> {
     if (++count > 100_000 || !collection || typeof collection !== 'object') throw new Error('Invalid navigation collection')
     const candidate = collection as SidebarCollection
     if (typeof candidate.id !== 'string' || typeof candidate.label !== 'string' || !Array.isArray(candidate.sections)) throw new Error('Invalid navigation collection')
-    return { ...candidate, sections: candidate.sections.map(section => {
+    // Hidden pages only decide tab ownership, yet a malformed one must not install either.
+    const hiddenItems = candidate.hiddenItems === undefined ? undefined
+      : flatten(readNodes(Array.isArray(candidate.hiddenItems) ? candidate.hiddenItems.map(item => ({ type: 'page', item })) : candidate.hiddenItems, 0))
+    return { ...candidate, ...(hiddenItems ? { hiddenItems } : {}), sections: candidate.sections.map(section => {
       if (++count > 100_000 || !section || typeof section.title !== 'string') throw new Error('Invalid navigation section')
       const nodes = readNodes(section.nodes, 0)
       return { ...section, nodes, items: flatten(nodes) }

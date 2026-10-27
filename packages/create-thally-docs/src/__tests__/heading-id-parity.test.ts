@@ -52,3 +52,17 @@ describe('thally check resolves the ids Mintlify serves for punctuation-heavy he
     expect(await brokenAnchorOutput(body, id)).not.toContain('Broken anchor')
   })
 })
+
+describe('thally check resolves the id of a plain-text step', () => {
+  const steps = (attributes: string) => `<Steps titleSize="p">\n<Step title="Add a new direct debit method" ${attributes}>\nBody.\n</Step>\n</Steps>`
+
+  it('resolves a link to the id the step container carries', async () => {
+    const body = steps('id="add-new-direct-debit-method"')
+    expect(await brokenAnchorOutput(body, 'add-new-direct-debit-method')).not.toContain('Broken anchor')
+    expect(await brokenAnchorOutput(body, 'add-a-new-direct-debit-method')).toContain('Broken anchor')
+  })
+
+  it('does not take the id from the title when the step has none', async () => {
+    expect(await brokenAnchorOutput(steps(''), 'add-a-new-direct-debit-method')).toContain('Broken anchor')
+  })
+})

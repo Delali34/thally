@@ -120,6 +120,16 @@ describe('most specific collection ownership', () => {
     expect(owners('/compute/cli/overview', tabs)).toMatchObject({ tab: 'cli', sidebar: 'cli' })
   })
 
+  it('keeps a hidden page in the tab that lists it without listing it in the sidebar', () => {
+    const hidden = { id: 'reference', title: 'CLI reference', href: '/cli/reference' }
+    const tabs = [tab('guides', '/get-started'), { ...tab('reference', '/cli/agent'), hiddenItems: [hidden] }]
+    expect(owners('/cli/reference', tabs)).toMatchObject({ tab: 'reference', sidebar: 'reference', hrefs: '/cli/agent' })
+    // Without the tab's own record of the page nothing claims it, so the first tab wins.
+    expect(owners('/cli/reference', [tabs[0], tab('reference', '/cli/agent')])).toMatchObject({ tab: 'guides', sidebar: 'guides' })
+    // A hidden page claims like a listed one: a more specific tab still beats its prefix.
+    expect(owners('/cli/reference/flags', [...tabs, tab('flags', '/cli/reference/flags')])).toMatchObject({ tab: 'flags', sidebar: 'flags' })
+  })
+
   it('assigns a page to the version whose tab claims it most specifically', () => {
     const versions: Versions = [{ label: 'v2', prefix: '', href: '/introduction', default: true }, { label: 'v1', prefix: 'v1', href: '/v1/introduction' }]
     const collections: Array<SidebarCollection> = [

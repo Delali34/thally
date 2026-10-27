@@ -5,6 +5,7 @@ import { mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
+import { checkCustomRoutes } from 'next/dist/lib/load-custom-routes.js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { cloneGitHubRepository, gitmodulePaths, migrateRepository, projectFernNavigation, readMintlifyConfig, renderMigrationFiles } from '../index.js'
@@ -21,7 +22,7 @@ describe('Mintlify root styles', () => {
     const result = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/example/docs' })
     const href = result.docsConfig.stylesheets?.[0]
     expect(href).toMatch(/^\/migrated\/[a-f0-9]{12}\/style\.css$/)
-    expect(result.assets.find((asset) => `/${asset.path}` === href)?.content.toString()).toBe('.card { padding: 1rem; }')
+    expect(result.assets.find((asset) => `/${asset.path}` === href)?.content.toString()).toBe(':where(.thally-docs-prose, [data-thally-source-page]) .card { padding: 1rem; }')
     expect(result.assets.some((asset) => asset.path === 'style.css')).toBe(false)
     expect(result.pages[0].body).toContain('<div className="card">')
     const equivalent = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/EXAMPLE/docs.git' })
@@ -56,9 +57,9 @@ describe('Mintlify root styles', () => {
     const result = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/example/docs' })
     const href = result.docsConfig.stylesheets?.[0]
     const css = result.assets.find((asset) => `/${asset.path}` === href)?.content.toString() ?? ''
-    expect(css).toContain('.widget { padding: 1rem; }')
-    expect(css).toContain('.widget-copy { margin: 0; }')
-    expect(css).toContain('.dark .widget { color: white; }')
+    expect(css).toContain(':where(.thally-docs-prose, [data-thally-source-page]) .widget { padding: 1rem; }')
+    expect(css).toContain(':where(.thally-docs-prose, [data-thally-source-page]) .widget-copy { margin: 0; }')
+    expect(css).toContain('.dark :where(.thally-docs-prose, [data-thally-source-page]) .widget { color: white; }')
     expect(css).not.toContain('mintlify-layout')
     expect(css).not.toMatch(/navbar-link|#footer|max-w-36|w-full|mt-8|data-as/)
     expect(css).not.toMatch(/body:not|body:has/)
@@ -84,8 +85,10 @@ describe('Mintlify root styles', () => {
     const result = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/example/docs' })
     const href = result.docsConfig.stylesheets?.[0]
     const css = result.assets.find((asset) => `/${asset.path}` === href)?.content.toString() ?? ''
-    expect(css).toContain('@keyframes pulse')
-    expect(css).toContain('.widget { animation: pulse 1s; }')
+    // The keyframes name is global to the page, so it carries a prefix of the site's own and the animation follows it.
+    const pulse = /@keyframes (src-[0-9a-f]{12}-pulse) /.exec(css)?.[1]
+    expect(pulse).toBeDefined()
+    expect(css).toContain(`:where(.thally-docs-prose, [data-thally-source-page]) .widget { animation: ${pulse} 1s; }`)
     expect(css).not.toContain('platform-shell')
   })
 })
@@ -108,11 +111,20 @@ const execFileCalls = vi.hoisted(() => ({ calls: [] as Array<string> }))
 // real Git LFS repo, since a mocked child process can't exercise git's own
 // filter-driver resolution).
 const gitSpawnCalls = vi.hoisted(() => ({ envs: [] as Array<Record<string, string | undefined>>, args: [] as Array<Array<string>> }))
+// Symlinks (relative path inside the submodule -> target) a fetched submodule brings into the checkout, by submodule path.
+const submoduleLinks = vi.hoisted(() => ({ byPath: {} as Record<string, Record<string, string>> }))
 vi.mock('node:child_process', () => {
   return {
-    spawn: (_command: string, args: Array<string>, options: { env?: Record<string, string | undefined> }) => {
+    spawn: (_command: string, args: Array<string>, options: { env?: Record<string, string | undefined>; cwd?: string }) => {
       gitSpawnCalls.envs.push(options.env ?? {})
       gitSpawnCalls.args.push(args)
+      if (options.cwd && args.includes('submodule')) {
+        const submodule = args[args.length - 1]
+        for (const [path, target] of Object.entries(submoduleLinks.byPath[submodule] ?? {})) {
+          mkdirSync(dirname(join(options.cwd, submodule, path)), { recursive: true })
+          symlinkSync(target, join(options.cwd, submodule, path))
+        }
+      }
       const child = new EventEmitter() as EventEmitter & { stderr: EventEmitter & { setEncoding: (encoding: string) => void; destroy: () => void }; kill: () => void }
       child.stderr = Object.assign(new EventEmitter(), { setEncoding: () => {}, destroy: () => {} })
       child.kill = () => {
@@ -164,10 +176,10 @@ describe('repository redirect finalization', () => {
     }))
 
     const bundle = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/acme/docs' })
-    expect(bundle.docsConfig.redirects).toContainEqual({ source: '/docs/old-models', destination: '/docs/models' })
-    expect(bundle.docsConfig.redirects).not.toContainEqual({ source: '/docs/models', destination: '/docs/models' })
-    expect(bundle.docsConfig.redirects).not.toContainEqual({ source: '/docs/models/', destination: '/docs/models' })
-    expect(bundle.docsConfig.redirects).not.toContainEqual({ source: '/docs/models', destination: '/docs/models?view=all' })
+    expect(bundle.docsConfig.redirects).toContainEqual({ source: '/docs/old-models', destination: '/docs/models', permanent: true })
+    expect(bundle.docsConfig.redirects).not.toContainEqual({ source: '/docs/models', destination: '/docs/models', permanent: true })
+    expect(bundle.docsConfig.redirects).not.toContainEqual({ source: '/docs/models/', destination: '/docs/models', permanent: true })
+    expect(bundle.docsConfig.redirects).not.toContainEqual({ source: '/docs/models', destination: '/docs/models?view=all', permanent: true })
     expect(bundle.warnings.filter((warning) => warning.message.startsWith('Self-redirect'))).toHaveLength(2)
     expect(bundle.warnings.map((warning) => warning.message)).toContain('Skipped 1 redirect that would send visitors in a circle: /docs/models -> /docs/models?view=all. Check these redirects in the source docs.')
   })
@@ -177,7 +189,10 @@ describe('Mintlify pages that link elsewhere', () => {
   function bundleFor(docsJson: Record<string, unknown>, pages: Record<string, string>) {
     const root = mkdtempSync(join(tmpdir(), 'thally-migrate-link-pages-'))
     writeFileSync(join(root, 'docs.json'), JSON.stringify({ $schema: 'https://mintlify.com/docs.json', ...docsJson }))
-    for (const [name, content] of Object.entries(pages)) writeFileSync(join(root, name), content)
+    for (const [name, content] of Object.entries(pages)) {
+      mkdirSync(dirname(join(root, name)), { recursive: true })
+      writeFileSync(join(root, name), content)
+    }
     return migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/acme/docs' })
   }
   const navigation = { navigation: { groups: [{ group: 'Community', pages: ['introduction', 'github-repo', 'roadmap'] }] } }
@@ -209,6 +224,182 @@ describe('Mintlify pages that link elsewhere', () => {
     const bundle = bundleFor(navigation, { ...linkPages, 'roadmap.mdx': '---\ntitle: Roadmap\nurl: "javascript:alert(1)"\n---\n\nWhat is next.' })
     expect(bundle.docsConfig.redirects?.map((redirect) => redirect.source)).not.toContain('/roadmap')
     expect(bundle.pages.find((page) => page.id === 'roadmap')?.noindex).toBeUndefined()
+  })
+
+  describe('when the url is a path of the site', () => {
+    const cliNavigation = { navigation: { groups: [{ group: 'Guides', pages: ['introduction', 'local-development', 'cli/dev'] }] } }
+    const guides = {
+      'introduction.mdx': '---\ntitle: Intro\n---\n\nHello.',
+      'local-development.mdx': '---\ntitle: Local development\n---\n\n## Turso CLI\n\nRun it.',
+    }
+    const cliPage = (url: string) => ({ 'cli/dev.mdx': `---\ntitle: Dev\nurl: ${url}\n---\n` })
+    /** The errors Next.js reports for a redirect config: `next build` validates every redirect with this function and exits when one is invalid. */
+    function nextErrors(redirects: ReadonlyArray<{ source: string; destination: string; permanent?: boolean }> = []): Array<string> {
+      const errors: Array<string> = []
+      const log = vi.spyOn(console, 'error').mockImplementation((...parts: Array<unknown>) => { errors.push(parts.join(' ')) })
+      const exit = vi.spyOn(process, 'exit').mockImplementation((() => { throw new Error('process.exit') }) as never)
+      try {
+        checkCustomRoutes(redirects.map((redirect) => ({ source: redirect.source, destination: redirect.destination, permanent: redirect.permanent ?? false })), 'redirect')
+      } catch { /* the exit is the verdict; the messages say why */ } finally {
+        log.mockRestore()
+        exit.mockRestore()
+      }
+      return errors
+    }
+
+    it('checks against the validation Next.js applies: it refuses a route-syntax character in the fragment', () => {
+      expect(nextErrors([{ source: '/cli/dev', destination: '/local-development#turso-cli' }])).toEqual([])
+      for (const destination of ['/a#x*', '/a#frag(1)', '/a#x+', '/a#:id', '/a#x{1}']) {
+        expect(nextErrors([{ source: '/cli/dev', destination }]).join('\n'), destination).toMatch(/destination/)
+      }
+    })
+
+    it('sends the page path to that path with its fragment, keeps the entry and keeps the page out of the sitemap', () => {
+      const bundle = bundleFor(cliNavigation, { ...guides, ...cliPage('/local-development#turso-cli') })
+      expect(bundle.docsConfig.redirects).toContainEqual({ source: '/cli/dev', destination: '/local-development#turso-cli', permanent: false })
+      expect(bundle.pages.find((page) => page.id === 'cli/dev')).toMatchObject({ noindex: true, externalUrl: '/local-development#turso-cli' })
+      expect(JSON.stringify(bundle.docsConfig.tabs)).toContain('"cli/dev"')
+      expect(bundle.warnings.filter((warning) => /circle|hide|url/.test(warning.message))).toEqual([])
+      const rendered = renderMigrationFiles(bundle).find((file) => file.path === 'src/content/cli/dev.mdx')?.content.toString() ?? ''
+      expect(rendered).toContain('noindex: true')
+      expect(rendered).not.toContain('url:')
+    })
+
+    it.each(['/local-development', '/local-development?tab=cli', '/local-development/?tab=cli#turso-cli', '/'])('keeps the whole destination %s', (url) => {
+      const bundle = bundleFor(cliNavigation, { ...guides, ...cliPage(`"${url}"`) })
+      expect(bundle.docsConfig.redirects).toContainEqual({ source: '/cli/dev', destination: url, permanent: false })
+      expect(nextErrors(bundle.docsConfig.redirects)).toEqual([])
+    })
+
+    it.each([
+      '/local-development#turso-cli',
+      '/search?q=c',
+      '/search?q=a%20b&r=2&flag',
+      '/a/b_c/d.e~f-g/',
+      '/a?x=1&y=2#top',
+      '/a?',
+      '/.hidden/..dots/a..b/...',
+      '/a?q=%3A%2f#Id_1.x~y',
+      `/${'a'.repeat(1999)}`,
+    ])('links the url %s as written, and Next.js accepts the redirect', (url) => {
+      const bundle = bundleFor(cliNavigation, { ...guides, ...cliPage(JSON.stringify(url)) })
+      expect(bundle.docsConfig.redirects).toContainEqual({ source: '/cli/dev', destination: url, permanent: false })
+      expect(bundle.pages.find((page) => page.id === 'cli/dev')?.externalUrl).toBe(url)
+      expect(bundle.warnings.filter((warning) => /"url" frontmatter/.test(warning.message))).toEqual([])
+      expect(nextErrors(bundle.docsConfig.redirects), url.slice(0, 40)).toEqual([])
+    })
+
+    it.each([
+      ['a pathname with repeated slashes', '/a//b'],
+      ['a pathname with repeated slashes and a fragment', '/a///b#top'],
+      ['repeated slashes after dot segments', '/x/..//a'],
+      ['dot segments between slashes', '/a//../b'],
+      ['an encoded dot segment and a double slash', '/x/%2e%2e//a'],
+      ['a dot segment', '/a/./b'],
+      ['a trailing dot segment', '/a/b/..'],
+      ['a dot segment above the root', '/../a'],
+      ['an encoded dot segment', '/%2e%2e/a'],
+      ['Next.js\'s internal escape marker in the fragment', '/target#__ESC_COLON_id'],
+      ['Next.js\'s internal escape marker in the pathname', '/__ESC_COLON_id'],
+      ['Next.js\'s internal escape marker in the query', '/a?q=__ESC_COLON_id'],
+      ['a fragment longer than Next.js accepts', `/target#${'x'.repeat(4100)}`],
+      ['a value one character over the limit', `/${'a'.repeat(2000)}`],
+      ['a query with a protocol and slashes', '/search?q=https://example.com'],
+      ['a plus in the query', '/search?q=c++'],
+      ['a route parameter in the query', '/search?q=:name'],
+      ['a slash in the query', '/search?q=a/b'],
+      ['a second question mark', '/search?q=a?b'],
+      ['a broken percent escape in the query', '/a?q=%zz'],
+      ['a bare percent in the query', '/a?q=50%'],
+      ['parentheses in the fragment', '/a#frag(1)'],
+      ['a wildcard in the fragment', '/a#x*'],
+      ['a route parameter in the fragment', '/a#:id'],
+      ['an empty fragment', '/a#'],
+      ['a second fragment', '/a#b#c'],
+      ['a percent escape in the fragment', '/a#x%20y'],
+      ['a non-ASCII letter in the pathname', '/caf\u00e9'],
+      ['a non-ASCII letter in the fragment', '/a#\u00e9'],
+    ])('keeps the page as content and says so for %s', (_name, url) => {
+      const bundle = bundleFor(cliNavigation, { ...guides, ...cliPage(JSON.stringify(url)) })
+      expect(bundle.docsConfig.redirects?.map((redirect) => redirect.source) ?? []).not.toContain('/cli/dev')
+      expect(bundle.pages.map((page) => page.id)).toContain('cli/dev')
+      const page = bundle.pages.find((entry) => entry.id === 'cli/dev')!
+      expect(page.externalUrl).toBeUndefined()
+      expect(page.noindex).toBeUndefined()
+      const warnings = bundle.warnings.filter((warning) => warning.source === 'cli/dev.mdx' && /"url" frontmatter/.test(warning.message))
+      expect(warnings).toHaveLength(1)
+      expect(warnings[0].message).toMatch(/^Page "cli\/dev": its "url" frontmatter ".*" was not turned into a link, so the page was kept with its own content\. Only a site path made of letters/)
+      expect(warnings[0].message.length).toBeLessThan(400)
+    })
+
+    it.each([
+      ['a protocol-relative address', '//evil.example/x'],
+      ['a protocol-relative address with a backslash', '/\\evil.example'],
+      ['a backslash', '/a\\b'],
+      ['whitespace', '/a b'],
+      ['a tab', '/\t/evil.example'],
+      ['a newline', '/a\nb'],
+      ['an encoded leading double slash', '/%2f%2fevil.example'],
+      ['an encoded leading backslash', '/%5cevil.example'],
+      ['a route parameter', '/docs/:slug'],
+      ['a wildcard', '/docs/*'],
+      ['parentheses', '/docs/(group)'],
+      ['brackets', '/docs/[id]'],
+      ['braces', '/docs/{id}'],
+      ['a plus', '/docs/a+'],
+      ['a route parameter before a query', '/docs/:slug?q=1'],
+      ['parentheses before a fragment', '/docs/(group)#top'],
+      ['whitespace in the query', '/search?q=a b'],
+      ['a backslash in the fragment', '/search#a\\b'],
+    ])('does not link to a url with %s, and says so', (_name, url) => {
+      const bundle = bundleFor(cliNavigation, { ...guides, ...cliPage(JSON.stringify(url)) })
+      expect(bundle.docsConfig.redirects?.map((redirect) => redirect.source) ?? []).not.toContain('/cli/dev')
+      const page = bundle.pages.find((entry) => entry.id === 'cli/dev')!
+      expect(page.externalUrl).toBeUndefined()
+      expect(page.noindex).toBeUndefined()
+      expect(bundle.warnings.filter((warning) => warning.source === 'cli/dev.mdx' && /"url" frontmatter/.test(warning.message))).toHaveLength(1)
+    })
+
+    it('does not make a page that points at itself a self-redirect, and says so', () => {
+      for (const url of ['/cli/dev', '/cli/dev#turso-cli', '/cli/dev/?x=1', '/CLI/dev']) {
+        const bundle = bundleFor(cliNavigation, { ...guides, ...cliPage(JSON.stringify(url)) })
+        expect(bundle.docsConfig.redirects?.map((redirect) => redirect.source) ?? [], url).not.toContain('/cli/dev')
+        expect(bundle.pages.map((page) => page.id), url).toContain('cli/dev')
+        expect(bundle.warnings.filter((warning) => /circle/.test(warning.message) && warning.message.includes('/cli/dev')), url).toHaveLength(1)
+      }
+    })
+
+    it('keeps the first of two pages that point at each other and reports the other', () => {
+      const bundle = bundleFor(
+        { navigation: { pages: ['introduction', 'a', 'b'] } },
+        { ...guides, 'a.mdx': '---\ntitle: A\nurl: /b\n---\n', 'b.mdx': '---\ntitle: B\nurl: /a\n---\n' },
+      )
+      const sources = (bundle.docsConfig.redirects ?? []).map((redirect) => redirect.source)
+      expect(sources.filter((source) => source === '/a' || source === '/b')).toHaveLength(1)
+      expect(bundle.warnings.filter((warning) => /circle/.test(warning.message))).toHaveLength(1)
+    })
+
+    it('still follows a link to a page that is itself a link to another address', () => {
+      const bundle = bundleFor(
+        { navigation: { pages: ['introduction', 'a', 'b'] } },
+        { ...guides, 'a.mdx': '---\ntitle: A\nurl: /b\n---\n', 'b.mdx': '---\ntitle: B\nurl: https://example.com/b\n---\n' },
+      )
+      expect(bundle.docsConfig.redirects).toEqual(expect.arrayContaining([
+        { source: '/a', destination: '/b', permanent: false },
+        { source: '/b', destination: 'https://example.com/b', permanent: false },
+      ]))
+      expect(bundle.warnings.filter((warning) => /circle/.test(warning.message))).toEqual([])
+    })
+
+    it('sends both the site root and /introduction to the path when the home page links to it', () => {
+      const bundle = bundleFor(
+        { navigation: { pages: ['introduction', 'local-development'] } },
+        { 'introduction.mdx': '---\ntitle: Home\nurl: /local-development\n---\n', 'local-development.mdx': guides['local-development.mdx'] },
+      )
+      const external = { destination: '/local-development', permanent: false }
+      expect(bundle.docsConfig.redirects).toEqual(expect.arrayContaining([{ source: '/', ...external }, { source: '/introduction', ...external }]))
+      expect((bundle.docsConfig.redirects ?? []).filter((redirect) => redirect.source === '/')).toHaveLength(1)
+    })
   })
 
   describe('on the home page', () => {
@@ -249,7 +440,7 @@ describe('Mintlify pages that link elsewhere', () => {
         { navigation: { pages: ['index', 'getting-started'] }, redirects: [{ source: '/', destination: '/getting-started' }] },
         { 'index.mdx': '---\ntitle: Home\nurl: https://example.com/welcome\n---\n\nHome.', 'getting-started.mdx': '---\ntitle: Start\n---\n\nStart.' },
       )
-      expect(rootSources(bundle)).toEqual([{ source: '/', destination: '/getting-started' }])
+      expect(rootSources(bundle)).toEqual([{ source: '/', destination: '/getting-started', permanent: true }])
       expect(bundle.docsConfig.redirects).toContainEqual({ source: '/introduction', ...external })
       expect(bundle.warnings.filter((warning) => /"introduction".*https:\/\/example\.com\/welcome.*"\/".*\/getting-started/.test(warning.message))).toHaveLength(1)
     })
@@ -324,6 +515,15 @@ describe('linked source anchors', () => {
     const body = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/acme/docs' }).pages.find((page) => page.id === 'es/intro')?.body
     expect(body).toContain('## Primeros pasos {/* #get-started */}')
     expect(body).not.toContain('<a id="get-started">')
+  })
+
+  it('anchors a fragment that names a heading by the text of its inline component, which the renderer leaves out of the id', () => {
+    const root = mkdtempSync(join(tmpdir(), 'thally-migrate-heading-component-'))
+    writeFileSync(join(root, 'a.mdx'), '---\ntitle: A\n---\n\n[Pro setup](/b#setup-pro) [Plain](/b#setup)')
+    writeFileSync(join(root, 'b.mdx'), '---\ntitle: B\n---\n\n## Setup <Badge color="blue">Pro</Badge>\n\nText.')
+    const body = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/acme/docs' }).pages.find((page) => page.id === 'b')?.body
+    // The heading's own id is `setup`, which the second link already reaches; the first needs an anchor.
+    expect(body).toBe('<a id="setup-pro"></a>\n## Setup <Badge color="blue">Pro</Badge>\n\nText.')
   })
 
   it('maps case-different fragments onto numbered ids of repeated headings', () => {
@@ -418,7 +618,7 @@ describe('Mintlify endpoint pages for operations docs.json lists', () => {
     expect(bundle.pages.map((page) => page.id).filter((id) => id.startsWith('api-reference/'))).toEqual(['api-reference/keys/create-api-key', 'api-reference/keys/get-api-key'])
   })
 
-  it('describes a page by the first sentence of the description as plain text, titling it by the summary, then the operation id, then the method and path', () => {
+  it('describes a page by the first sentence of the description as plain text, titling it by the summary, else the method and the words of the path', () => {
     const spec = {
       openapi: '3.0.0',
       info: { title: 'T', version: '1' },
@@ -434,9 +634,9 @@ describe('Mintlify endpoint pages for operations docs.json lists', () => {
     const pages = Object.fromEntries(bundle.pages.filter((page) => page.openapi).map((page) => [page.id, page]))
     expect(pages['api-reference/limits/apply-limit']).toMatchObject({ title: 'Apply limit', description: 'Check a limit now.' })
     expect(pages['api-reference/limits/bare']).toMatchObject({ description: 'No full stop here' })
-    // Mintlify's own fallbacks name the page: the operation id, else "METHOD /path".
-    expect(pages['api-reference/things/listthings']).toMatchObject({ title: 'listThings', description: 'listThings' })
-    expect(pages['api-reference/things/get-by-path']).toMatchObject({ title: 'GET /by-path', description: 'GET /by-path' })
+    // Mintlify's own fallback names the page "<Method> <words of the path>" and never uses the operation id (a live site: all 156 summary-less operations).
+    expect(pages['api-reference/things/get-by-id']).toMatchObject({ title: 'Get by id', description: 'Get by id' })
+    expect(pages['api-reference/things/get-by-path']).toMatchObject({ title: 'Get by path', description: 'Get by path' })
     expect(bundle.pages.filter((page) => page.openapi).every((page) => page.description.length > 0)).toBe(true)
   })
 
@@ -521,7 +721,7 @@ describe('Mintlify endpoint pages for operations docs.json lists', () => {
     expect(ids).toContain(endpointPageId('api-management/api-reference', 'deleteKey'))
   })
 
-  it('keeps the first of two operations that share a URL, drops the other from the tab, and warns once', () => {
+  it('numbers the later of two operations that share a URL, as Mintlify does, and keeps both in the tab', () => {
     const spec = {
       openapi: '3.0.0',
       info: { title: 'T', version: '1' },
@@ -534,15 +734,14 @@ describe('Mintlify endpoint pages for operations docs.json lists', () => {
     const bundle = migrate({ tabs: [{ tab: 'Guides', pages: ['guide'] }, apiTab([{ group: 'Things', pages: ['POST /b', 'POST /a', 'POST /c'] }])] }, {}, spec)
 
     const pages = bundle.pages.filter((page) => page.openapi)
+    // Numbered in the order they are listed: the first keeps the URL, the next gets `-1` (a live site: every repeated URL).
     expect(pages.map((page) => [page.id, page.openapi])).toEqual([
       ['api-reference/things/create-thing', `${specAsset} POST /b`],
+      ['api-reference/things/create-thing-1', `${specAsset} POST /a`],
       ['api-reference/things/other', `${specAsset} POST /c`],
     ])
-    expect(tabOf(bundle, 'API reference')?.groups).toEqual([{ group: 'Things', pages: ['api-reference/things/create-thing', 'api-reference/things/other'] }])
-    const warnings = bundle.warnings.filter((warning) => warning.message.includes('shared by more than one operation'))
-    expect(warnings).toHaveLength(1)
-    expect(warnings[0].message).toContain('/api-reference/things/create-thing')
-    expect(warnings[0].message).toContain('only the first operation has a page')
+    expect(tabOf(bundle, 'API reference')?.groups).toEqual([{ group: 'Things', pages: ['api-reference/things/create-thing', 'api-reference/things/create-thing-1', 'api-reference/things/other'] }])
+    expect(bundle.warnings.filter((warning) => warning.message.includes('shared by more than one operation'))).toEqual([])
   })
 
   it('adds no redirect from an endpoint page or to /api/, and keeps an authored redirect to a page as authored', () => {
@@ -553,7 +752,7 @@ describe('Mintlify endpoint pages for operations docs.json lists', () => {
     expect(redirects.filter((redirect) => pageUrls.has(redirect.source))).toEqual([])
     expect(redirects.filter((redirect) => redirect.destination.startsWith('/api/') || redirect.source.startsWith('/api/'))).toEqual([])
     // An authored redirect that targets a page is not sent through a second hop to the old /api/ route.
-    expect(redirects).toContainEqual({ source: '/old-create-key', destination: '/api-management/api-reference/keys/create-api-key' })
+    expect(redirects).toContainEqual({ source: '/old-create-key', destination: '/api-management/api-reference/keys/create-api-key', permanent: true })
     // What is left is Mintlify's directory behaviour: a folder with no page of its own opens on its first page.
     expect(redirects.find((redirect) => redirect.source === '/api-management/api-reference/keys')?.destination).toBe('/api-management/api-reference/keys/create-api-key')
   })
@@ -1438,10 +1637,7 @@ describe('Mintlify repository migration', () => {
     expect(bundle.docsConfig).toMatchObject({
       theme: 'maple',
       navbar: {
-        links: [
-          { label: 'Status', href: 'https://status.example.com' },
-          { label: 'Community', href: 'https://community.example.com' },
-        ],
+        links: [{ label: 'Status', href: 'https://status.example.com' }],
         primary: { label: 'GitHub', href: 'https://github.com/acme/product' },
       },
       footer: {
@@ -1476,7 +1672,8 @@ describe('Mintlify repository migration', () => {
       'images/setup.png',
       'openapi/service.openapi.yml',
     ]))
-    expect(withoutDashboardWarning(bundle.warnings)).toEqual([])
+    // The unsafe redirect is the only thing the migration reports, and it names its source.
+    expect(withoutDashboardWarning(bundle.warnings).map((warning) => warning.message)).toEqual([expect.stringContaining('Skipped 1 redirect from /unsafe:')])
 
     // Specs must never land under public/, which the host serves verbatim.
     const renderedPaths = renderMigrationFiles(bundle).map((file) => file.path)
@@ -1863,10 +2060,12 @@ describe('Mintlify repository migration', () => {
           ] },
         })
         expect(boundSources(bundle).sort()).toEqual(['openapi/openapi.yml', 'openapi/v3-openapi.yaml'])
-        const hidden = bundle.docsConfig.tabs.filter((tab) => tab.api?.source === 'openapi/v3-openapi.yaml')
-        expect(hidden).toEqual([expect.objectContaining({ hidden: true })])
-        const visible = bundle.docsConfig.tabs.filter((tab) => tab.api && !tab.hidden)
-        expect(visible.map((tab) => tab.api?.source)).toEqual(['openapi/openapi.yml'])
+        // Only pages name them: each spec is bound to a hidden tab of its own, and the API dropdown (a tab whose label merely
+        // contains "API") keeps the authored pages it lists and no endpoint list of either spec.
+        for (const source of ['openapi/openapi.yml', 'openapi/v3-openapi.yaml']) {
+          expect(bundle.docsConfig.tabs.filter((tab) => tab.api?.source === source)).toEqual([expect.objectContaining({ hidden: true })])
+        }
+        expect(bundle.docsConfig.tabs.filter((tab) => tab.api && !tab.hidden)).toEqual([])
         expect(bundle.assets.map((asset) => asset.path)).toEqual(expect.arrayContaining(['openapi/openapi.yml', 'openapi/v3-openapi.yaml']))
         const refs = bundle.pages.flatMap((page) => (page.openapi ? [page.openapi] : []))
         expect(refs).toHaveLength(tasks.length + 3)
@@ -1876,10 +2075,7 @@ describe('Mintlify repository migration', () => {
         expect(openapiOf(bundle, 'management/tasks/by-path')).toBe('openapi/v3-openapi.yaml POST /api/v1/tasks/{taskIdentifier}/trigger')
         const all = messages(bundle)
         expect(all.filter((message) => /not migrated|could not be loaded/.test(message))).toEqual([])
-        const perTab = all.filter((message) => message.includes('already uses another OpenAPI spec'))
-        expect(perTab).toHaveLength(1)
-        expect(perTab[0]).not.toMatch(/was not added/)
-        expect(perTab[0]).toContain('v3-openapi.yaml')
+        expect(all.filter((message) => message.includes('already uses another OpenAPI spec'))).toEqual([])
       })
     })
   })
@@ -2173,7 +2369,7 @@ describe('Mintlify repository migration', () => {
     expect(bundle.pages.find((page) => page.id === 'guide')?.body).toContain('[a](/api/default/users/get)')
   })
 
-  it('falls back to operationId, then method and path, when an operation summary is empty', () => {
+  it('titles an operation with an empty summary by its method and the words of its path, never by its operation id', () => {
     const root = fixture()
     writeFileSync(join(root, 'docs.json'), JSON.stringify({
       navigation: { tabs: [{ tab: 'API', openapi: { source: 'e.yaml', directory: 'api' } }] },
@@ -2184,11 +2380,12 @@ describe('Mintlify repository migration', () => {
       '  /b:', '    get:', '      summary: "   "', '      tags: [T]', '      responses: { "200": { description: ok } }',
     ].join('\n'))
     const sources = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/acme/docs' }).docsConfig.redirects?.map((redirect) => redirect.source) ?? []
-    expect(sources).toContain('/api/t/listthings')
+    expect(sources).toContain('/api/t/get-a')
     expect(sources).toContain('/api/t/get-b')
+    expect(sources).not.toContain('/api/t/listthings')
   })
 
-  it('keeps the first operation and warns when two operations in a tag share a Mintlify endpoint slug', () => {
+  it('numbers the later of two operations in a tag that share a Mintlify endpoint slug, so each keeps its own redirect', () => {
     const root = fixture()
     writeFileSync(join(root, 'docs.json'), JSON.stringify({
       navigation: { tabs: [{ tab: 'API', openapi: { source: 'd.yaml', directory: 'api' } }] },
@@ -2198,6 +2395,25 @@ describe('Mintlify repository migration', () => {
       '  /a:', '    get:', '      summary: Get thing', '      tags: [T]', '      responses: { "200": { description: ok } }',
       '  /b:', '    get:', '      summary: Get thing', '      tags: [T]', '      responses: { "200": { description: ok } }',
     ].join('\n'))
+    const bundle = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/acme/docs' })
+    expect(bundle.docsConfig.redirects?.filter((redirect) => redirect.source.startsWith('/api/t/get-thing'))).toEqual([
+      { source: '/api/t/get-thing', destination: '/api/default/a/get' },
+      { source: '/api/t/get-thing-1', destination: '/api/default/b/get' },
+    ])
+    expect(bundle.warnings.map((warning) => warning.message).join('\n')).not.toContain('shared by more than one operation')
+  })
+
+  it('keeps the first operation and warns when two specs mounted in one directory share an endpoint URL', () => {
+    const root = fixture()
+    writeFileSync(join(root, 'docs.json'), JSON.stringify({
+      navigation: { tabs: [{ tab: 'First', openapi: { source: 'one.yaml', directory: 'api' } }, { tab: 'Second', openapi: { source: 'two.yaml', directory: 'api' } }] },
+    }))
+    for (const [file, path] of [['one.yaml', '/a'], ['two.yaml', '/b']]) {
+      writeFileSync(join(root, file), [
+        'openapi: 3.1.0', 'info: { title: D, version: "1.0" }', 'paths:',
+        `  ${path}:`, '    get:', '      summary: Get thing', '      tags: [T]', '      responses: { "200": { description: ok } }',
+      ].join('\n'))
+    }
     const bundle = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/acme/docs' })
     expect(bundle.docsConfig.redirects?.filter((redirect) => redirect.source === '/api/t/get-thing')).toEqual([
       { source: '/api/t/get-thing', destination: '/api/default/a/get' },
@@ -2299,9 +2515,9 @@ describe('Mintlify repository migration', () => {
       }))
 
       const bundle = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/acme/docs' })
-      // The authored list is the tab: its operations are pages (the spec names no directory, so Mintlify's default one), and the spec is bound apart.
+      // The authored list is the tab: its operations are pages (the spec names no directory, so Mintlify's default one, with no tag folder for an untagged operation), and the spec is bound apart.
       const tab = bundle.docsConfig.tabs.find((entry) => entry.tab === 'API Reference')
-      const page = selectedPath === '/public' ? 'api-reference/default/public-operation' : 'api-reference/default/restricted-operation'
+      const page = selectedPath === '/public' ? 'api-reference/public-operation' : 'api-reference/restricted-operation'
       expect(tab?.api).toBeUndefined()
       expect(tab?.groups).toEqual([{ group: 'Selected', pages: [page] }])
       expect(bundle.docsConfig.tabs.find((entry) => entry.api)).toEqual({ tab: 'OpenAPI: service.json', hidden: true, api: { source: 'openapi/service.json' } })
@@ -2638,7 +2854,11 @@ describe('Mintlify repository migration', () => {
         message: expect.stringContaining(url),
       }))
     }
-    expect(bundle.remoteApiSpecs).toEqual([{ url: 'https://api.example.com/openapi.json', tabLabel: 'REST API' }, { url: 'https://[::ffff:7f00:1]/spec.json', tabLabel: 'Private API' }])
+    // Each tab names its spec and lists none of its operations, so Mintlify generated them all under its default directory.
+    expect(bundle.remoteApiSpecs).toEqual([
+      { url: 'https://api.example.com/openapi.json', tabLabel: 'REST API', directories: [{ directory: 'api-reference' }] },
+      { url: 'https://[::ffff:7f00:1]/spec.json', tabLabel: 'Private API', directories: [{ directory: 'api-reference' }] },
+    ])
     expect(bundle.warnings.filter((warning) => warning.message.includes('requires a network download'))).toHaveLength(2)
     expect(execFileCalls.calls).toEqual([])
   })
@@ -2740,7 +2960,7 @@ describe('Mintlify repository migration', () => {
     const bundle = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/acme/docs' })
 
     expect(bundle.pages.map((page) => page.body).join('\n')).toContain('[Old](/ref/old-thing) and [Thing](/api/default/a/post) and [Lost](/api).')
-    expect(bundle.docsConfig.redirects).toContainEqual({ source: '/ref/old-thing', destination: '/ref/things/create-a' })
+    expect(bundle.docsConfig.redirects).toContainEqual({ source: '/ref/old-thing', destination: '/ref/things/create-a', permanent: true })
   })
 
   it('keeps every operation listed under a directory that two API tabs of one name share', () => {
@@ -3401,6 +3621,65 @@ describe('Mintlify repository migration', () => {
     expect(bundle.warnings.filter((warning) => warning.message.includes('asset file'))).toEqual([])
   })
 
+  it('warns once when a referenced asset copied to public/ is over the 25 MiB Cloudflare limit', () => {
+    const root = fixture()
+    for (const name of ['one', 'two']) {
+      writeFileSync(join(root, 'images', `${name}.gif`), Buffer.alloc(26 * 1024 * 1024))
+      writeFileSync(join(root, 'en', `${name}.mdx`), `---\ntitle: ${name}\n---\n\n![Demo](/images/${name}.gif)`)
+    }
+
+    const bundle = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/acme/docs' })
+
+    expect(bundle.assets.map((asset) => asset.path)).toEqual(expect.arrayContaining(['images/one.gif', 'images/two.gif']))
+    const oversized = bundle.warnings.filter((warning) => warning.message.includes('Cloudflare'))
+    expect(oversized).toEqual([{
+      code: 'limit-reached',
+      message: '2 asset files are larger than 25 MiB: public/images/one.gif, public/images/two.gif. '
+        + 'Pages use them, so they were copied, but Cloudflare (including Thally Cloud) serves static files only up to 25 MiB, '
+        + 'so a Cloudflare deploy fails until each is made smaller (for example, convert an animated GIF to a video) or hosted elsewhere.',
+    }])
+    expect(bundle.warnings.filter((warning) => warning.message.includes('not copied'))).toEqual([])
+  }, 30_000)
+
+  it('does not warn about a referenced asset of exactly 25 MiB', () => {
+    const root = fixture()
+    writeFileSync(join(root, 'images', 'limit.gif'), Buffer.alloc(26_214_400))
+    writeFileSync(join(root, 'en', 'limit.mdx'), '---\ntitle: Limit\n---\n\n![Demo](/images/limit.gif)')
+
+    const bundle = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/acme/docs' })
+
+    expect(bundle.assets.map((asset) => asset.path)).toContain('images/limit.gif')
+    expect(bundle.warnings.filter((warning) => warning.message.includes('Cloudflare'))).toEqual([])
+  })
+
+  it('skips an unreferenced asset over the budget without also giving the Cloudflare warning', () => {
+    const root = fixture()
+    writeFileSync(join(root, 'images', 'unused.gif'), Buffer.alloc(26 * 1024 * 1024))
+
+    const bundle = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/acme/docs' })
+
+    expect(bundle.assets.map((asset) => asset.path)).not.toContain('images/unused.gif')
+    expect(bundle.warnings.filter((warning) => warning.message.includes('asset file'))).toHaveLength(1)
+    expect(bundle.warnings.filter((warning) => warning.message.includes('Cloudflare'))).toEqual([])
+  })
+
+  it('warns about a Fern asset over the 25 MiB Cloudflare limit that a page references', () => {
+    const root = mkdtempSync(join(tmpdir(), 'thally-migrate-fern-cloudflare-limit-'))
+    const fernRoot = join(root, 'fern')
+    mkdirSync(join(fernRoot, 'pages'), { recursive: true })
+    mkdirSync(join(fernRoot, 'assets'), { recursive: true })
+    writeFileSync(join(fernRoot, 'fern.config.json'), JSON.stringify({ organization: 'acme' }))
+    writeFileSync(join(fernRoot, 'docs.yml'), 'navigation:\n  - page: Welcome\n    path: pages/welcome.mdx\n')
+    writeFileSync(join(fernRoot, 'pages', 'welcome.mdx'), '---\ntitle: Welcome\n---\n\n![Demo](../assets/demo.gif)')
+    writeFileSync(join(fernRoot, 'assets', 'demo.gif'), Buffer.alloc(26 * 1024 * 1024))
+
+    const bundle = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/acme/fern-docs' })
+
+    expect(bundle.assets.map((asset) => asset.path)).toContain('assets/demo.gif')
+    expect(bundle.warnings.filter((warning) => warning.message.includes('Cloudflare')).map((warning) => warning.message))
+      .toEqual([expect.stringMatching(/^1 asset file is larger than 25 MiB: public\/assets\/demo\.gif\. /)])
+  })
+
   it('reports many oversized assets in one warning with the count and the first five paths', () => {
     const root = fixture()
     for (let index = 0; index < 8; index++) writeFileSync(join(root, 'images', `big-${index}.png`), Buffer.alloc(26_000_000))
@@ -3771,6 +4050,205 @@ describe('Docusaurus repository migration', () => {
         { label: 'GitHub', href: 'https://github.com/acme/docs' },
       ] }],
     })
+  })
+
+  it('reads site identity through an imported JSON module', () => {
+    const root = docusaurusFixture()
+    writeFileSync(join(root, 'site.json'), JSON.stringify({
+      name: 'Hookline',
+      title: 'Hookline Docs',
+      tagline: 'Deliver every webhook, once, securely.',
+    }))
+    writeFileSync(join(root, 'docusaurus.config.ts'), `
+      import site from './site.json'
+      const config = {
+        presets: [['classic', { docs: { sidebarPath: './sidebars.ts' } }]],
+        title: site.title,
+        tagline: site.tagline,
+        themeConfig: { navbar: { title: site.name } },
+      }
+      export default config
+    `)
+    const bundle = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/acme/hookline-docs', platform: 'docusaurus' })
+    expect(bundle.site).toMatchObject({ name: 'Hookline', description: 'Deliver every webhook, once, securely.' })
+    expect(bundle.warnings.filter((warning) => /site title|site tagline|navbar title|project name/.test(warning.message))).toEqual([])
+  })
+
+  it('reads site identity through an imported object module', () => {
+    const root = docusaurusFixture()
+    writeFileSync(join(root, 'site.ts'), `
+      const site = { name: 'Acme', title: 'Acme Docs', tagline: 'Ship faster.' }
+      export default site
+    `)
+    writeFileSync(join(root, 'docusaurus.config.ts'), `
+      import site from './site'
+      const config = {
+        presets: [['classic', { docs: { sidebarPath: './sidebars.ts' } }]],
+        title: site.title,
+        tagline: site.tagline,
+      }
+      export default config
+    `)
+    const bundle = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/acme/acme-docs', platform: 'docusaurus' })
+    expect(bundle.site).toMatchObject({ name: 'Acme Docs', description: 'Ship faster.' })
+  })
+
+  it('reads site identity from named exports behind a namespace import', () => {
+    const root = docusaurusFixture()
+    writeFileSync(join(root, 'brand.ts'), `
+      export const TITLE = 'Correct'
+      export const TAGLINE = 'Named tagline.'
+      export default { TITLE: 'Wrong', TAGLINE: 'Default tagline.' }
+    `)
+    writeFileSync(join(root, 'docusaurus.config.ts'), `
+      import * as site from './brand'
+      const config = {
+        presets: [['classic', { docs: { sidebarPath: './sidebars.ts' } }]],
+        title: site.TITLE,
+        tagline: site.default.TAGLINE,
+      }
+      export default config
+    `)
+    const bundle = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/acme/brand-docs', platform: 'docusaurus' })
+    expect(bundle.site).toMatchObject({ name: 'Correct', description: 'Default tagline.' })
+  })
+
+  it('ignores an imported module that leaves the repository through a symlink', () => {
+    const root = docusaurusFixture()
+    const outside = mkdtempSync(join(tmpdir(), 'thally-migrate-outside-'))
+    writeFileSync(join(outside, 'site.json'), JSON.stringify({ title: 'Outside Secret' }))
+    symlinkSync(outside, join(root, 'shared'), 'dir')
+    writeFileSync(join(root, 'docusaurus.config.ts'), `
+      import site from './shared/site.json'
+      const config = {
+        presets: [['classic', { docs: { sidebarPath: './sidebars.ts' } }]],
+        title: site.title,
+      }
+      export default config
+    `)
+    const bundle = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/acme/linked-docs', platform: 'docusaurus' })
+    expect(bundle.site?.name).toBe('linked-docs')
+    expect(bundle.warnings.map((warning) => warning.message).join('\n')).toContain('site title')
+  })
+
+  it('falls back to the source package name and warns once per unreadable identity field', () => {
+    const root = docusaurusFixture()
+    writeFileSync(join(root, 'package.json'), JSON.stringify({ name: '@acme/docs-site' }))
+    writeFileSync(join(root, 'docusaurus.config.ts'), `
+      export default {
+        presets: [['classic', { docs: { sidebarPath: './sidebars.ts' } }]],
+        title: process.env.SITE_TITLE,
+        tagline: process.env.SITE_TAGLINE,
+      }
+    `)
+    const bundle = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/acme/docusaurus-docs', platform: 'docusaurus' })
+    expect(bundle.site?.name).toBe('docs-site')
+    const messages = bundle.warnings.map((warning) => warning.message)
+    const titleWarning = messages.find((message) => message.includes('site title') && message.includes('left out of the migration'))
+    expect(titleWarning).toBeDefined()
+    expect(titleWarning).toContain('taken from the source package.json name')
+    expect(messages.filter((message) => message.includes('site tagline') && message.includes('left out of the migration'))).toHaveLength(1)
+    expect(messages.filter((message) => message.includes('project name was taken from'))).toHaveLength(1)
+  })
+
+  it('never reads a fallback package name through a symlink outside the repository', () => {
+    const root = docusaurusFixture()
+    const outside = mkdtempSync(join(tmpdir(), 'thally-migrate-package-outside-'))
+    writeFileSync(join(outside, 'package.json'), JSON.stringify({ name: '@private/Outside Package' }))
+    symlinkSync(join(outside, 'package.json'), join(root, 'package.json'))
+    writeFileSync(join(root, 'docusaurus.config.ts'), `
+      export default {
+        presets: [['classic', { docs: { sidebarPath: './sidebars.ts' } }]],
+        title: process.env.SITE_TITLE,
+      }
+    `)
+
+    const bundle = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/acme/safe-docs', platform: 'docusaurus' })
+
+    expect(bundle.site?.name).toBe('safe-docs')
+    expect(JSON.stringify(bundle)).not.toContain('Outside Package')
+    expect(bundle.warnings.map((warning) => warning.message).join('\n')).toContain('source repository name')
+  })
+
+  it.each(['oversized', 'directory'])('ignores an %s package manifest when choosing a fallback name', (kind) => {
+    const root = docusaurusFixture()
+    if (kind === 'directory') mkdirSync(join(root, 'package.json'))
+    else writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'Oversized Package', padding: 'x'.repeat(2_000_000) }))
+    writeFileSync(join(root, 'docusaurus.config.ts'), `
+      export default {
+        presets: [['classic', { docs: { sidebarPath: './sidebars.ts' } }]],
+        title: process.env.SITE_TITLE,
+      }
+    `)
+
+    const bundle = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/acme/safe-docs', platform: 'docusaurus' })
+
+    expect(bundle.site?.name).toBe('safe-docs')
+    expect(bundle.warnings.map((warning) => warning.message).join('\n')).toContain('source repository name')
+  })
+
+  it('falls back to the source repository name when the package has no name', () => {
+    const root = docusaurusFixture()
+    writeFileSync(join(root, 'docusaurus.config.ts'), `
+      export default {
+        presets: [['classic', { docs: { sidebarPath: './sidebars.ts' } }]],
+        title: process.env.SITE_TITLE,
+      }
+    `)
+    const bundle = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/acme/hookline-docs', platform: 'docusaurus' })
+    expect(bundle.site?.name).toBe('hookline-docs')
+    expect(bundle.warnings.map((warning) => warning.message).join('\n')).toContain('source repository name')
+  })
+
+  it('resolves footer copyright placeholders against imported identity data', () => {
+    const root = docusaurusFixture()
+    writeFileSync(join(root, 'site.json'), JSON.stringify({ name: 'Hookline', title: 'Hookline Docs' }))
+    writeFileSync(join(root, 'docusaurus.config.ts'), `
+      import site from './site.json'
+      export default {
+        presets: [['classic', { docs: { sidebarPath: './sidebars.ts' } }]],
+        title: site.title,
+        themeConfig: {
+          footer: {
+            copyright: \`Copyright © \${new Date().getFullYear()} \${site.name}. A fictional product. Built with Docusaurus.\`,
+          },
+        },
+      }
+    `)
+    const bundle = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/acme/hookline-docs', platform: 'docusaurus' })
+    expect(bundle.docsConfig.footer?.copyright).toBe('Copyright © {year} Hookline. A fictional product.')
+    expect(bundle.warnings.filter((warning) => warning.message.includes('footer copyright'))).toEqual([])
+  })
+
+  it('drops the Docusaurus credit from a plain footer copyright', () => {
+    const root = docusaurusFixture()
+    writeFileSync(join(root, 'docusaurus.config.ts'), `
+      export default {
+        presets: [['classic', { docs: { sidebarPath: './sidebars.ts' } }]],
+        title: 'Acme Docs',
+        themeConfig: { footer: { copyright: 'Copyright © Acme. Built with Docusaurus' } },
+      }
+    `)
+    const bundle = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/acme/docusaurus-docs', platform: 'docusaurus' })
+    expect(bundle.docsConfig.footer?.copyright).toBe('Copyright © Acme.')
+  })
+
+  it('removes an unreadable footer copyright placeholder and names it in a warning', () => {
+    const root = docusaurusFixture()
+    writeFileSync(join(root, 'docusaurus.config.ts'), `
+      export default {
+        presets: [['classic', { docs: { sidebarPath: './sidebars.ts' } }]],
+        title: 'Acme Docs',
+        themeConfig: {
+          footer: { copyright: \`Copyright © \${new Date().getFullYear()} \${process.env.BRAND}. All rights reserved.\` },
+        },
+      }
+    `)
+    const bundle = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/acme/docusaurus-docs', platform: 'docusaurus' })
+    expect(bundle.docsConfig.footer?.copyright).toBe('Copyright © {year}. All rights reserved.')
+    const warnings = bundle.warnings.filter((warning) => warning.message.includes('footer copyright'))
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0].message).toContain('process.env.BRAND')
   })
 
   it('keeps site sections outside the Docusaurus docs mount on the source domain', () => {
@@ -4819,6 +5297,7 @@ navigation:
     expect(projected.docsConfig.redirects).toContainEqual({
       source: '/old/:path*',
       destination: '/new/:path*',
+      permanent: true,
     })
   })
 
@@ -4864,7 +5343,7 @@ navigation:
     expect(bundle.docsConfig.navbar?.links).toEqual([
       { label: 'GitHub', href: 'https://github.com/acme/acme', type: 'github' },
     ])
-    expect(bundle.docsConfig.redirects).toContainEqual({ source: '/old-install', destination: '/guides/install' })
+    expect(bundle.docsConfig.redirects).toContainEqual({ source: '/old-install', destination: '/guides/install', permanent: true })
     const apiTab = bundle.docsConfig.tabs.find((tab) => tab.api)
     expect(apiTab?.api?.source).toBe('openapi/openapi.yml')
     expect(bundle.assets.map((asset) => asset.path)).toContain('images/logo.svg')
@@ -4964,7 +5443,7 @@ navigation:
     const body = bundle.pages.find((page) => page.id === 'guide')?.body ?? ''
     expect(body).toContain('[publish](/api-reference/publish-a-message)')
     expect(body).toContain('[other](/api)')
-    expect(bundle.docsConfig.redirects).toContainEqual({ source: '/api-reference/publish-a-message', destination: '/guide' })
+    expect(bundle.docsConfig.redirects).toContainEqual({ source: '/api-reference/publish-a-message', destination: '/guide', permanent: true })
   })
 
   it('matches Fern operation pages by their route (own node slug included) and by operationId method name, not just the summary', () => {
@@ -5843,6 +6322,76 @@ describe('scanFiles walks a build/dist/coverage-named directory inside the docs 
   })
 })
 
+describe('Mintlify default ignored documents', () => {
+  function mintlifySite(files: Record<string, string>, navigationPages: Array<string> = ['introduction']): string {
+    const root = mkdtempSync(join(tmpdir(), 'thally-migrate-mintlify-default-ignore-'))
+    writeFileSync(join(root, 'docs.json'), JSON.stringify({ $schema: 'https://mintlify.com/docs.json', navigation: { pages: navigationPages } }))
+    for (const [path, content] of Object.entries({ 'introduction.mdx': '---\ntitle: Welcome\n---\n\nHello.', ...files })) {
+      mkdirSync(dirname(join(root, path)), { recursive: true })
+      writeFileSync(join(root, path), content)
+    }
+    return root
+  }
+  const repositoryOnly = (title: string) => `---\ntitle: ${title}\n---\n\nRepository file.`
+
+  it('skips README, LICENSE, CHANGELOG and CONTRIBUTING markdown at any depth, warning for each one not already skipped at the root', () => {
+    const root = mintlifySite({
+      'CHANGELOG.md': repositoryOnly('Root changelog'),
+      'tests/python-v2.1.0/README.md': repositoryOnly('Nested readme'),
+      'guides/Readme.md': repositoryOnly('Mixed-case readme'),
+      'guides/deep/LICENSE.md': repositoryOnly('Nested license'),
+      'guides/deep/CHANGELOG.md': repositoryOnly('Nested changelog'),
+      'guides/CONTRIBUTING.md': repositoryOnly('Nested contributing'),
+    })
+    const bundle = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/acme/docs' })
+    expect(bundle.pages.map((page) => page.title)).toEqual(['Welcome'])
+    expect(bundle.stats.skipped).toBe(6)
+    expect(bundle.warnings.filter((warning) => warning.code === 'skipped-file').map((warning) => warning.source).sort()).toEqual([
+      'CHANGELOG.md', 'guides/CONTRIBUTING.md', 'guides/Readme.md', 'guides/deep/CHANGELOG.md', 'guides/deep/LICENSE.md', 'tests/python-v2.1.0/README.md',
+    ])
+  })
+
+  it('keeps a nested README.mdx and other nested markdown files', () => {
+    const root = mintlifySite({
+      'guides/README.mdx': repositoryOnly('Nested readme mdx'),
+      'guides/NOTES.md': repositoryOnly('Nested notes'),
+    })
+    const bundle = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/acme/docs' })
+    expect(bundle.pages.map((page) => page.title).sort()).toEqual(['Nested notes', 'Nested readme mdx', 'Welcome'])
+  })
+
+  it('keeps a nested README.md that the navigation names', () => {
+    const root = mintlifySite({
+      'guides/README.md': repositoryOnly('Referenced readme'),
+      'guides/other/README.md': repositoryOnly('Unreferenced readme'),
+    }, ['introduction', 'guides/README'])
+    const bundle = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/acme/docs' })
+    expect(bundle.pages.map((page) => page.title).sort()).toEqual(['Referenced readme', 'Welcome'])
+  })
+
+  it('still folds a nested README into its folder for Docusaurus', () => {
+    const root = docusaurusFixture("export default { docs: [{ type: 'autogenerated', dirName: '.' }] }")
+    writeFileSync(join(root, 'docs', 'guide', 'README.md'), repositoryOnly('Guide readme'))
+    const bundle = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/acme/docs' })
+    expect(bundle.platform).toBe('docusaurus')
+    expect(bundle.pages.find((page) => page.title === 'Guide readme')?.navigationId).toBe('guide')
+  })
+
+  it('leaves Fern imports to the pages docs.yml names', () => {
+    const root = mkdtempSync(join(tmpdir(), 'thally-migrate-fern-default-ignore-'))
+    const fernRoot = join(root, 'fern')
+    mkdirSync(join(fernRoot, 'guides', 'other'), { recursive: true })
+    writeFileSync(join(fernRoot, 'fern.config.json'), '{}')
+    writeFileSync(join(fernRoot, 'docs.yml'), 'navigation:\n  - page: Overview\n    path: overview.mdx\n  - page: Guide readme\n    path: guides/README.md\n')
+    writeFileSync(join(fernRoot, 'overview.mdx'), repositoryOnly('Overview'))
+    writeFileSync(join(fernRoot, 'guides', 'README.md'), repositoryOnly('Referenced readme'))
+    writeFileSync(join(fernRoot, 'guides', 'other', 'README.md'), repositoryOnly('Unreferenced readme'))
+    const bundle = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/acme/docs' })
+    expect(bundle.platform).toBe('fern')
+    expect(bundle.pages.map((page) => page.title).sort()).toEqual(['Overview', 'Referenced readme'])
+  })
+})
+
 describe('gitmodulePaths', () => {
   it('reads every submodule path from .gitmodules, in file order', () => {
     const root = mkdtempSync(join(tmpdir(), 'thally-gitmodules-'))
@@ -6029,6 +6578,139 @@ describe('cloneGitHubRepository retry', () => {
   })
 })
 
+describe('cloneGitHubRepository submodules and .mintignore', () => {
+  afterEach(() => {
+    cloneOutcomes.queue.length = 0
+    gitSpawnCalls.envs.length = 0
+    gitSpawnCalls.args.length = 0
+    submoduleLinks.byPath = {}
+  })
+
+  const acme = { owner: 'acme', repo: 'docs', branch: 'main', docsDir: '', cloneUrl: 'https://github.com/acme/docs.git' }
+  const mintlifyConfig = JSON.stringify({ $schema: 'https://mintlify.com/docs.json', navigation: { pages: ['index'] } })
+  const gitmodules = (...paths: Array<string>): string => paths
+    .map((path) => `[submodule "${path}"]\n\tpath = ${path}\n\turl = https://github.com/acme/${path.split('/').pop()}.git`).join('\n')
+
+  /** The submodule paths git was asked to initialise for a clone of `files`, and the warnings it reported. */
+  async function fetchedSubmodules(files: Record<string, string>, options: { docsDir?: string; sourceDocsDir?: string; links?: Record<string, string>; fetchedLinks?: Record<string, Record<string, string>> } = {}) {
+    gitSpawnCalls.args.length = 0
+    submoduleLinks.byPath = options.fetchedLinks ?? {}
+    const targetDir = mkdtempSync(join(tmpdir(), 'thally-clone-submodules-'))
+    for (const [path, content] of Object.entries(files)) {
+      mkdirSync(dirname(join(targetDir, path)), { recursive: true })
+      writeFileSync(join(targetDir, path), content)
+    }
+    // Symlinks as written in the repository: the target is read from the link's own directory.
+    for (const [path, target] of Object.entries(options.links ?? {})) {
+      mkdirSync(dirname(join(targetDir, path)), { recursive: true })
+      symlinkSync(target, join(targetDir, path))
+    }
+    const warnings: Array<{ code: string; message: string }> = []
+    await cloneGitHubRepository({ ...acme, docsDir: options.sourceDocsDir ?? '' }, targetDir, warnings as never, options.docsDir === undefined ? {} : { docsDir: options.docsDir })
+    return {
+      fetched: gitSpawnCalls.args.filter((args) => args.includes('submodule')).map((args) => args[args.length - 1]),
+      warnings,
+    }
+  }
+
+  it('does not fetch a submodule whose directory .mintignore excludes, and still fetches the others', async () => {
+    const { fetched, warnings } = await fetchedSubmodules({
+      'docs.json': mintlifyConfig,
+      '.mintignore': 'turso/\n',
+      '.gitmodules': gitmodules('turso', 'shared'),
+    })
+    expect(fetched).toEqual(['shared'])
+    expect(warnings).toEqual([])
+  })
+
+  it.each(['turso/', '/turso', 'turso', '**/turso', 'tur*/', '# comment\n\nturso/'])('treats the .mintignore line %j as excluding the directory', async (line) => {
+    const { fetched } = await fetchedSubmodules({ 'docs.json': mintlifyConfig, '.mintignore': `${line}\n`, '.gitmodules': gitmodules('turso', 'shared') })
+    expect(fetched).toEqual(['shared'])
+  })
+
+  it.each(['turso/*', 'other/', 'turso/README.md', '!turso/', 'shared/\n!shared/'])('still fetches a submodule whose directory %j does not exclude', async (line) => {
+    const { fetched } = await fetchedSubmodules({ 'docs.json': mintlifyConfig, '.mintignore': `${line}\n`, '.gitmodules': gitmodules('turso') })
+    expect(fetched).toEqual(['turso'])
+  })
+
+  it('fetches every submodule when there is no .mintignore, or no Mintlify project to apply it to', async () => {
+    expect((await fetchedSubmodules({ 'docs.json': mintlifyConfig, '.gitmodules': gitmodules('turso', 'shared') })).fetched).toEqual(['turso', 'shared'])
+    expect((await fetchedSubmodules({ '.mintignore': 'turso/\n', '.gitmodules': gitmodules('turso', 'shared') })).fetched).toEqual(['turso', 'shared'])
+  })
+
+  it('matches the submodule path against the Mintlify project root, not the repository root', async () => {
+    const files = {
+      'docs/docs.json': mintlifyConfig,
+      'docs/.mintignore': 'turso/\n/vendor/\n',
+      '.gitmodules': gitmodules('docs/turso', 'turso', 'docs/vendor', 'vendor'),
+    }
+    for (const options of [{ docsDir: 'docs' }, { sourceDocsDir: 'docs' }, {}]) {
+      // `turso` and `vendor` at the repository root sit outside the project, so they are not excluded;
+      // the anchored `/vendor/` names the project's own `docs/vendor` only.
+      expect((await fetchedSubmodules(files, options)).fetched).toEqual(['turso', 'vendor'])
+    }
+  })
+
+  describe('with a symlink that points into an ignored submodule', () => {
+    const files = { 'docs.json': mintlifyConfig, '.mintignore': 'vendor/\n', '.gitmodules': gitmodules('vendor', 'shared') }
+
+    it.each([
+      ['a link to a directory of it', { api: 'vendor/docs' }],
+      ['a link to it', { api: 'vendor' }],
+      ['a link from a nested directory', { 'guides/api': '../vendor/docs' }],
+      ['a link written with ./ and a trailing slash', { api: './vendor/docs/' }],
+      ['a chain of links', { api: 'latest', latest: 'vendor/docs' }],
+      ['a link below a linked directory', { v1: 'vendor', 'guides/api': '../v1/docs' }],
+      ['a link to a directory that holds it', { all: '.' }],
+      ['a loop of links', { a: 'b', b: 'a', api: 'vendor' }],
+    ])('still fetches the submodule for %s, so the pages behind the link survive', async (_name, links) => {
+      expect((await fetchedSubmodules(files, { links })).fetched).toEqual(['shared', 'vendor'])
+    })
+
+    describe('that a fetched submodule brings', () => {
+      const withLinks = { 'docs.json': mintlifyConfig, '.mintignore': 'vendor/\n', '.gitmodules': gitmodules('vendor', 'links') }
+
+      it('fetches the ignored submodule after the others, since their links are not known before', async () => {
+        const { fetched } = await fetchedSubmodules(withLinks, { fetchedLinks: { links: { api: '../vendor/docs' } } })
+        expect(fetched).toEqual(['links', 'vendor'])
+      })
+
+      it('skips it when none of the links of the fetched submodules points into it', async () => {
+        const { fetched } = await fetchedSubmodules(withLinks, { fetchedLinks: { links: { latest: '../links/docs', up: '../../elsewhere' } } })
+        expect(fetched).toEqual(['links'])
+      })
+
+      it('follows a chain: an ignored submodule fetched for a link whose own links point into another ignored one', async () => {
+        const chain = { 'docs.json': mintlifyConfig, '.mintignore': 'b/\nc/\nd/\n', '.gitmodules': gitmodules('a', 'b', 'c', 'd') }
+        const { fetched } = await fetchedSubmodules(chain, { fetchedLinks: { a: { x: '../b' }, b: { y: '../c/docs' } } })
+        // d has no link to it, so it stays out; c is reached only once b's content is there.
+        expect(fetched).toEqual(['a', 'b', 'c'])
+      })
+
+      it('fetches each submodule once when ignored submodules link to each other', async () => {
+        const loop = { 'docs.json': mintlifyConfig, '.mintignore': 'b/\nc/\n', '.gitmodules': gitmodules('a', 'b', 'c') }
+        const { fetched } = await fetchedSubmodules(loop, { fetchedLinks: { a: { x: '../b' }, b: { y: '../c' }, c: { z: '../b' } } })
+        expect(fetched).toEqual(['a', 'b', 'c'])
+      })
+    })
+
+    it('skips the submodule when the links of the checkout point elsewhere', async () => {
+      const { fetched } = await fetchedSubmodules(files, { links: { latest: 'shared', 'guides/up': '../shared/docs', outside: '../../elsewhere', broken: 'nowhere' } })
+      expect(fetched).toEqual(['shared'])
+    })
+
+    it('does not look into .git', async () => {
+      const { fetched } = await fetchedSubmodules({ ...files, '.git/HEAD': 'ref: refs/heads/main' }, { links: { '.git/info/api': '../../vendor/docs' } })
+      expect(fetched).toEqual(['shared'])
+    })
+  })
+
+  it('reaches the same verdict for a path written with a leading ./', async () => {
+    const { fetched } = await fetchedSubmodules({ 'docs.json': mintlifyConfig, '.mintignore': 'turso/\n', '.gitmodules': gitmodules('./turso', 'shared') })
+    expect(fetched).toEqual(['shared'])
+  })
+})
+
 describe('Mintlify snippet inlining hardening', () => {
   function snippetFixture(files: Record<string, string>, body: string, home = 'home') {
     const root = mkdtempSync(join(tmpdir(), 'thally-migrate-snippet-hardening-'))
@@ -6097,6 +6779,54 @@ describe('Mintlify snippet inlining hardening', () => {
       expect(bundle.warnings.some((warning) => warning.source === 'home.mdx' && /s\.mdx/.test(warning.message))).toBe(true)
       expect(bundle.warnings.some((warning) => warning.source === 'home.mdx' && warning.code === 'skipped-file')).toBe(false)
     }
+  })
+
+  describe('<Snippet file> against the legacy _snippets folder', () => {
+    it('resolves the file from _snippets/ when snippets/ has none, without a missing-snippet warning', () => {
+      const { page, warnings } = snippetFixture({ '_snippets/x.mdx': 'Legacy snippet body.\n' }, '<Snippet file="x.mdx" />')
+      expect(page?.body).toContain('Legacy snippet body.')
+      expect(page?.body).not.toContain('Missing snippet')
+      expect(warnings.filter((warning) => warning.code === 'missing-page')).toEqual([])
+    })
+
+    it('prefers snippets/ when both folders hold the file', () => {
+      const { page } = snippetFixture({ 'snippets/x.mdx': 'Current folder body.\n', '_snippets/x.mdx': 'Legacy folder body.\n' }, '<Snippet file="x.mdx" />')
+      expect(page?.body).toContain('Current folder body.')
+      expect(page?.body).not.toContain('Legacy folder body.')
+    })
+
+    it('resolves a nested path and a snippet nested in a _snippets snippet', () => {
+      const { page } = snippetFixture({
+        '_snippets/outer.mdx': 'Outer.\n\n<Snippet file="deep/inner.mdx" />\n',
+        '_snippets/deep/inner.mdx': 'Inner body.\n',
+      }, '<Snippet file="outer.mdx" />')
+      expect(page?.body).toContain('Outer.')
+      expect(page?.body).toContain('Inner body.')
+    })
+
+    it('still reports a file that neither folder holds', () => {
+      const { page, warnings } = snippetFixture({ '_snippets/x.mdx': 'Legacy snippet body.\n' }, '<Snippet file="nope.mdx" />')
+      expect(page?.body).toContain('Missing snippet: nope.mdx')
+      expect(warnings.filter((warning) => warning.code === 'missing-page' && /nope\.mdx/.test(warning.message))).toHaveLength(1)
+    })
+
+    it('does not inline an access-restricted _snippets file', () => {
+      const { page, warnings } = snippetFixture({ '_snippets/x.mdx': '---\ngroups: [admin]\n---\nTOPSECRET\n' }, '<Snippet file="x.mdx" />')
+      expect(page?.body).not.toContain('TOPSECRET')
+      expect(warnings.some((warning) => warning.code === 'gated-page' && warning.source === 'home.mdx')).toBe(true)
+    })
+
+    it('treats a _snippets directory symlinked outside the repository as missing', () => {
+      const outside = mkdtempSync(join(tmpdir(), 'thally-migrate-outside-'))
+      writeFileSync(join(outside, 's.mdx'), 'leaked-value\n')
+      const root = mkdtempSync(join(tmpdir(), 'thally-migrate-symlink-legacy-snippets-'))
+      symlinkSync(outside, join(root, '_snippets'))
+      writeFileSync(join(root, 'docs.json'), JSON.stringify({ $schema: 'https://mintlify.com/docs.json', navigation: { pages: ['home'] } }))
+      writeFileSync(join(root, 'home.mdx'), '---\ntitle: Home\n---\n\n<Snippet file="s.mdx" />\n')
+      const bundle = migrateRepository({ repositoryDir: root, sourceUrl: 'https://github.com/acme/docs' })
+      expect(bundle.pages.find((candidate) => candidate.id === 'home')?.body ?? '').not.toContain('leaked')
+      expect(bundle.warnings.some((warning) => warning.source === 'home.mdx' && /s\.mdx/.test(warning.message))).toBe(true)
+    })
   })
 
   it('excludes a page whose dynamic import() uses a relative module the migration does not ship', () => {

@@ -75,7 +75,7 @@ runs retain subprocess output for scripts and CI. These options also work with
 | --- | --- |
 | `create-thally-docs <dir>` | Scaffold a new project |
 | `create-thally-docs migrate <github-or-docs-url-or-directory> [dir]` | Import a docs repository or public docs site through the shared migration engine |
-| `create-thally-docs check [dir] [--fix] [--ci] [--drift] [--external]` | Lint content for broken links, orphan pages, and missing frontmatter; `--external` also checks links to public hosts (bounded, warnings only) |
+| `create-thally-docs check [dir] [--fix] [--ci] [--drift] [--external]` | Lint content for MDX syntax errors (pages and snippets that cannot be parsed), broken links, orphan pages, and missing frontmatter; `--external` also checks links to public hosts (bounded, warnings only) |
 | `create-thally-docs translate --locale <code>` | Translate content into another locale |
 
 Public URL imports default to 1,000 pages. The web migration flow supports up to

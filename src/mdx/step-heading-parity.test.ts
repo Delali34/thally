@@ -112,6 +112,15 @@ describe('authored step heading ids', () => {
       expect(await brokenAnchorOutput(source, absent)).toContain('Broken anchor')
     }
   })
+
+  it.each(['install', '  install  ', '   '])('numbers the id %j in braces as it numbers it in quotes, repeated or blank', async (authored) => {
+    const page = (id: string) => `<Steps titleSize="h3">\n<Step title="Deploy" id=${id}>Body.</Step>\n<Step title="Repeat" id=${id}>Body.</Step>\n</Steps>\n\n## Install`
+    const ids = await renderedIds(page(`"${authored}"`))
+    const braced = page(`{"${authored}"}`)
+    expect(await renderedIds(braced)).toEqual(ids)
+    expect(parseMdxContent(braced).headings.map((heading) => heading.id)).toEqual(ids)
+    for (const id of ids) expect(await brokenAnchorOutput(braced, id)).not.toContain('Broken anchor')
+  })
 })
 
 describe('step titles with inline code', () => {

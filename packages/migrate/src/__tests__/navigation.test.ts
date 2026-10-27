@@ -3,6 +3,9 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { checkCustomRoutes } from 'next/dist/lib/load-custom-routes.js'
+import { getPathMatch } from 'next/dist/shared/lib/router/utils/path-match.js'
+import { prepareDestination } from 'next/dist/shared/lib/router/utils/prepare-destination.js'
 import { describe, expect, it } from 'vitest'
 import {
   addMintlifyDirectoryRedirects,
@@ -190,7 +193,7 @@ describe('Mintlify navigation projection', () => {
     })
 
     expect(result.docsConfig.redirects).toEqual([
-      { source: '/api-reference/:path*', destination: '/api/:path*' },
+      { source: '/api-reference/:path*', destination: '/api/:path*', permanent: true },
       { source: '/old/:path*', destination: '/new', permanent: true },
     ])
   })
@@ -310,6 +313,58 @@ describe('Mintlify navigation projection', () => {
     expect(result.docsConfig.navigation?.shortcuts).toEqual([{ label: 'Playground', href: 'https://example.com/play', icon: 'play' }])
   })
 
+  describe('global anchors shown once', () => {
+    const website = { anchor: 'Official Website', href: 'https://example.com' }
+    const blog = { anchor: 'Blog', href: 'https://blog.example.com' }
+    const docsTab = { tab: 'Docs', pages: ['introduction'] }
+
+    it('keeps a global anchor in the sidebar only, not the navbar', () => {
+      const result = projectMintlifyNavigation({ navigation: { global: { anchors: [website, blog] }, tabs: [docsTab] } })
+      expect(result.docsConfig.navigation?.shortcuts).toEqual([
+        { label: 'Official Website', href: 'https://example.com' },
+        { label: 'Blog', href: 'https://blog.example.com' },
+      ])
+      expect(result.docsConfig.navbar).toBeUndefined()
+    })
+
+    it('keeps an authored navbar link that matches a shortcut', () => {
+      const result = projectMintlifyNavigation({
+        navbar: { links: [{ label: 'Blog', href: 'https://blog.example.com' }] },
+        navigation: { global: { anchors: [website, blog] }, tabs: [docsTab] },
+      })
+      expect(result.docsConfig.navigation?.shortcuts).toHaveLength(2)
+      expect(result.docsConfig.navbar?.links).toEqual([{ label: 'Blog', href: 'https://blog.example.com' }])
+    })
+
+    it('still projects a global tab with an href as a navbar link', () => {
+      const result = projectMintlifyNavigation({
+        navigation: {
+          global: { anchors: [blog], tabs: [{ tab: 'Community', href: 'https://community.example.com' }] },
+          tabs: [docsTab],
+        },
+      })
+      expect(result.docsConfig.navigation?.shortcuts).toEqual([{ label: 'Blog', href: 'https://blog.example.com' }])
+      expect(result.docsConfig.navbar?.links).toEqual([{ label: 'Community', href: 'https://community.example.com' }])
+    })
+
+    it('shows language-level global anchors only as shortcuts', () => {
+      const result = projectMintlifyNavigation({ navigation: { languages: [{
+        language: 'en', default: true, global: { anchors: [website, blog] }, tabs: [docsTab],
+      }] } })
+      expect(result.docsConfig.navigation?.shortcuts).toHaveLength(2)
+      expect(result.docsConfig.navbar).toBeUndefined()
+    })
+
+    it('leaves root-level global anchors in the navbar when a language owns the shortcuts', () => {
+      const result = projectMintlifyNavigation({ navigation: {
+        global: { anchors: [{ anchor: 'Status', href: 'https://status.example.com' }] },
+        languages: [{ language: 'en', default: true, global: { anchors: [blog] }, tabs: [docsTab] }],
+      } })
+      expect(result.docsConfig.navigation?.shortcuts).toEqual([{ label: 'Blog', href: 'https://blog.example.com' }])
+      expect(result.docsConfig.navbar?.links).toEqual([{ label: 'Status', href: 'https://status.example.com' }])
+    })
+  })
+
   it('translates a trailing Mintlify wildcard redirect into a Next.js named catch-all', () => {
     const result = projectMintlifyNavigation({
       navigation: { pages: ['introduction'] },
@@ -321,9 +376,9 @@ describe('Mintlify navigation projection', () => {
     })
 
     expect(result.docsConfig.redirects).toEqual([
-      { source: '/api-reference/:path*', destination: '/api/:path*' },
-      { source: '/settings/auth/:path*', destination: '/deploy/auth-setup' },
-      { source: '/api-playground/mdx/:slug*', destination: '/api-playground/mdx-setup' },
+      { source: '/api-reference/:path*', destination: '/api/:path*', permanent: true },
+      { source: '/settings/auth/:path*', destination: '/deploy/auth-setup', permanent: true },
+      { source: '/api-playground/mdx/:slug*', destination: '/api-playground/mdx-setup', permanent: true },
     ])
   })
 
@@ -337,7 +392,7 @@ describe('Mintlify navigation projection', () => {
       ],
     })
 
-    expect(result.docsConfig.redirects).toEqual([{ source: '/kept', destination: '/still-kept' }])
+    expect(result.docsConfig.redirects).toEqual([{ source: '/kept', destination: '/still-kept', permanent: true }])
     expect(result.warnings.filter((warning) => warning.code === 'unsupported-config'
       && warning.message.includes('wildcard'))).toHaveLength(2)
   })
@@ -352,7 +407,7 @@ describe('Mintlify navigation projection', () => {
       ],
     })
 
-    expect(result.docsConfig.redirects).toEqual([{ source: '/kept', destination: '/still-kept' }])
+    expect(result.docsConfig.redirects).toEqual([{ source: '/kept', destination: '/still-kept', permanent: true }])
   })
 
   it('drops a redirect whose destination hides a browser-cross-origin `//` behind a stripped whitespace/control character', () => {
@@ -367,7 +422,208 @@ describe('Mintlify navigation projection', () => {
       ],
     })
 
-    expect(result.docsConfig.redirects).toEqual([{ source: '/kept', destination: '/still-kept' }])
+    expect(result.docsConfig.redirects).toEqual([{ source: '/kept', destination: '/still-kept', permanent: true }])
+  })
+})
+
+describe('Mintlify redirect status', () => {
+  const projected = (redirects: Array<Record<string, unknown>>) => projectMintlifyNavigation({ navigation: { pages: ['introduction'] }, redirects })
+
+  // Mintlify documents `permanent` as defaulting to true (308); dub.co answers all of its redirects, none of which set it, with 308.
+  it('makes a redirect permanent unless the source sets permanent: false', () => {
+    const result = projected([
+      { source: '/omitted', destination: '/a' },
+      { source: '/explicit-true', destination: '/b', permanent: true },
+      { source: '/explicit-false', destination: '/c', permanent: false },
+      { source: '/wildcard/*', destination: '/d/*' },
+      { source: '/external', destination: 'https://github.com/dubinc/examples' },
+      { source: '/not-a-boolean', destination: '/e', permanent: 'false' },
+    ])
+    expect(result.docsConfig.redirects).toEqual([
+      { source: '/omitted', destination: '/a', permanent: true },
+      { source: '/explicit-true', destination: '/b', permanent: true },
+      { source: '/explicit-false', destination: '/c', permanent: false },
+      { source: '/wildcard/:path*', destination: '/d/:path*', permanent: true },
+      { source: '/external', destination: 'https://github.com/dubinc/examples', permanent: true },
+      { source: '/not-a-boolean', destination: '/e', permanent: true },
+    ])
+  })
+})
+
+describe('Mintlify redirects written without a leading slash', () => {
+  const projected = (redirects: Array<{ source: string; destination: string }>) => projectMintlifyNavigation({ navigation: { pages: ['introduction'] }, redirects })
+
+  // docs.json of Firecrawl: live Mintlify answers /features/extract-beta with a 308 to /features/extract.
+  it('reads a source and destination without the slash as paths on the site, and says it did', () => {
+    const result = projected([
+      { source: 'features/extract-beta', destination: 'features/extract' },
+      { source: 'old/*', destination: 'https://example.com/new/*' },
+      { source: '/rooted', destination: 'plain' },
+      { source: '/kept', destination: '/still-kept' },
+    ])
+    expect(result.docsConfig.redirects).toEqual([
+      { source: '/features/extract-beta', destination: '/features/extract', permanent: true },
+      { source: '/old/:path*', destination: 'https://example.com/new/:path*', permanent: true },
+      { source: '/rooted', destination: '/plain', permanent: true },
+      { source: '/kept', destination: '/still-kept', permanent: true },
+    ])
+    expect(result.warnings.map((warning) => warning.message)).toEqual([
+      'Added the leading / to 3 redirects written without one (from features/extract-beta, old/*, /rooted). Mintlify serves a redirect like that as a path on the site, so each was migrated with the / added. Check them against the live site if any was meant to be something else.',
+    ])
+    const [{ source, destination }] = result.docsConfig.redirects!
+    expect(() => checkCustomRoutes([{ source, destination, permanent: false }], 'redirect')).not.toThrow()
+    const match = getPathMatch(source, { removeUnnamedParams: true, strict: true })
+    expect(prepareDestination({ appendParamsToQuery: false, destination, params: match('/features/extract-beta') as Record<string, string>, query: {} }).newUrl).toBe('/features/extract')
+  })
+
+  it('names the one redirect in the singular, and a rooted redirect gets no such warning', () => {
+    expect(projected([{ source: 'a', destination: '/b' }]).warnings.map((warning) => warning.message)).toEqual([
+      'Added the leading / to 1 redirect written without one (from a). Mintlify serves a redirect like that as a path on the site, so it was migrated with the / added. Check it against the live site if it was meant to be something else.',
+    ])
+    expect(projected([{ source: '/a', destination: '/b' }]).warnings).toEqual([])
+  })
+
+  it.each([
+    './here', '../up', '.hidden/x', '\\evil.example', '%2f%2fevil.example', '%5cevil.example', 'x\t/evil.example', 'a\\b',
+    'javascript:alert(1)', 'data:text/html,x', 'mailto:a@b.example', 'ftp://example.com/x', 'a b',
+  ])('still rejects %j, in a source or a destination, and names it as skipped', (value) => {
+    for (const redirect of [{ source: value, destination: '/to' }, { source: '/from', destination: value }]) {
+      const result = projected([redirect, { source: '/kept', destination: '/still-kept' }])
+      expect(result.docsConfig.redirects).toEqual([{ source: '/kept', destination: '/still-kept', permanent: true }])
+      expect(result.warnings.map((warning) => warning.message)).toEqual([expect.stringMatching(/^Skipped 1 redirect from /)])
+    }
+  })
+
+  it('leaves a Fern or Docusaurus redirect without the slash rejected, since their docs ask for a rooted path', () => {
+    const fern = projectFernNavigation({ fernRoot: tmpdir(), config: { navigation: [], redirects: [{ source: 'old', destination: '/new' }] } })
+    expect(fern.docsConfig.redirects ?? []).toEqual([])
+    expect(fern.warnings.map((warning) => warning.message)).toContainEqual(expect.stringMatching(/^Skipped 1 redirect from old:/))
+  })
+})
+
+describe('Mintlify redirects to an address outside the site', () => {
+  const projected = (redirects: Array<{ source: string; destination: string }>) => projectMintlifyNavigation({ navigation: { pages: ['introduction'] }, redirects })
+
+  // docs.json of dub.co: live Mintlify answers each of these with a 308 to the external address.
+  it('keeps a redirect to an absolute http(s) address exactly as written', () => {
+    const redirects = [
+      { source: '/docs/examples', destination: 'https://github.com/dubinc/examples' },
+      { source: '/docs/integrations/zapier', destination: 'https://dub.co/integrations/zapier' },
+      { source: '/plain', destination: 'http://example.com' },
+      { source: '/with-query', destination: 'https://example.com:8080/a?b=c#d' },
+    ]
+    const result = projected(redirects)
+    expect(result.docsConfig.redirects).toEqual(redirects.map((redirect) => ({ ...redirect, permanent: true })))
+    expect(result.warnings).toEqual([])
+  })
+
+  it('translates a trailing wildcard into the path of an absolute destination only', () => {
+    const result = projected([
+      { source: '/old/*', destination: 'https://example.com/new/*' },
+      { source: '/host-only/*', destination: 'https://example.com' },
+    ])
+    expect(result.docsConfig.redirects).toEqual([
+      { source: '/old/:path*', destination: 'https://example.com/new/:path*', permanent: true },
+      { source: '/host-only/:path*', destination: 'https://example.com', permanent: true },
+    ])
+  })
+
+  it('drops an absolute destination Next.js cannot carry, and says so', () => {
+    const result = projected([
+      { source: '/colon', destination: 'https://example.com/a:b' },
+      { source: '/kept', destination: 'https://example.com/kept' },
+    ])
+    expect(result.docsConfig.redirects).toEqual([{ source: '/kept', destination: 'https://example.com/kept', permanent: true }])
+    expect(result.warnings.map((warning) => warning.message).join('\n')).toContain('/colon')
+  })
+
+  /** What Next.js itself makes of a redirect for a request to `from`: whether the build accepts it, and where the visitor is sent. */
+  const nextRedirect = ({ source, destination }: { source: string; destination: string }, from: string) => {
+    expect(() => checkCustomRoutes([{ source, destination, permanent: false }], 'redirect')).not.toThrow()
+    const match = getPathMatch(source, { removeUnnamedParams: true, strict: true })
+    const { parsedDestination, newUrl } = prepareDestination({ appendParamsToQuery: false, destination, params: match(from) as Record<string, string>, query: {} })
+    return { host: parsedDestination.hostname, path: newUrl, query: parsedDestination.query }
+  }
+
+  it('keeps a destination whose query or fragment holds a colon, since only its path is route syntax', () => {
+    const redirects = [
+      { source: '/old', destination: 'https://example.com/?next=https://other.com' },
+      { source: '/old-page', destination: 'https://example.com/a/b?x=1&y=c:d#section' },
+      { source: '/local', destination: '/new?next=https://other.com' },
+    ]
+    const result = projected(redirects)
+    expect(result.docsConfig.redirects).toEqual(redirects.map((redirect) => ({ ...redirect, permanent: true })))
+    expect(result.warnings).toEqual([])
+    expect(nextRedirect(redirects[0], '/old')).toEqual({ host: 'example.com', path: '/', query: { next: 'https://other.com' } })
+    expect(nextRedirect(redirects[1], '/old-page')).toEqual({ host: 'example.com', path: '/a/b#section', query: { x: '1', y: 'c:d' } })
+    expect(nextRedirect(redirects[2], '/local')).toEqual({ host: null, path: '/new', query: { next: 'https://other.com' } })
+  })
+
+  it('translates a trailing wildcard in front of a query on the destination', () => {
+    const result = projected([{ source: '/old/*', destination: 'https://example.com/new/*?from=docs' }])
+    const [redirect] = result.docsConfig.redirects!
+    expect(redirect).toEqual({ source: '/old/:path*', destination: 'https://example.com/new/:path*?from=docs', permanent: true })
+    expect(result.warnings).toEqual([])
+    expect(nextRedirect(redirect, '/old/a/b')).toEqual({ host: 'example.com', path: '/new/a/b', query: { from: 'docs' } })
+  })
+
+  it('names the real reason for each redirect whose path or fragment Next.js cannot carry', () => {
+    const result = projected([
+      { source: '/frag', destination: 'https://example.com/p#a:b' },
+      { source: '/wiki/Category:Foo', destination: '/x' },
+      { source: '/to-wiki', destination: '/wiki/Category:Foo' },
+      { source: '/glob*', destination: '/x' },
+      { source: '/a/*/b', destination: '/c' },
+      { source: '/only-dest', destination: '/dest/*' },
+      { source: '/kept', destination: '/still-kept' },
+    ])
+    expect(result.docsConfig.redirects).toEqual([{ source: '/kept', destination: '/still-kept', permanent: true }])
+    const [fragment, sourceColon, destinationColon, glob, middle, onlyDestination] = result.warnings.map((warning) => warning.message)
+    expect(fragment).toMatch(/^Redirect from \/frag .*fragment.*"#a:b".*dropped/)
+    expect(sourceColon).toMatch(/^Redirect from \/wiki\/Category:Foo .*"Category:Foo".*":"/)
+    expect(destinationColon).toMatch(/^Redirect from \/to-wiki .*"Category:Foo".*":"/)
+    for (const message of [fragment, sourceColon, destinationColon]) expect(message).not.toContain('wildcard')
+    for (const message of [glob, middle, onlyDestination]) expect(message).toContain('wildcard')
+    expect(glob).toContain('"glob*"')
+    expect(result.warnings).toHaveLength(6)
+  })
+
+  it.each([
+    '//evil.example', '/\\evil.example', '/%2f%2fevil.example', '/%5cevil.example',
+    'javascript:alert(1)', 'data:text/html,x', 'ftp://example.com/x', 'file:///etc/passwd',
+    'https://', 'https:///evil.example', 'http:evil.example', 'https:/evil.example',
+    'https://user:pw@evil.example/', 'https://[::1]/x', 'https://evil.example/\tx', 'https://evil.example/ x', 'https://evil.example\\x',
+  ])('still rejects the destination %j, with a warning that names its source', (destination) => {
+    const result = projected([{ source: '/from', destination }, { source: '/kept', destination: '/still-kept' }])
+    expect(result.docsConfig.redirects).toEqual([{ source: '/kept', destination: '/still-kept', permanent: true }])
+    expect(result.warnings.filter((warning) => warning.message.includes('/from'))).toHaveLength(1)
+  })
+
+  it('names every rejected redirect in one warning, without the control characters in a source', () => {
+    const result = projected([
+      { source: '/a', destination: '//evil.example' },
+      { source: './unrooted', destination: '/x' },
+      { source: '//protocol-relative', destination: '/x' },
+      { source: '/line\nbreak', destination: '/x' },
+      { source: '/kept', destination: '/still-kept' },
+    ])
+    expect(result.docsConfig.redirects).toEqual([{ source: '/kept', destination: '/still-kept', permanent: true }])
+    expect(result.warnings.map((warning) => warning.message)).toEqual([
+      'Skipped 4 redirects from /a, ./unrooted, //protocol-relative, /linebreak: a redirect must start at a path on this site (one beginning with a single /) and lead to a path on this site or to an http:// or https:// address. Check these redirects in the source docs and add any that are still needed to docs.json.',
+    ])
+  })
+
+  it('words the warning for one redirect in the singular, and lists at most ten', () => {
+    expect(projected([{ source: '/a', destination: '//evil.example' }]).warnings.map((warning) => warning.message)).toEqual([
+      'Skipped 1 redirect from /a: a redirect must start at a path on this site (one beginning with a single /) and lead to a path on this site or to an http:// or https:// address. Check it in the source docs and add it to docs.json if it is still needed.',
+    ])
+    const many = Array.from({ length: 12 }, (_, index) => ({ source: `/r${index}`, destination: '//evil.example' }))
+    const [warning] = projected(many).warnings
+    expect(warning.message).toContain('Skipped 12 redirects from /r0, /r1, /r2, /r3, /r4, /r5, /r6, /r7, /r8, /r9, ...:')
+  })
+
+  it('says nothing when every redirect is carried over', () => {
+    expect(projected([{ source: '/a', destination: '/b' }]).warnings).toEqual([])
   })
 })
 
@@ -385,7 +641,65 @@ describe('Fern redirect safety shares the Mintlify guard', () => {
       fernRoot: '/tmp/fern-root-unused',
     })
 
-    expect(result.docsConfig.redirects).toEqual([{ source: '/kept', destination: '/still-kept' }])
+    expect(result.docsConfig.redirects).toEqual([{ source: '/kept', destination: '/still-kept', permanent: true }])
+  })
+
+  it('keeps a destination that is an absolute http(s) address, which Fern documents', () => {
+    const result = projectFernNavigation({
+      config: {
+        navigation: [{ page: 'Introduction', path: 'introduction.mdx' }],
+        redirects: [
+          { source: '/old-folder/path', destination: 'https://www.example.com/fern' },
+          { source: '/old/*', destination: 'https://www.example.com/new/*' },
+        ],
+      },
+      fernRoot: '/tmp/fern-root-unused',
+    })
+    expect(result.docsConfig.redirects).toEqual([
+      { source: '/old-folder/path', destination: 'https://www.example.com/fern', permanent: true },
+      { source: '/old/:path*', destination: 'https://www.example.com/new/:path*', permanent: true },
+    ])
+    expect(result.warnings.filter((warning) => warning.message.includes('/old'))).toEqual([])
+  })
+
+  // Fern documents `permanent` as defaulting to true (308), and `permanent: false` as the way to get a 307.
+  it('makes a redirect permanent unless the source sets permanent: false', () => {
+    const result = projectFernNavigation({
+      config: {
+        navigation: [{ page: 'Introduction', path: 'introduction.mdx' }],
+        redirects: [
+          { source: '/omitted', destination: '/a' },
+          { source: '/explicit-true', destination: '/b', permanent: true },
+          { source: '/temporary-redirect', destination: '/new-location', permanent: false },
+          { source: '/old/*', destination: 'https://www.example.com/new/*' },
+        ],
+      },
+      fernRoot: '/tmp/fern-root-unused',
+    })
+    expect(result.docsConfig.redirects).toEqual([
+      { source: '/omitted', destination: '/a', permanent: true },
+      { source: '/explicit-true', destination: '/b', permanent: true },
+      { source: '/temporary-redirect', destination: '/new-location', permanent: false },
+      { source: '/old/:path*', destination: 'https://www.example.com/new/:path*', permanent: true },
+    ])
+  })
+
+  it('names every rejected redirect in one warning', () => {
+    const result = projectFernNavigation({
+      config: {
+        navigation: [{ page: 'Introduction', path: 'introduction.mdx' }],
+        redirects: [
+          { source: '/legit', destination: '//evil.example' },
+          { source: '/legit-2', destination: 'javascript:alert(1)' },
+          { source: '/kept', destination: '/still-kept' },
+        ],
+      },
+      fernRoot: '/tmp/fern-root-unused',
+    })
+    expect(result.docsConfig.redirects).toEqual([{ source: '/kept', destination: '/still-kept', permanent: true }])
+    expect(result.warnings.map((warning) => warning.message).filter((message) => message.includes('redirect'))).toEqual([
+      'Skipped 2 redirects from /legit, /legit-2: a redirect must start at a path on this site (one beginning with a single /) and lead to a path on this site or to an http:// or https:// address. Check these redirects in the source docs and add any that are still needed to docs.json.',
+    ])
   })
 })
 

@@ -92,21 +92,23 @@ export function normalizeIndentedFences(content: string): string {
   }).join('\n')
 }
 
+/** A literal value: a string, number, boolean or null, or an array or object of them. */
+function isLiteralExpression(node: ts.Expression): boolean {
+  if (ts.isParenthesizedExpression(node)) return isLiteralExpression(node.expression)
+  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) || ts.isNumericLiteral(node)) return true
+  if ([ts.SyntaxKind.TrueKeyword, ts.SyntaxKind.FalseKeyword, ts.SyntaxKind.NullKeyword].includes(node.kind)) return true
+  if (ts.isPrefixUnaryExpression(node)) return [ts.SyntaxKind.PlusToken, ts.SyntaxKind.MinusToken].includes(node.operator) && ts.isNumericLiteral(node.operand)
+  if (ts.isArrayLiteralExpression(node)) return node.elements.every((element) => ts.isExpression(element) && isLiteralExpression(element))
+  if (ts.isObjectLiteralExpression(node)) return node.properties.every((property) => ts.isPropertyAssignment(property)
+    && (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name) || ts.isNumericLiteral(property.name))
+    && isLiteralExpression(property.initializer))
+  return false
+}
+
 /** Lift a self-contained data helper out of a copied client module for server MDX expressions. */
 function staticServerHelper(path: string, imported: string, local: string): string | null {
   if (imported === 'default') return null
   const parsed = ts.createSourceFile(path, readFileSync(path, 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
-  const isLiteral = (node: ts.Expression): boolean => {
-    if (ts.isParenthesizedExpression(node)) return isLiteral(node.expression)
-    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) || ts.isNumericLiteral(node)) return true
-    if ([ts.SyntaxKind.TrueKeyword, ts.SyntaxKind.FalseKeyword, ts.SyntaxKind.NullKeyword].includes(node.kind)) return true
-    if (ts.isPrefixUnaryExpression(node)) return [ts.SyntaxKind.PlusToken, ts.SyntaxKind.MinusToken].includes(node.operator) && ts.isNumericLiteral(node.operand)
-    if (ts.isArrayLiteralExpression(node)) return node.elements.every((element) => ts.isExpression(element) && isLiteral(element))
-    if (ts.isObjectLiteralExpression(node)) return node.properties.every((property) => ts.isPropertyAssignment(property)
-      && (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name) || ts.isNumericLiteral(property.name))
-      && isLiteral(property.initializer))
-    return false
-  }
   for (const statement of parsed.statements) {
     if (!ts.isVariableStatement(statement) || !statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)) continue
     for (const declaration of statement.declarationList.declarations) {
@@ -116,10 +118,63 @@ function staticServerHelper(path: string, imported: string, local: string): stri
       const result = ts.isBlock(arrow.body)
         ? arrow.body.statements.length === 1 && ts.isReturnStatement(arrow.body.statements[0]) ? arrow.body.statements[0].expression : undefined
         : arrow.body
-      if (result && isLiteral(result)) return `export const ${local} = () => (${result.getText(parsed)});`
+      if (result && isLiteralExpression(result)) return `export const ${local} = () => (${result.getText(parsed)});`
     }
   }
   return null
+}
+
+/**
+ * What a copied module exports as `imported` (`'default'` included): a `function` (an arrow, a function expression, a function or
+ * class declaration), plain `data` (a literal), or `unknown` when only running the module would tell. A name is followed through
+ * the module's own top-level declarations, so `const f = ...; export default f`, `export { f }` and `export { f as g }` are read
+ * like `export const f = ...`. A re-export from another module is `unknown`, and so is a `let` or `var`, which a later assignment
+ * can turn into anything.
+ */
+function exportedValueKind(path: string, imported: string): 'function' | 'data' | 'unknown' {
+  const parsed = ts.createSourceFile(path, readFileSync(path, 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+  const hasModifier = (statement: ts.Statement, kind: ts.SyntaxKind): boolean =>
+    ts.canHaveModifiers(statement) && !!ts.getModifiers(statement)?.some((modifier) => modifier.kind === kind)
+  const declared = (name: string, seen: ReadonlySet<string>): 'function' | 'data' | 'unknown' => {
+    if (seen.has(name)) return 'unknown'
+    for (const statement of parsed.statements) {
+      if ((ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement)) && statement.name?.text === name) return 'function'
+      if (!ts.isVariableStatement(statement)) continue
+      for (const declaration of statement.declarationList.declarations) {
+        if (ts.isIdentifier(declaration.name) && declaration.name.text === name) {
+          // Only a `const` holds what it was given: a `let` or `var` may be assigned anything later in the module.
+          return declaration.initializer && statement.declarationList.flags & ts.NodeFlags.Const ? valueKind(declaration.initializer, new Set([...seen, name])) : 'unknown'
+        }
+      }
+    }
+    return 'unknown'
+  }
+  const valueKind = (node: ts.Expression, seen: ReadonlySet<string>): 'function' | 'data' | 'unknown' => {
+    let inner = node
+    while (ts.isParenthesizedExpression(inner) || ts.isAsExpression(inner) || ts.isSatisfiesExpression(inner) || ts.isNonNullExpression(inner)) inner = inner.expression
+    if (ts.isArrowFunction(inner) || ts.isFunctionExpression(inner) || ts.isClassExpression(inner)) return 'function'
+    if (ts.isIdentifier(inner)) return declared(inner.text, seen)
+    return isLiteralExpression(inner) ? 'data' : 'unknown'
+  }
+  for (const statement of parsed.statements) {
+    if (ts.isExportAssignment(statement) && !statement.isExportEquals && imported === 'default') return valueKind(statement.expression, new Set())
+    if (ts.isExportDeclaration(statement) && !statement.isTypeOnly && statement.exportClause && ts.isNamedExports(statement.exportClause)) {
+      for (const specifier of statement.exportClause.elements) {
+        if (specifier.name.text !== imported) continue
+        return statement.moduleSpecifier ? 'unknown' : declared((specifier.propertyName ?? specifier.name).text, new Set())
+      }
+      continue
+    }
+    if (!hasModifier(statement, ts.SyntaxKind.ExportKeyword)) continue
+    if (ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement)) {
+      if (hasModifier(statement, ts.SyntaxKind.DefaultKeyword) ? imported === 'default' : statement.name?.text === imported) return 'function'
+    } else if (ts.isVariableStatement(statement)) {
+      for (const declaration of statement.declarationList.declarations) {
+        if (ts.isIdentifier(declaration.name) && declaration.name.text === imported) return declared(imported, new Set())
+      }
+    }
+  }
+  return 'unknown'
 }
 
 /** A bare `id`/`videoId`-style attribute value is safe to embed in an `iframe src` only when it looks like a real YouTube video id. */
@@ -380,9 +435,40 @@ function sourceFile(source: string, filename: string): ts.SourceFile {
   return ts.createSourceFile(filename, source, ts.ScriptTarget.Latest, true, scriptKindFor(filename))
 }
 
+/** The names a module's top-level statements declare: variables (destructured ones too), functions and classes. */
+function topLevelNames(source: ts.SourceFile): Set<string> {
+  const names = new Set<string>()
+  const bind = (name: ts.BindingName): void => {
+    if (ts.isIdentifier(name)) names.add(name.text)
+    else for (const element of name.elements) if (ts.isBindingElement(element)) bind(element.name)
+  }
+  for (const statement of source.statements) {
+    if ((ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement)) && statement.name) names.add(statement.name.text)
+    if (ts.isVariableStatement(statement)) for (const variable of statement.declarationList.declarations) bind(variable.name)
+  }
+  return names
+}
+
 function walk(node: MdxNode, visitor: (node: MdxNode) => void): void {
   visitor(node)
   for (const child of node.children ?? []) walk(child, visitor)
+}
+
+/** Whether a module has async code: a client adapter cannot wrap an async component (Next.js does not run one on the client). */
+function hasAsyncCode(source: string): boolean {
+  let found = false
+  const visit = (node: ts.Node): void => {
+    if (found) return
+    if (node.kind === ts.SyntaxKind.AsyncKeyword || ts.isAwaitExpression(node)) found = true
+    else ts.forEachChild(node, visit)
+  }
+  visit(sourceFile(source, 'module.jsx'))
+  return found
+}
+
+/** Whether a module's source opens with the `'use client'` directive: only a byte order mark, whitespace and comments may come before it, and either quote may spell it. */
+export function hasClientDirective(source: string): boolean {
+  return /^[\uFEFF\s]*(?:(?:\/\/[^\n]*(?:\n|$)|\/\*(?:(?!\*\/)[\s\S])*\*\/)[\uFEFF\s]*)*['"]use client['"]/.test(source)
 }
 
 const BROWSER_GLOBALS = new Set(['window', 'document', 'navigator', 'localStorage', 'sessionStorage', 'location', 'history', 'matchMedia',
@@ -617,6 +703,17 @@ export const CLIENT_BUILTIN_COMPONENT_TAGS: ReadonlySet<string> = new Set([
 
 function isConfirmedClientBoundaryTag(name: string): boolean {
   return EXTRACTED_CLIENT_COMPONENT_TAG.test(name) || CLIENT_BUILTIN_COMPONENT_TAGS.has(name)
+}
+
+/**
+ * Whether moving attribute `attribute` of a tag into a wrapper keeps what the tag passes. JSX lets a later spread or a later prop
+ * of the same name win, but the wrapper applies the props it moves after everything else, so a moved prop would win over them.
+ * `children` never moves: the wrapper hands the component its own children after its props, which would replace the moved one.
+ */
+function canMoveIntoWrapper(node: MdxNode, attribute: NonNullable<MdxNode['attributes']>[number]): boolean {
+  const attributes = node.attributes ?? []
+  return attribute.name !== 'children' && attributes.slice(attributes.indexOf(attribute) + 1)
+    .every((later) => later.type !== 'mdxJsxExpressionAttribute' && later.name !== attribute.name)
 }
 
 /**
@@ -1093,7 +1190,7 @@ export function createComponentMigrator(siteRoot: string, confinementRoot: strin
     // a module imported from an earlier graph is judged by its emitted directive.
     const clientModules = new Set([...modules].filter(([, module]) => module.local).map(([path]) => path))
     const isClient = (path: string): boolean => clientModules.has(path)
-      || (!modules.has(path) && /^\s*(?:\/\/[^\n]*\n\s*)*['"]use client['"]/.test(String((copied.get(path) ?? staged.get(path))?.content ?? '')))
+      || (!modules.has(path) && hasClientDirective(String((copied.get(path) ?? staged.get(path))?.content ?? '')))
     for (let changed = true; changed;) {
       changed = false
       for (const [path, module] of modules) {
@@ -1169,6 +1266,11 @@ export function createComponentMigrator(siteRoot: string, confinementRoot: strin
     return wrapperPath
   }
 
+  /** The module of a callback adapter, named by where its page sits in the site and where in the page the tag starts, never by where the repository was cloned. */
+  function callbackWrapperPath(currentFile: string, offset: number): string {
+    return `${destinationRoot}/callback-${hash(`${relative(root, currentFile)}:${offset}`)}.jsx`
+  }
+
   function register(path: string, imported: string): string {
     const name = `Migrated${hash(`${path}:${imported}`)}`
     registrations.set(name, { path, imported })
@@ -1223,6 +1325,15 @@ export function createComponentMigrator(siteRoot: string, confinementRoot: strin
     const declarations: Array<{ start: number; end: number; source: string }> = []
     const moduleImports: Array<string> = []
     const realPageImports: Array<string> = []
+    // Imported bindings that are, or may be, functions (anything not known to be plain data): a function cannot be passed from the page into a client component.
+    const importedFunctions = new Map<string, { path: string; imported: string }>()
+    // Imported components the page also uses as a value, so they keep a real import instead of an alias: what each tag of one renders.
+    const importedComponents = new Map<string, { path: string; imported: string }>()
+    /** The copied module and export a tag renders, whether it is an alias of the registry or a real import. */
+    const componentTarget = (name: string): { path: string; imported: string } | undefined => {
+      const registered = aliases.get(name)
+      return registered ? registrations.get(registered) : importedComponents.get(name)
+    }
     const serverPageDeclarations: Array<string> = []
     const sharedImportEdits: Array<Replacement> = []
     let hasUnsupportedImports = false
@@ -1512,6 +1623,7 @@ export function createComponentMigrator(siteRoot: string, confinementRoot: strin
             // where the generated runtime module that embeds this page
             // ends up on disk.
             if (!isSvgUsedAsTag && hasExpressionReference(new Set([binding.local]))) {
+              if (exportedValueKind(sourcePath, binding.imported) !== 'data') importedFunctions.set(binding.local, { path, imported: binding.imported })
               const helper = staticServerHelper(sourcePath, binding.imported, binding.local)
               if (helper) {
                 serverPageDeclarations.push(helper)
@@ -1519,6 +1631,7 @@ export function createComponentMigrator(siteRoot: string, confinementRoot: strin
               }
               const aliasSpecifier = portableSpecifier(`@/${registerPath.replace(/^src\//, '').replace(/\\/g, '/')}`)
               realPageImports.push(`import { ${registerImported} as ${binding.local} } from ${JSON.stringify(aliasSpecifier)};`)
+              importedComponents.set(binding.local, { path: registerPath, imported: registerImported })
               continue
             }
             const name = register(registerPath, registerImported)
@@ -1783,17 +1896,7 @@ export function createComponentMigrator(siteRoot: string, confinementRoot: strin
       extracted.push({ node, name: `Inline${extracted.length}`, jsx })
     }
     if (extracted.length && declarations.length) {
-      const declared = new Set<string>()
-      function bind(name: ts.BindingName): void {
-        if (ts.isIdentifier(name)) declared.add(name.text)
-        else for (const element of name.elements) if (ts.isBindingElement(element)) bind(element.name)
-      }
-      for (const declaration of declarations) {
-        for (const statement of sourceFile(declaration.source, 'declaration.tsx').statements) {
-          if ((ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement)) && statement.name) declared.add(statement.name.text)
-          if (ts.isVariableStatement(statement)) for (const variable of statement.declarationList.declarations) bind(variable.name)
-        }
-      }
+      const declared = new Set(declarations.flatMap((declaration) => [...topLevelNames(sourceFile(declaration.source, 'declaration.tsx'))]))
       const hasSharedDeclarations = hasExpressionReference(declared, {
         excludedNodes: extracted.map((entry) => entry.node),
         includeDeclarations: false,
@@ -1832,65 +1935,102 @@ export function createComponentMigrator(siteRoot: string, confinementRoot: strin
       }
       edits.push(...declarations.map(({ start, end }) => ({ start, end, value: '' })), ...sharedImportEdits)
     }
-    // A page-local callback cannot cross into a copied client component. Move
-    // a self-contained JSX callback into a thin client adapter while keeping
-    // the MDX children on the page. More complex callbacks remain passive.
+    // A function cannot cross from the page into a client component. One decision per tag covers every prop that carries one, whether the
+    // function is declared on the page or imported from a copied module: a thin client adapter holds them all (a page-authored one is
+    // copied into it, an imported one is imported by it) while the page keeps passing data and children. A page-authored callback that
+    // cannot move makes the tag a passive fallback that keeps its child content. A component that is not a client component takes an
+    // imported function from the page as authored, and so does an async one a page-authored callback: wrapped, it could not run.
     const pageFunctions = functionDeclaredNames(content)
     const passiveRoots: Array<MdxNode> = []
     const wrappedRoots = new Set<MdxNode>()
     walk(tree, (node) => {
-      if (!node.name || !aliases.has(node.name) || !functionValuedAttribute(node, pageFunctions)
-        || node.position?.start.offset === undefined || node.position.end.offset === undefined) return
+      const binding = node.name ? componentTarget(node.name) : undefined
+      if (!node.name || !binding || node.position?.start.offset === undefined || node.position.end.offset === undefined) return
+      const moduleSource = String(copied.get(binding.path)?.content ?? '')
+      const client = hasClientDirective(moduleSource)
+      if (!client && hasAsyncCode(moduleSource)) return
       if (passiveRoots.some((root) => node.position!.start.offset! >= root.position!.start.offset!
         && node.position!.end.offset! <= root.position!.end.offset!)) return
-      const functionAttributes = (node.attributes ?? []).filter((attribute) => {
+      const callbacks = (node.attributes ?? []).flatMap((attribute) => {
         const value = attribute.value && typeof attribute.value === 'object' ? attribute.value.value?.trim() : undefined
-        return !!value && pageFunctions.has(value)
+        const imported = value ? importedFunctions.get(value) : undefined
+        return attribute.name && value && (imported || pageFunctions.has(value))
+          && attribute.position?.start.offset !== undefined && attribute.position.end.offset !== undefined
+          ? [{ attribute, name: attribute.name, value, imported, start: attribute.position.start.offset, end: attribute.position.end.offset }] : []
       })
-      if (functionAttributes.length === 1 && functionAttributes[0].name
-        && functionAttributes[0].position?.start.offset !== undefined
-        && functionAttributes[0].position.end.offset !== undefined) {
-        const functionName = (functionAttributes[0].value as { value: string }).value.trim()
-        const declaration = declarations.find((entry) => new RegExp(`^export const ${functionName}\\s*=`).test(entry.source))
+      const pageLocal = callbacks.filter(({ imported }) => !imported)
+      const crossing = functionValuedAttribute(node, pageFunctions) !== undefined
+      // A client component refuses any function from the page. Another one is only given an adapter for a page-authored callback.
+      if (!crossing && !(client && callbacks.length > 0)) return
+      let declaration: { source: string } | undefined
+      if (crossing) {
+        declaration = pageLocal.length === 1 ? declarations.find((entry) => new RegExp(`^export const ${pageLocal[0].value}\\s*=`).test(entry.source)) : undefined
         const safeDeclaration = declaration?.source.match(/^export const \w+\s*=\s*\(\s*\{\s*children(?:\s*,\s*\.\.\.props)?\s*\}\s*\)\s*=>\s*\([\s\S]*\)\s*;?$/)
           && !/\b(?:window|document|process|fetch|use[A-Z]\w*)\b/.test(declaration.source)
           && [...declaration.source.matchAll(/<([A-Z]\w*)\b/g)].every((match) => match[1] === 'CodeBlock')
           && [...declaration.source.matchAll(/\{([^{}]*)\}/g)].every((match) =>
             ['children', '...props', 'children, ...props'].includes(match[1].trim()))
-        const binding = registrations.get(aliases.get(node.name)!)
-        if (safeDeclaration && binding) {
-          const fallbackDeclaration = declaration!.source.replace(/<CodeBlock\b[^>]*>/g, '<pre><code>').replace(/<\/CodeBlock>/g, '</code></pre>')
-          const wrapperPath = `${destinationRoot}/callback-${hash(`${currentFile}:${node.position.start.offset}`)}.jsx`
-          const imported = binding.imported === 'default' ? 'default' : binding.imported
-          const importClause = imported === 'default' ? 'import Original' : `import { ${imported} as Original }`
-          const specifier = portableSpecifier(`./${relative(destinationRoot, binding.path).replace(/\\/g, '/')}`)
-          const wrapperName = register(wrapperPath, 'CallbackWrapper')
-          copied.set(wrapperPath, { path: wrapperPath, content: [
-            "'use client';", `${importClause} from ${JSON.stringify(specifier)};`,
-            fallbackDeclaration,
-            `export function CallbackWrapper({ children, ...props }) { return <Original {...props} ${functionAttributes[0].name}={${functionName}}>{children}</Original>; }`,
-          ].join('\n') })
-          const start = node.position.start.offset
-          const end = node.position.end.offset
-          const source = content.slice(start, end)
-          const opening = source.indexOf(`<${node.name}`)
-          const closing = source.lastIndexOf(`</${node.name}`)
-          if (opening >= 0) edits.push({ start: start + opening + 1, end: start + opening + 1 + node.name.length, value: wrapperName })
-          if (closing >= 0) edits.push({ start: start + closing + 2, end: start + closing + 2 + node.name.length, value: wrapperName })
-          edits.push({ start: functionAttributes[0].position!.start.offset!, end: functionAttributes[0].position!.end.offset!, value: '' })
-          wrappedRoots.add(node)
-          if (declaration!.source.includes('<CodeBlock')) warn(`Interactive <${node.name}> was retained with a basic code block in place of Mintlify's CodeBlock.`, currentFile)
+        // A later spread or prop of the same name would be overridden by the moved callback, and `children` cannot be moved: keep the callback passive instead.
+        if (!safeDeclaration || !canMoveIntoWrapper(node, pageLocal[0].attribute)) {
+          const source = content.slice(node.position.start.offset, node.position.end.offset)
+          const openingEnd = source.indexOf('>')
+          const closingStart = source.lastIndexOf(`</${node.name}`)
+          const children = openingEnd >= 0 && closingStart > openingEnd ? source.slice(openingEnd + 1, closingStart) : ''
+          edits.push({ start: node.position.start.offset, end: node.position.end.offset,
+            value: `<div data-migration-interactive-fallback="${node.name}">${children}</div>` })
+          passiveRoots.push(node)
+          warn(`Interactive <${node.name}> passes a page-local function into a client component; its child content was retained without the interactive control. Move the callback into a client component to restore it.`, currentFile)
           return
         }
       }
-      const source = content.slice(node.position.start.offset, node.position.end.offset)
-      const openingEnd = source.indexOf('>')
-      const closingStart = source.lastIndexOf(`</${node.name}`)
-      const children = openingEnd >= 0 && closingStart > openingEnd ? source.slice(openingEnd + 1, closingStart) : ''
-      edits.push({ start: node.position.start.offset, end: node.position.end.offset,
-        value: `<div data-migration-interactive-fallback="${node.name}">${children}</div>` })
-      passiveRoots.push(node)
-      warn(`Interactive <${node.name}> passes a page-local function into a client component; its child content was retained without the interactive control. Move the callback into a client component to restore it.`, currentFile)
+      // An imported function that cannot move stays on the page, as authored: one a later spread or prop of the same name overrides, rather than win over it, and `children`.
+      const unmoved = callbacks.filter(({ imported, attribute }) => imported && !canMoveIntoWrapper(node, attribute))
+      const asChildren = unmoved.filter(({ name }) => name === 'children')
+      const overridden = unmoved.filter(({ name }) => name !== 'children')
+      if (asChildren.length > 0) {
+        warn(`<${node.name}> passes the imported function "children" as its children, which a client adapter cannot carry, so it was not moved and Next.js may refuse to build the page. Pass the function under another prop name, or import it inside the component.`, currentFile)
+      }
+      if (overridden.length > 0) {
+        warn(`<${node.name}> passes the imported function ${overridden.map(({ name }) => `"${name}"`).join(', ')} before a later prop or spread that overrides it, so ${overridden.length === 1 ? 'it was' : 'they were'} not moved into a client adapter and Next.js may refuse to build the page. Put the prop after the spread, or import the function inside the component.`, currentFile)
+      }
+      const moved = callbacks.filter((callback) => !unmoved.includes(callback))
+      if (moved.length === 0) return
+      const moduleSpecifier = (path: string): string => JSON.stringify(portableSpecifier(`./${relative(destinationRoot, path).replace(/\\/g, '/')}`))
+      const importClause = (imported: string, local: string): string => imported === 'default' ? `import ${local}` : `import { ${imported} as ${local} }`
+      const importedMoved = moved.flatMap(({ imported }) => imported ? [imported] : [])
+      const wrapperPath = callbackWrapperPath(currentFile, node.position.start.offset)
+      // The adapter binds names of its own beside the statement copied from the page, and imports a function only under such a name.
+      // None may take a name that statement declares (it can declare several, `export const a = ..., a_ = ...`) or another one of the
+      // adapter's, or the module would not parse or would pass the wrong value: a name in use gets trailing underscores until it is free.
+      const taken = new Set(declaration ? topLevelNames(sourceFile(declaration.source, 'declaration.tsx')) : [])
+      const owned = new Map<string, string>()
+      const own = (name: string): string => {
+        if (!owned.has(name)) {
+          let free = name
+          while (taken.has(free)) free += '_'
+          taken.add(free)
+          owned.set(name, free)
+        }
+        return owned.get(name)!
+      }
+      const [original, wrapper, kids, rest] = ['Original', 'CallbackWrapper', 'children', 'props'].map(own)
+      const wrapperName = register(wrapperPath, wrapper)
+      copied.set(wrapperPath, { path: wrapperPath, content: [
+        "'use client';",
+        `${importClause(binding.imported, original)} from ${moduleSpecifier(binding.path)};`,
+        ...importedMoved.map((imported, index) => `${importClause(imported.imported, own(`callback${index}`))} from ${moduleSpecifier(imported.path)};`),
+        ...(declaration ? [declaration.source.replace(/<CodeBlock\b[^>]*>/g, '<pre><code>').replace(/<\/CodeBlock>/g, '</code></pre>')] : []),
+        `export function ${wrapper}({ ${kids === 'children' ? kids : `children: ${kids}`}, ...${rest} }) { return <${original} {...${rest}}${moved.map(({ name, value, imported }) => ` ${name}={${imported ? own(`callback${importedMoved.indexOf(imported)}`) : value}}`).join('')}>{${kids}}</${original}>; }`,
+      ].join('\n') })
+      const start = node.position.start.offset
+      const source = content.slice(start, node.position.end.offset)
+      const opening = source.indexOf(`<${node.name}`)
+      const closing = source.lastIndexOf(`</${node.name}`)
+      if (opening >= 0) edits.push({ start: start + opening + 1, end: start + opening + 1 + node.name.length, value: wrapperName })
+      if (closing >= 0) edits.push({ start: start + closing + 2, end: start + closing + 2 + node.name.length, value: wrapperName })
+      for (const { start: from, end } of moved) edits.push({ start: from, end, value: '' })
+      wrappedRoots.add(node)
+      if (declaration?.source.includes('<CodeBlock')) warn(`Interactive <${node.name}> was retained with a basic code block in place of Mintlify's CodeBlock.`, currentFile)
     })
     walk(tree, (node) => {
       const replacement = node.name ? aliases.get(node.name) : undefined

@@ -11,11 +11,9 @@ vi.mock('@/lib/openapi/documentation-access', () => ({
   resolveDocumentationAccessMode: accessMocks.resolveDocumentationAccessMode,
 }))
 
-import {
-  GET,
-  mcpServerCard,
-  oauthProtectedResource,
-} from '@/app/api/well-known/[...document]/route'
+import * as discoveryRoute from '@/app/api/well-known/[...document]/route'
+import { GET } from '@/app/api/well-known/[...document]/route'
+import { mcpServerCard, oauthProtectedResource } from '@/lib/agent-discovery-responses'
 import { buildAiTxtBody } from '@/lib/agent-discovery'
 import { agentServerName } from '@/lib/agent-identity'
 import { buildAgentsManifest, buildSkillManifest } from '@/lib/agent-manifest'
@@ -31,6 +29,10 @@ const identity: SiteIdentity = {
 describe('agent discovery identity', () => {
   beforeEach(() => {
     accessMocks.resolveDocumentationAccessMode.mockReset().mockResolvedValue('public')
+  })
+
+  it('exports only supported Next.js route entrypoints', () => {
+    expect(Object.keys(discoveryRoute)).toEqual(['GET'])
   })
 
   it('uses a customer-specific MCP identifier', () => {

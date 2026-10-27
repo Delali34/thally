@@ -55,6 +55,7 @@ import { BannerPreview } from '@/components/layout/site-banner'
 import { Steps, Step } from '@/components/mdx/steps'
 import { Tabs, Tab } from '@/components/mdx/content-tabs'
 import { HeadingAnchor } from '@/components/mdx/heading-anchor'
+import { node, oneOf, requiredText, text, textList, textOrList, withPropContract, type PropContract } from '@/lib/mdx-prop-contract'
 import { cn, slugify } from '@/lib/utils'
 
 function flattenText(node: ReactNode): string {
@@ -203,3 +204,55 @@ export const builtinMdxComponents: MDXComponents = {
   th: (props) => <th className="border-b border-border py-2 pr-4 text-left font-mono text-[0.68rem] font-medium uppercase tracking-[0.12em] text-foreground/55" {...props} />,
   td: (props) => <td className="border-b border-border py-3 pr-4 text-[0.88rem] leading-[1.6] text-foreground/80" {...props} />,
 }
+
+/**
+ * The props these entries read as something other than a node: string methods,
+ * URL checks, ids, `.map`, a tag name. The MDX interpreter holds each entry to
+ * its contract, so JSX, a number, a bare attribute or an object under one of
+ * these names is dropped instead of reaching `.trim()` and taking the page
+ * down. The node-valued props (`Card`'s `title`, `Tooltip`'s `tip`) are not
+ * listed: they keep the interpreter's global rules, so JSX still renders there.
+ * Declared on the function the interpreter receives, which for the wrappers
+ * above is the wrapper itself.
+ */
+const noteContract = { icon: text, color: text, colorDark: text }
+const codeContract = { icon: text, language: text, code: text }
+const cardContract = { href: text, img: text }
+const colorContract = { hex: text }
+const stepTitleSize = oneOf('p', 'h2', 'h3', 'h4')
+const embedContract = { src: requiredText }
+const bannerContract = { content: requiredText }
+
+const propContracts: Array<[unknown, PropContract]> = [
+  ...(['Info', 'Warning', 'Check', 'Danger', 'Error', 'Note', 'Tip', 'Callout'] as const)
+    .map((name): [unknown, PropContract] => [builtinMdxComponents[name], noteContract]),
+  // A code panel reads its source, language and icon from the first element it holds, which is
+  // a `code` element or a CodeBlock, so those carry the same contract as the panel itself.
+  [builtinMdxComponents.pre, codeContract],
+  [builtinMdxComponents.code, codeContract],
+  [builtinMdxComponents.CodeGroup, codeContract],
+  [builtinMdxComponents.CodeBlock, codeContract],
+  [builtinMdxComponents.Prompt, { icon: text, actions: textOrList }],
+  [builtinMdxComponents.Tooltip, { href: text }],
+  [builtinMdxComponents.Card, cardContract],
+  [builtinMdxComponents.Tile, cardContract],
+  [builtinMdxComponents.Hero, { primaryHref: text, secondaryHref: text, primaryLabel: node, secondaryLabel: node }],
+  [builtinMdxComponents.Video, { src: requiredText, poster: text }],
+  [builtinMdxComponents.Accordion, { icon: text, title: requiredText }],
+  [builtinMdxComponents.Icon, { icon: text, src: text }],
+  [builtinMdxComponents.Steps, { titleSize: stepTitleSize }],
+  [builtinMdxComponents.Step, { title: text, titleSize: stepTitleSize }],
+  [builtinMdxComponents.Update, { label: text, date: text, tags: textOrList }],
+  [builtinMdxComponents.ResponseField, { pre: textList, post: textList }],
+  [builtinMdxComponents.Embed, embedContract],
+  [builtinMdxComponents.LegacyView, embedContract],
+  [builtinMdxComponents.View, { icon: text }],
+  [builtinMdxComponents.Banner, bannerContract],
+  [builtinMdxComponents.BannerPreview, bannerContract],
+  // `GitHub`, `Github` and `GitHub.Repo` resolve to this one function.
+  [GitHub, { repo: requiredText, title: text }],
+  // `Color` and the `Color.Item` MDX resolves are the components themselves, not the wrappers keyed above.
+  [Color, colorContract],
+  [Color.Item, colorContract],
+]
+for (const [component, contract] of propContracts) withPropContract(component, contract)

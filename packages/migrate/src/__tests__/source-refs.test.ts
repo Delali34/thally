@@ -196,6 +196,31 @@ describe('migrateRepository with sourceRefs', () => {
     expect(bundle.warnings.some((warning) => /branding, colors and redirects were ignored/.test(warning.message))).toBe(true)
   })
 
+  it('sends a mounted page whose frontmatter url is a path of its own site to that path under the mount', () => {
+    const imported = importSourceRef(MAPPING, sdkRepo({
+      'docs/docs.json': JSON.stringify({ navigation: { pages: ['overview', 'jump', 'jump-fragment'] } }),
+      'docs/jump.mdx': '---\ntitle: Jump\nurl: /overview\n---\n',
+      'docs/jump-fragment.mdx': '---\ntitle: Jump fragment\nurl: "/overview#install"\n---\n',
+    }))
+    const bundle = migrateRepository({ repositoryDir: mainRepo(), sourceUrl: 'https://github.com/example/docs', platform: 'mintlify', sourceRefs: [imported] })
+    expect(bundle.docsConfig.redirects).toEqual(expect.arrayContaining([
+      { source: '/client-sdks/typescript/jump', destination: '/client-sdks/typescript/overview', permanent: false },
+      { source: '/client-sdks/typescript/jump-fragment', destination: '/client-sdks/typescript/overview#install', permanent: false },
+    ]))
+  })
+
+  it('names an asset over the Cloudflare limit by the mounted path it lands at, once', () => {
+    const repo = sdkRepo({ 'docs/overview.mdx': '---\ntitle: Overview\n---\n![demo](/images/demo.gif)\n' })
+    writeFileSync(join(repo, 'docs/images/demo.gif'), Buffer.alloc(26 * 1024 * 1024))
+    const imported = importSourceRef(MAPPING, repo)
+    const bundle = migrateRepository({ repositoryDir: mainRepo(), sourceUrl: 'https://github.com/example/docs', platform: 'mintlify', sourceRefs: [imported] })
+
+    expect(bundle.assets.map((asset) => asset.path)).toContain('client-sdks/typescript/images/demo.gif')
+    const oversized = bundle.warnings.filter((warning) => warning.message.includes('Cloudflare'))
+    expect(oversized.map((warning) => warning.message)).toEqual([expect.stringMatching(/^1 asset file is larger than 25 MiB: public\/client-sdks\/typescript\/images\/demo\.gif\. /)])
+    expect(imported.warnings.some((warning) => warning.message.includes('Cloudflare'))).toBe(false)
+  })
+
   it('redirects a mounted page whose frontmatter url is another address, from its mounted path', () => {
     const imported = importSourceRef(MAPPING, sdkRepo({
       'docs/docs.json': JSON.stringify({ navigation: { pages: ['overview', 'github', { group: 'Community', pages: ['community/index', 'community/roadmap'] }] } }),

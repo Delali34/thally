@@ -3,9 +3,11 @@
  * looks for a page, so a redirect whose source is a served page hides that page,
  * and two redirects that point at each other never settle. Next also parses a
  * redirect source as a route pattern, so one with pattern operators fails the
- * whole build. Every platform and every step that adds redirects (source
- * config, generated aliases, remote API specs) is checked here once, instead of
- * each caller guarding its own additions.
+ * whole build, and it compiles a destination the same way, so one with route
+ * syntax in its path or host, or with a `:name` its source does not define,
+ * fails when a visitor follows it. Every platform and every step that adds
+ * redirects (source config, generated aliases, remote API specs) is checked
+ * here once, instead of each caller guarding its own additions.
  *
  * A site runs on either of two servers: `next start` matches a redirect source
  * without regard to letter case, while the Cloudflare build matches it exactly.
@@ -16,6 +18,35 @@
 import type { MigrationDocsConfig, MigrationPage, MigrationWarning } from './types.js'
 
 const LISTED = 10
+
+/**
+ * One warning for the redirects an adapter left out because they are not safe
+ * to emit (`isRedirectPathSafe`), naming their sources; null when there are none.
+ * A source can hold control characters, which are dropped so it cannot rewrite
+ * the line it is printed in.
+ */
+export function skippedRedirectsWarning(sources: ReadonlyArray<string>): MigrationWarning | null {
+  if (sources.length === 0) return null
+  const one = sources.length === 1
+  return {
+    code: 'unsupported-config',
+    message: `Skipped ${sources.length} redirect${one ? '' : 's'} from ${list(sources.map((source) => source.replace(/[\x00-\x1f\x7f]/g, '')))}: a redirect must start at a path on this site (one beginning with a single /) and lead to a path on this site or to an http:// or https:// address. Check ${one ? 'it' : 'these redirects'} in the source docs and add ${one ? 'it' : 'any that are still needed'} to docs.json${one ? ' if it is still needed' : ''}.`,
+  }
+}
+
+/**
+ * One warning for the redirects whose source or destination was written without
+ * its leading slash and was read as the site path it names, listing their
+ * sources as written; null when there are none.
+ */
+export function rootedRedirectsWarning(sources: ReadonlyArray<string>): MigrationWarning | null {
+  if (sources.length === 0) return null
+  const one = sources.length === 1
+  return {
+    code: 'unsupported-config',
+    message: `Added the leading / to ${sources.length} redirect${one ? '' : 's'} written without one (from ${list([...sources])}). Mintlify serves a redirect like that as a path on the site, so ${one ? 'it was' : 'each was'} migrated with the / added. Check ${one ? 'it' : 'them'} against the live site if ${one ? 'it' : 'any'} was meant to be something else.`,
+  }
+}
 
 /** Remove trailing slashes in one backward scan, including on untrusted nonliteral paths. */
 export function trimTrailingSlashes(route: string): string {
@@ -34,6 +65,52 @@ function exactRoute(route: string): string | null {
 /** `exactRoute` in lower case: the form routes are compared in, so `/Guide` and `/guide` are one address. */
 export function literalRoute(route: string): string | null {
   return exactRoute(route)?.toLowerCase() ?? null
+}
+
+/**
+ * Write each exact redirect source (a literal path: no `:param`, `*`, `+`, `?`, `(` or `{`) without its trailing slash; the root stays
+ * `/`. Next removes the slash from a request before it looks for a redirect (the site runs with `trailingSlash` off), so an exact source
+ * that keeps it, like Mintlify's `/libsql/client-access/`, never matches and its URL is a 404. Mintlify sends such a request to the
+ * slashless address first, then through the redirect. Two exact sources that differ only by the slash are one address: the first listed
+ * fires, so the later one is left out and named in a warning. A stripped source that is now a redirect to itself, in any letter case
+ * (Next matches a source without regard to case), is omitted as a self-redirect.
+ *
+ * A pattern source (`/docs/:path*\/`) is left exactly as written. It never matches either, but stripping its slash would start a redirect
+ * that can loop: `/docs/:path*\/ -> /docs/v2/:path*` would send `/docs/a` to `/docs/v2/a`, then `/docs/v2/v2/a` and on, and
+ * `/Docs/:path*\/ -> /docs/:path*` would send every visit to itself.
+ */
+function trimRedirectSources(config: MigrationDocsConfig, warnings: Array<MigrationWarning>): MigrationDocsConfig {
+  if (!config.redirects?.length) return config
+  const firstWritten = new Map<string, string>()
+  const repeats: Array<string> = []
+  const redirects: NonNullable<MigrationDocsConfig['redirects']> = []
+  for (const redirect of config.redirects) {
+    const source = exactRoute(redirect.source)
+    if (source === null) {
+      redirects.push(redirect)
+      continue
+    }
+    // Only a source that lost its slash is judged here: the pass before this one read the others, and `dropConflictingRedirects` reads the rest.
+    // The omitted redirect does not take the address from one listed after it.
+    if (source !== redirect.source && source.toLowerCase() === literalRoute(redirect.destination)) {
+      warnings.push({ code: 'unsupported-config', message: `Self-redirect from ${redirect.source} to ${redirect.destination} was omitted.` })
+      continue
+    }
+    const first = firstWritten.get(source)
+    if (first !== undefined && first !== redirect.source) {
+      repeats.push(redirect.source)
+      continue
+    }
+    firstWritten.set(source, first ?? redirect.source)
+    redirects.push(source === redirect.source ? redirect : { ...redirect, source })
+  }
+  if (repeats.length > 0) {
+    warnings.push({
+      code: 'unsupported-config',
+      message: `Skipped ${repeats.length} redirect${repeats.length === 1 ? '' : 's'} from ${list(repeats)}: ${repeats.length === 1 ? 'its source differs' : 'each source differs'} from an earlier redirect's source only by a trailing slash, which Thally ignores when matching, so the earlier redirect was kept. Check ${repeats.length === 1 ? 'it' : 'them'} in the source docs.`,
+    })
+  }
+  return redirects.length === config.redirects.length && redirects.every((redirect, index) => redirect === config.redirects![index]) ? config : { ...config, redirects }
 }
 
 /** A literal path with its `.` and `..` segments resolved, as a browser does; a segment is one whether it is written `..` or `%2e%2e` in either case. Nothing else is decoded. */
@@ -89,38 +166,152 @@ function list(sources: Array<string>): string {
 const ROUTE_PATTERN_OPERATORS = /[+?()[\]{}]/
 
 /**
+ * A source's final segment as a catch-all: `/:name*` also matches the path without it, `/:name+` needs one or more segments.
+ * A slash written after the segment changes neither reading (Next matches `/` for `/:path*` with or without it), so it is allowed and kept.
+ */
+const TRAILING_ZERO_OR_MORE = /\/:[A-Za-z_][A-Za-z0-9_]*\*\/?$/
+const TRAILING_ONE_OR_MORE = /\/:[A-Za-z_][A-Za-z0-9_]*\+\/?$/
+
+/** A destination split into the scheme and host of an absolute address (empty for a site path), its path, and the query and fragment after it. */
+const DESTINATION_PARTS = /^((?:https?:\/\/[^/?#]*)?)([^?#]*)([\s\S]*)$/i
+
+/**
+ * What Next compiles in a destination's path (and a site path's whole text) with
+ * path-to-regexp, which reads these as route syntax although a URL holds them as
+ * plain characters. `+`, `(` and `)` fail at once. A `:` starts a parameter, so
+ * `:name` (with `*` or `+` for a catch-all) is kept when the source defines it,
+ * and any other colon fails when a visitor follows the redirect (a destination on
+ * the site fails the build as well). A `[`, `]` or `)` compiles as written, and
+ * `{` and `}` are percent-encoded by the URL parser before Next compiles them.
+ */
+const DESTINATION_PATH_SYNTAX = /:(\w*)([*+]?)|[+()]/g
+
+/** The parameters a source defines, each with whether it matches several segments (`:path*`, `:path+`). */
+function sourceParameters(source: string): Map<string, boolean> {
+  const parameters = new Map<string, boolean>()
+  for (const [, name, modifier] of source.matchAll(/:(\w+)([*+]?)/g)) parameters.set(name, modifier !== '')
+  return parameters
+}
+
+/** A host name Next can compile: letters, digits, hyphens and underscores in dot-separated labels, which a punycode `xn--` label is too. */
+const DNS_HOST = /^(?:[a-z0-9_](?:[a-z0-9_-]*[a-z0-9_])?\.)*[a-z0-9_](?:[a-z0-9_-]*[a-z0-9_])?\.?$/
+
+/**
+ * The host Next compiles for an absolute destination is the one its URL parser
+ * reads: percent escapes decoded (`exa%2Bmple.com` is `exa+mple.com`), lower
+ * case, an international name in punycode. Next reads `+ * ( ) { }` in it as
+ * route syntax and cannot escape them, so anything but a valid host name would
+ * fail when a visitor follows the redirect. Null for a valid host and for a
+ * path on the site; otherwise the host as Next reads it.
+ */
+function invalidHost(origin: string): string | null {
+  if (!origin) return null
+  let host: string
+  try {
+    host = new URL(origin).hostname
+  } catch {
+    host = origin.replace(/^https?:\/\//i, '')
+  }
+  return DNS_HOST.test(host) ? null : host
+}
+
+/**
+ * A destination with its path made safe for Next to compile, which it does with
+ * path-to-regexp. `+`, `(` and `)` are written as `%2B`, `%28` and `%29`, which
+ * Next sends back unchanged and a server reads as the same path. A `:name` the
+ * source defines (a catch-all carried over from it) is kept. Any other colon is
+ * written `%3A`: Next throws when it compiles a parameter nothing gave a value,
+ * so a `:oops` the source does not have can only be meant as text. The query
+ * and fragment are left as written. A catch-all the source does not have
+ * (`:rest*`) has nothing to fill it, and one of its own written without its `*`
+ * or `+` cannot be compiled: either comes back as the reason.
+ */
+function encodeDestinationPath(destination: string, source: string): string | { reason: string } {
+  const [, origin, path, rest] = DESTINATION_PARTS.exec(destination)!
+  const parameters = sourceParameters(source)
+  let reason: string | undefined
+  const percent = (char: string): string => `%${char.charCodeAt(0).toString(16).toUpperCase()}`
+  const encoded = path.replace(DESTINATION_PATH_SYNTAX, (match, name?: string, modifier = '') => {
+    if (name === undefined) return percent(match)
+    const repeats = parameters.get(name)
+    if (repeats === undefined) {
+      if (name && modifier) reason ??= `its destination has :${name}${modifier}, a wildcard the source does not have, so there is nothing to fill it with`
+      return `%3A${name}${[...modifier].map(percent).join('')}`
+    }
+    if (repeats && !modifier) reason ??= `:${name} matches several path segments in the source, so its destination has to write it :${name}* or :${name}+, and Next.js cannot follow it otherwise`
+    return match
+  })
+  return reason ? { reason } : `${origin}${encoded}${rest}`
+}
+
+/**
  * Drop each redirect Next.js cannot serve as written: one back to its own
- * route (a trailing slash is the same route) and one whose source has
- * route-pattern operators, which would fail the build. An omitted address with
- * operators is named in one warning; a self-redirect gets its own. A redirect
+ * route (a trailing slash is the same route), one whose source has
+ * route-pattern operators, which would fail the build, one whose destination
+ * host is not a valid host name, and one whose destination has a catch-all its
+ * source cannot give it. The path of every other destination is made safe to
+ * compile (`encodeDestinationPath`) instead, so a `+`, `(` or stray `:` in it no
+ * longer fails when the redirect is followed. A final `/:name+`
+ * segment is route syntax Next reads as intended: `dropConflictingRedirects`
+ * writes it, and a set that passes through here again must keep it. An omitted
+ * address with operators is named in one warning; a self-redirect and a
+ * destination with a wildcard of its own each get a warning. A redirect
  * to its own route with a query or fragment added is left to
  * `dropConflictingRedirects`: sources match the request path alone, so it loops
  * all the same, and that check says so.
  */
-export function dropUnroutableRedirects(config: MigrationDocsConfig, warnings: Array<MigrationWarning>): MigrationDocsConfig {
+function omitUnroutableRedirects(config: MigrationDocsConfig, warnings: Array<MigrationWarning>): MigrationDocsConfig {
   if (!config.redirects?.length) return config
   const unmatchable: Array<string> = []
-  const redirects = config.redirects.filter((redirect) => {
+  const unreachable: Array<string> = []
+  const redirects: Array<NonNullable<MigrationDocsConfig['redirects']>[number]> = []
+  for (const redirect of config.redirects) {
     // Exact on purpose: a redirect back to the same address in another case is a conflict for `dropConflictingRedirects`, which says why.
     const source = exactRoute(redirect.source)
     if (source && source === exactRoute(redirect.destination)) {
       warnings.push({ code: 'unsupported-config', message: `Self-redirect from ${redirect.source} to ${redirect.destination} was omitted.` })
-      return false
+      continue
     }
-    if (!ROUTE_PATTERN_OPERATORS.test(redirect.source)) return true
-    unmatchable.push(redirect.source)
-    return false
-  })
+    const host = invalidHost(DESTINATION_PARTS.exec(redirect.destination)![1])
+    if (host !== null) {
+      unreachable.push(`${redirect.source} (${host})`)
+      continue
+    }
+    if (ROUTE_PATTERN_OPERATORS.test(redirect.source.replace(TRAILING_ONE_OR_MORE, ''))) {
+      unmatchable.push(redirect.source)
+      continue
+    }
+    const destination = encodeDestinationPath(redirect.destination, redirect.source)
+    if (typeof destination !== 'string') {
+      warnings.push({ code: 'unsupported-config', message: `Redirect from ${redirect.source} to ${redirect.destination} was omitted: ${destination.reason}.` })
+      continue
+    }
+    redirects.push(destination === redirect.destination ? redirect : { ...redirect, destination })
+  }
   if (unmatchable.length > 0) {
     warnings.push({
       code: 'unsupported-config',
       message: `Skipped ${unmatchable.length} redirect${unmatchable.length === 1 ? '' : 's'} from ${list(unmatchable)}: ${unmatchable.length === 1 ? 'that address has' : 'those addresses have'} a character (+ ? ( ) [ ] { }) that Next.js reads as route syntax and cannot match literally, so visits to ${unmatchable.length === 1 ? 'it' : 'them'} will not redirect.`,
     })
   }
-  if (redirects.length === config.redirects.length) return config
+  if (unreachable.length > 0) {
+    warnings.push({
+      code: 'unsupported-config',
+      message: `Skipped ${unreachable.length} redirect${unreachable.length === 1 ? '' : 's'} from ${list(unreachable)}: the address ${unreachable.length === 1 ? 'it leads' : 'each leads'} to has a host name that is not valid (a host name has only letters, digits, hyphens, underscores and dots, then an optional :port), so following ${unreachable.length === 1 ? 'it' : 'them'} would fail. Check ${unreachable.length === 1 ? 'it' : 'these redirects'} in the source docs.`,
+    })
+  }
+  if (redirects.length === config.redirects.length && redirects.every((redirect, index) => redirect === config.redirects![index])) return config
   const result: MigrationDocsConfig = { ...config, redirects }
   if (redirects.length === 0) delete result.redirects
   return result
+}
+
+/**
+ * `omitUnroutableRedirects`, then each source written without its trailing slash (`trimRedirectSources`). The slash comes last so a
+ * redirect that is omitted never takes the address from one that is kept.
+ */
+export function dropUnroutableRedirects(config: MigrationDocsConfig, warnings: Array<MigrationWarning>): MigrationDocsConfig {
+  return trimRedirectSources(omitUnroutableRedirects(config, warnings), warnings)
 }
 
 /**
@@ -171,7 +362,12 @@ function redirectChains(): {
  * closes a loop under either one. A conflict that exists only because case is
  * ignored gets its own warning, which says the redirect can come back on a
  * case-sensitive host. Patterns are left to the callers that translate them:
- * they cannot be compared with a page path.
+ * they cannot be compared with a page path, with one exception. A source that
+ * ends in a catch-all `/:name*` also matches the path without that segment, so
+ * when that path is a page, or is where the redirect itself goes, the redirect
+ * would hide the page or send it to itself. It is rewritten to `/:name+`, which
+ * keeps redirecting every deeper path. For `/:name*` that path is the root,
+ * which answers with the home page or a redirect of its own.
  */
 export function dropConflictingRedirects(
   config: MigrationDocsConfig,
@@ -190,12 +386,24 @@ export function dropConflictingRedirects(
   // The introduction page is also served at `/`, so `/introduction` -> `/` only
   // retires an alias of it, unless `/` itself redirects somewhere.
   const rootRedirected = config.redirects.some((redirect) => literalRoute(redirect.source) === '/')
-  const redirects = config.redirects.filter((redirect) => {
+  const retiresRootAlias = (route: string, destination: string | null): boolean => route === '/introduction' && !rootRedirected && destination === '/'
+  // The root answers with the home page the runtime serves there, or with a redirect of its own; a catch-all must not take it over.
+  const rootAnswers = rootRedirected || pages.some((page) => pageEntryRoutes(page).includes('/'))
+  // `served` holds every page route in lower case, so one lookup judges both readings of letter case.
+  const requiresSegment = <T extends { source: string; destination: string }>(redirect: T): T => {
+    if (!TRAILING_ZERO_OR_MORE.test(redirect.source)) return redirect
+    const prefix = literalRoute(redirect.source.replace(TRAILING_ZERO_OR_MORE, '') || '/')
+    if (!prefix) return redirect
+    const destination = destinationRoute(redirect.destination)?.toLowerCase() ?? null
+    const hidesPage = (served.has(prefix) || (prefix === '/' && rootAnswers)) && !retiresRootAlias(prefix, destination)
+    return hidesPage || destination === prefix ? { ...redirect, source: redirect.source.replace(/\*(\/?)$/, '+$1') } : redirect
+  }
+  const narrowed = config.redirects.map(requiresSegment)
+  const redirects = narrowed.filter((redirect) => {
     const source = literalRoute(redirect.source)
     if (!source) return true
     const writtenSource = exactRoute(redirect.source)!
-    const retiresRootAlias = source === '/introduction' && !rootRedirected && destinationRoute(redirect.destination) === '/'
-    if (served.has(source) && !retiresRootAlias) {
+    if (served.has(source) && !retiresRootAlias(source, destinationRoute(redirect.destination))) {
       const hides = servedAsWritten.has(writtenSource) ? hidden : hiddenByCase
       hides.push(redirect.source)
       return false
@@ -243,7 +451,7 @@ export function dropConflictingRedirects(
       message: `Skipped ${loopingByCase.length} redirect${one ? '' : 's'} that would send visitors in a circle on a server that ignores letter case, since the addresses involved differ only in letter case: ${list(loopingByCase)}. If your host matches URLs case-sensitively, add ${one ? 'it' : 'them'} back to docs.json.`,
     })
   }
-  if (redirects.length === config.redirects.length) return config
+  if (redirects.length === config.redirects.length && narrowed.every((redirect, index) => redirect === config.redirects![index])) return config
   const result: MigrationDocsConfig = { ...config, redirects }
   if (redirects.length === 0) delete result.redirects
   return result

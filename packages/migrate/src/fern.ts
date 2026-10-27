@@ -11,6 +11,7 @@ import { load } from 'cheerio'
 import { parse as parseYaml } from 'yaml'
 
 import { isRedirectPathSafe, translateRedirectWildcards } from './navigation.js'
+import { skippedRedirectsWarning } from './redirects.js'
 import { isPathEscapeError, resolveWithin, resolveWithinRoot, withinRealRoot } from './path.js'
 import type {
   MigrationDocsConfig,
@@ -886,29 +887,32 @@ export function projectFernNavigation(input: {
   // links before the Markdown-capable Thally banner renders the result.
   const bannerContent = announcementMarkdown(announcementMessage)
 
+  const unsafeRedirects: Array<string> = []
   const redirects = Array.isArray(config.redirects)
     ? (config.redirects as Array<unknown>).flatMap((value) => {
         const redirect = objectValue(value)
         if (!redirect || typeof redirect.source !== 'string' || typeof redirect.destination !== 'string') return []
         const rawSource = redirect.source.trim()
         const rawDestination = redirect.destination.trim()
-        if (!isRedirectPathSafe(rawSource, rawDestination)) return []
+        if (!isRedirectPathSafe(rawSource, rawDestination)) {
+          unsafeRedirects.push(rawSource)
+          return []
+        }
         const translated = translateRedirectWildcards(rawSource, rawDestination)
-        if (!translated) {
-          warnOnce(
-            context,
-            `fern-redirect-wildcard-${rawSource}`,
-            `Redirect from ${rawSource} uses a wildcard Next.js cannot express and was dropped.`,
-          )
+        if ('warning' in translated) {
+          warnOnce(context, `fern-redirect-wildcard-${rawSource}`, translated.warning)
           return []
         }
         return [{
           source: translated.source,
           destination: translated.destination,
-          ...(typeof redirect.permanent === 'boolean' ? { permanent: redirect.permanent } : {}),
+          // Both platforms document `permanent` as defaulting to true (308); only an explicit `false` is temporary.
+          permanent: typeof redirect.permanent === 'boolean' ? redirect.permanent : true,
         }]
       })
     : []
+  const unsafeRedirectWarning = skippedRedirectsWarning(unsafeRedirects)
+  if (unsafeRedirectWarning) context.warnings.push(unsafeRedirectWarning)
 
   const authoredSources = new Set(redirects.map((redirect) => redirect.source))
   const knownIds = new Set(context.descriptors.map((descriptor) => descriptor.navigationId))

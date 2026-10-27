@@ -19,6 +19,7 @@ import {
   readFileSync,
   readSync,
   readdirSync,
+  readlinkSync,
   realpathSync,
   rmSync,
   statSync,
@@ -48,6 +49,7 @@ import {
   rewriteDocusaurusLinks,
   resolveDocusaurusPageIdentity,
   type DocusaurusPageDescriptor,
+  type DocusaurusSiteSettings,
   type DocusaurusSidebars,
 } from './docusaurus.js'
 import type { FernApiSection } from './fern.js'
@@ -57,7 +59,7 @@ import { operationKey } from './spec-exclude.js'
 import { splitOpenApiRef, specRefBaseName, withSpecRef } from './openapi-ref.js'
 import { markExcluded, parseSpecDocument, sharedSpecMessage, specRefMatches, withheldOperationKeys, withoutByteOrderMark } from './spec-exclude.js'
 import { parseFrontmatter } from './frontmatter.js'
-import { mainSiteLinkTarget, prefixRootLinks, sourceRefMountCollides, stripControlCharacters, type RootLinkIndex, type SourceRefImport } from './source-refs.js'
+import { mainSiteLinkTarget, mountedLinkTarget, prefixRootLinks, sourceRefMountCollides, stripControlCharacters, type RootLinkIndex, type SourceRefImport } from './source-refs.js'
 import { canonicalSpecRef } from './openapi-ref.js'
 import { type BrandVars, brandColorsFromVars, cssBrandVars, cssColorToHex } from './css-colors.js'
 import {
@@ -70,9 +72,11 @@ import {
   mintlifyFontSources,
   navigationGateReason,
   resolvePageAccess,
+  selfHostedFontWarning,
 } from './mintlify-extras.js'
 import type { MintlifyAccess, NavigationAccess, ResolvedPageAccess } from './mintlify-extras.js'
-import { mdxVisibleText, resolvePageDisplayHeading, bindSnippetProps, closeOpenFence, escapeFernLiteralBraces, escapeUnmatchedClosingTags, functionDeclaredNames, mdxComment, parseMarkdownPage, normalizeExplicitHeadingIds, protectMathBlocks, replaceLinkWithAnchor, replaceOutsideCode, scanJsxOpeningTag, replaceOutsideCodeAndComments, replaceUnknownComponents, rewriteFernRelativePageLinks } from './mdx.js'
+import { appendMintlifyDirectories } from './mintlify-directory.js'
+import { mdxTextWithoutInlineElements, mdxVisibleText, resolvePageDisplayHeading, bindSnippetProps, wrapPageContent, closeOpenFence, escapeFernLiteralBraces, escapeUnmatchedClosingTags, functionDeclaredNames, indentSnippetLines, mdxComment, parseMarkdownPage, normalizeExplicitHeadingIds, protectMathBlocks, replaceLinkWithAnchor, replaceOutsideCode, scanJsxOpeningTag, replaceOutsideCodeAndComments, replaceUnknownComponents, rewriteFernRelativePageLinks } from './mdx.js'
 import {
   addMintlifyDirectoryRedirects,
   addMintlifyHomepageRedirects,
@@ -134,6 +138,12 @@ const MAX_ASSET_BYTES = 25_000_000
 // aggregate copy budget for untrusted repositories.
 const MAX_REFERENCED_ASSET_BYTES = 100_000_000
 const MAX_TOTAL_ASSET_BYTES = 500_000_000
+/**
+ * Largest single file Cloudflare serves as a static asset (25 MiB). The
+ * Cloudflare build, which is also how Thally Cloud hosts a site, serves
+ * `public/` this way, so a larger copied file makes that deploy fail.
+ */
+const MAX_CLOUDFLARE_STATIC_ASSET_BYTES = 25 * 1024 * 1024
 /** A Git LFS pointer file's fixed opening line (the smudge filter replaces this with the real binary; skipping it during clone leaves this text in place). */
 const GIT_LFS_POINTER_PREFIX = 'version https://git-lfs.github.com/spec/v1'
 
@@ -141,6 +151,32 @@ const GIT_LFS_POINTER_PREFIX = 'version https://git-lfs.github.com/spec/v1'
 function listAssetPaths(paths: Array<string>): string {
   const shown = paths.slice(0, 5).join(', ')
   return paths.length > 5 ? `${shown}, and ${paths.length - 5} more` : shown
+}
+
+const CLOUDFLARE_ASSET_LIMIT_NOTE = 'serves static files only up to'
+
+/**
+ * One warning for the assets that will be written to `public/` over Cloudflare's
+ * static-file limit, each named by the path it lands at. Only an asset a page
+ * uses can be that large: unreferenced ones stop at `MAX_ASSET_BYTES`, below the
+ * limit. Null when none is over it.
+ */
+function cloudflareAssetWarning(assets: ReadonlyArray<MigrationAsset>): MigrationWarning | null {
+  const paths = assets.filter((asset) => !asset.projectRelative && asset.content.byteLength > MAX_CLOUDFLARE_STATIC_ASSET_BYTES).map((asset) => `public/${asset.path}`)
+  if (paths.length === 0) return null
+  const single = paths.length === 1
+  const mebibytes = MAX_CLOUDFLARE_STATIC_ASSET_BYTES / 1024 / 1024
+  return {
+    code: 'limit-reached',
+    message: `${paths.length} asset file${single ? ' is' : 's are'} larger than ${mebibytes} MiB: ${listAssetPaths(paths)}. `
+      + `Pages use ${single ? 'it' : 'them'}, so ${single ? 'it was' : 'they were'} copied, but Cloudflare (including Thally Cloud) ${CLOUDFLARE_ASSET_LIMIT_NOTE} ${mebibytes} MiB, `
+      + `so a Cloudflare deploy fails until ${single ? 'it is' : 'each is'} made smaller (for example, convert an animated GIF to a video) or hosted elsewhere.`,
+  }
+}
+
+/** Whether a warning is the one `cloudflareAssetWarning` builds. */
+export function isCloudflareAssetWarning(warning: MigrationWarning): boolean {
+  return warning.code === 'limit-reached' && warning.message.includes(CLOUDFLARE_ASSET_LIMIT_NOTE)
 }
 
 /** A small text file starting with the fixed Git LFS pointer line, not real asset content. */
@@ -172,6 +208,14 @@ const REPOSITORY_ONLY_DOCUMENTS = new Set([
   'agents.md', 'claude.md', 'code_of_conduct.md', 'contributing.md',
   'license.md', 'readme.md', 'security.md',
 ])
+/**
+ * Mintlify's default ignored patterns: these Markdown files are dropped at any
+ * depth, not just at the root (see "Default ignored patterns" in its
+ * `.mintignore` docs). A navigation entry that names one still publishes it.
+ */
+const MINTLIFY_DEFAULT_IGNORED_DOCUMENTS = new Set([
+  'changelog.md', 'contributing.md', 'license.md', 'readme.md',
+])
 const SNIPPET_DIRECTORIES = new Set(['snippets', '_snippets', 'partials', '_partials'])
 // Matches a default import (`import Name from '...'`), a default-as-named
 // import (`import { default as Name } from '...'`), and a plain named import
@@ -186,9 +230,9 @@ const SNIPPET_VALUE_IMPORT_PATTERN = /\bimport\s*\{([^{}]+)\}\s*from\s+['"]([^'"
 /**
  * Mintlify's `<Snippet file="path.mdx" />` tag form: unlike the import form
  * above, this never needs a matching `import` statement — `file` is a path
- * relative to the project's `snippets/` directory (Mintlify's own
- * convention; see `resolveSnippetPath`'s sibling below for the actual
- * lookup). Both self-closing and paired spellings are matched; a paired
+ * relative to the project's `snippets/` directory, else its legacy
+ * `_snippets/` directory (Mintlify's own convention; see the lookup in
+ * `inlineMdxSnippets`). Both self-closing and paired spellings are matched; a paired
  * tag's own children (if any) are always discarded in favor of the
  * resolved snippet's real content, matching Mintlify's own renderer.
  */
@@ -242,6 +286,8 @@ export interface RepositoryMigrationOptions {
   docusaurusSkipAssets?: boolean
   /** @internal Test seam: lowers the 5,000-file budget so budget behaviour can be exercised with small fixtures. */
   maxSourceFiles?: number
+  /** @internal Test seam: lowers the 500 MB total asset budget so budget behaviour can be exercised with small fixtures. */
+  maxTotalAssetBytes?: number
   /** @internal Redirects are global config, read once, not per plugin instance. */
   docusaurusSkipRedirects?: boolean
   /** Mintlify `sourceRef` repositories already fetched and prepared by `importSourceRef`. */
@@ -894,6 +940,76 @@ function gitmoduleUrls(targetDir: string): Array<string> {
   return [...content.matchAll(/^\s*url\s*=\s*(.+?)\s*$/gm)].map((match) => match[1]).filter(Boolean)
 }
 
+/** Every symlink of a checkout (never into `.git`, never through a symlinked directory) with the path it points to, resolved from its own directory. File contents are not read. */
+function checkoutSymlinks(root: string): Map<string, string> {
+  const links = new Map<string, string>()
+  const walk = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = resolvePath(directory, entry.name)
+      if (entry.isSymbolicLink()) links.set(path, resolvePath(directory, readlinkSync(path)))
+      else if (entry.isDirectory() && entry.name !== '.git') walk(path)
+    }
+  }
+  walk(root)
+  return links
+}
+
+/** Whether a path inside `directory`, or one that holds it, is where following `links` from `start` ends up (a loop of links counts: fail closed). */
+function linkReaches(links: ReadonlyMap<string, string>, start: string, directory: string): boolean {
+  const within = (parent: string, child: string): boolean => child === parent || child.startsWith(`${parent}${sep}`)
+  let current = start
+  for (let hops = 0; hops <= links.size; hops++) {
+    if (within(directory, current) || within(current, directory)) return true
+    // A link at the path itself or at any directory above it sends the rest of the path elsewhere.
+    let ancestor = current
+    while (!links.has(ancestor) && dirname(ancestor) !== ancestor) ancestor = dirname(ancestor)
+    const next = links.get(ancestor)
+    if (next === undefined) return false
+    current = resolvePath(next, relative(ancestor, current))
+  }
+  return true
+}
+
+/**
+ * The submodules whose whole directory the Mintlify project's `.mintignore`
+ * excludes. Mintlify never publishes them, so fetching one (turso-docs's
+ * `turso` submodule is the entire database repository) only costs time. Only
+ * a directory the file ignores outright counts: gitignore cannot re-include
+ * anything beneath one, whereas `turso/*` leaves the directory itself in play.
+ * Without a Mintlify project or a `.mintignore`, none is excluded. `initSubmodules`
+ * still fetches one that a symlink of the checkout points into: the migration
+ * follows a symlink that stays inside the repository, so its pages are
+ * reachable through the link.
+ */
+function mintignoredSubmodules(targetDir: string, paths: Array<string>, docsDir?: string): Set<string> {
+  try {
+    const projectRoot = findMintlifyProjectRoot(targetDir, docsDir)
+    const mintignore = projectRoot ? readMintignoreMatcher(projectRoot) : null
+    if (!projectRoot || !mintignore) return new Set()
+    const projectPrefix = relative(targetDir, projectRoot).replace(/\\/g, '/')
+    return new Set(paths.filter((path) => {
+      const inProject = posix.relative(projectPrefix, posix.normalize(path))
+      return inProject !== '' && inProject !== '..' && !inProject.startsWith('../') && !isAbsolute(inProject) && mintignore.ignores(`${inProject}/`)
+    }))
+  } catch {
+    return new Set() // an unusable docs directory is reported by the conversion, not by this best-effort pass
+  }
+}
+
+/** The paths of `candidates` that a symlink of the checkout points into. An unreadable checkout counts as reaching them all: fail closed. */
+function linkedSubmodules(targetDir: string, candidates: Array<string>): Array<string> {
+  let links: Map<string, string>
+  try {
+    links = checkoutSymlinks(targetDir)
+  } catch {
+    return candidates
+  }
+  return candidates.filter((path) => {
+    const directory = resolvePath(targetDir, path)
+    return [...links.values()].some((target) => linkReaches(links, target, directory))
+  })
+}
+
 /**
  * `--recurse-submodules` on the main clone (above) fails the *entire* clone
  * if any one submodule can't be fetched, which is worse than not having
@@ -902,19 +1018,21 @@ function gitmoduleUrls(targetDir: string): Array<string> {
  * submodule doesn't take down the whole migration — it's just missing,
  * and named in a warning instead of silently absent.
  */
-async function initSubmodules(targetDir: string, warnings: Array<MigrationWarning>): Promise<void> {
+async function initSubmodules(targetDir: string, warnings: Array<MigrationWarning>, docsDir?: string): Promise<void> {
   const paths = gitmodulePaths(targetDir)
   if (paths.length === 0) return
   const urls = gitmoduleUrls(targetDir)
+  const ignored = mintignoredSubmodules(targetDir, paths, docsDir)
   const failed: Array<string> = []
-  for (const [index, path] of paths.entries()) {
+  const fetchSubmodule = async (index: number): Promise<void> => {
+    const path = paths[index]
     // A path or url beginning with `-` would be read as a git option
     // rather than a pathspec/URL once it reaches argv (even after `--`,
     // git's own pathspec parser treats a leading `-` as a flag), and
     // `.gitmodules` is attacker-controlled content from the cloned repo.
     if (path.startsWith('-') || (urls[index]?.startsWith('-') ?? false)) {
       failed.push(path)
-      continue
+      return
     }
     try {
       await runGit([
@@ -929,6 +1047,19 @@ async function initSubmodules(targetDir: string, warnings: Array<MigrationWarnin
     } catch {
       failed.push(path)
     }
+  }
+  for (const [index, path] of paths.entries()) {
+    if (!ignored.has(path)) await fetchSubmodule(index)
+  }
+  // A symlink anywhere in the checkout, one a fetched submodule brought included, can expose an ignored submodule's pages,
+  // so each one it points into is fetched after all. Its own links can point into another, hence the repeat: every round
+  // fetches at least one of the ignored submodules left, so it ends within their number.
+  let pending = paths.filter((path) => ignored.has(path))
+  while (pending.length > 0) {
+    const reached = linkedSubmodules(targetDir, pending)
+    if (reached.length === 0) break
+    for (const path of reached) await fetchSubmodule(paths.indexOf(path))
+    pending = pending.filter((path) => !reached.includes(path))
   }
   if (failed.length > 0) {
     warnings.push({
@@ -955,12 +1086,12 @@ export async function cloneGitHubRepository(
   targetDir: string,
   warnings?: Array<MigrationWarning>,
   /** Untrusted referenced repositories: never follow their `.gitmodules` to further remotes. */
-  options: { skipSubmodules?: boolean } = {},
+  options: { skipSubmodules?: boolean; /** The docs directory the migration will read; default: the one in the source URL. */ docsDir?: string } = {},
 ): Promise<void> {
   for (let attempt = 1; attempt <= CLONE_RETRY_ATTEMPTS; attempt++) {
     try {
       await cloneOnce(source, targetDir)
-      if (!options.skipSubmodules) await initSubmodules(targetDir, warnings ?? [])
+      if (!options.skipSubmodules) await initSubmodules(targetDir, warnings ?? [], options.docsDir ?? (source.docsDir || undefined))
       return
     } catch (error) {
       const retryable = error instanceof Error && RETRYABLE_CLONE_ERROR.test(error.message)
@@ -1583,6 +1714,8 @@ interface ResolvedApiSpec {
   sourcePath: string
   /** Mintlify's object-form `{ source, directory }` scoping directory, if any — the prefix its auto-generated operation pages live under. */
   directory?: string
+  /** Set when docs.json names no `directory` but Mintlify generated every operation under its default one all the same (the navigation lists none): the spec's mount, though nothing was scoped. */
+  generatedDirectory?: string
   /** Mintlify generates this spec's endpoint pages (no published page names its operations itself), so Thally should list them in the sidebar too. */
   generatedNavigation?: boolean
   /** The operation groups docs.json authors for the tab this spec binds to, merged across every reference that shares it. */
@@ -1644,9 +1777,26 @@ function resolveMintlifyApiSpecs(
   if (!mintlifyConfig) return []
   const slotByContainer = new Map(apiTabSlots.map(({ container, slot }) => [container, slot]))
   const slotByLabel = new Map(apiTabSlots.map(({ slot }) => [slot.tab.tab, slot]))
+  const topLevelReferences = mintlifyTopLevelApiReferences(mintlifyConfig)
+  const navigationReferences = mintlifyNavigationApiReferences(mintlifyConfig, (container) => slotByContainer.get(container)?.tab.tab)
+  const specFiles = specFileCandidates(files)
+  // A top-level `api.openapi` that no navigation entry lists and that pages name is rendered by Mintlify only where those pages
+  // put it: it publishes no endpoint list of its own. The spec is bound to a hidden tab, so the pages still render their endpoint.
+  // A bare `openapi: "GET /x"` names it only when it is the site's one spec; with several, it could belong to any.
+  const specKey = (value: string): string => isRemoteSpecRef(value) ? value : canonicalSpecRef(value)
+  const listedKeys = new Set(navigationReferences.map((reference) => specKey(reference.value)))
+  const siteSpecKeys = new Set([...topLevelReferences, ...navigationReferences].filter((reference) => reference.kind === 'openapi').map((reference) => specKey(reference.value)))
+  const pageRefs = pages.flatMap((page) => { const ref = page.openapi ? splitOpenApiRef(page.openapi) : null; return ref ? [ref] : [] })
+  const namedByPage = (key: string): boolean => pageRefs.some((ref) => {
+    if (!ref.specRef) return siteSpecKeys.size === 1
+    if (isRemoteSpecRef(ref.specRef)) return ref.specRef === key
+    const resolved = resolveSpecRef(ref.specRef, specFiles, false)
+    return resolved.kind === 'match' && resolved.spec.sourcePath === key
+  })
   const references: Array<MintlifyApiSpecReference & { pageOnly?: boolean }> = [
-    ...mintlifyTopLevelApiReferences(mintlifyConfig),
-    ...mintlifyNavigationApiReferences(mintlifyConfig, (container) => slotByContainer.get(container)?.tab.tab),
+    ...topLevelReferences.map((reference) => reference.kind === 'openapi' && !listedKeys.has(specKey(reference.value)) && namedByPage(specKey(reference.value))
+      ? { ...reference, hidden: true } : reference),
+    ...navigationReferences,
   ]
   // A reference that lists operations gets them as pages under its directory, unless the directory cannot name a folder.
   const endpointPagesOf = (reference: MintlifyApiSpecReference): EndpointPagesTarget | undefined => {
@@ -1655,7 +1805,6 @@ function resolveMintlifyApiSpecs(
     return directory === undefined ? undefined : { directory, ...(slot ? { slot } : {}) }
   }
   const known = new Set(references.map((reference) => canonicalSpecRef(reference.value)))
-  const specFiles = specFileCandidates(files)
   // Pages repeat a few spec prefixes: look each one up once.
   const namedFiles = new Map<string, SpecRefResolution<Required<SpecCandidate>>>()
   for (const page of pages) {
@@ -1672,8 +1821,13 @@ function resolveMintlifyApiSpecs(
   const seen = new Set<string>()
   // Several tabs (one per product, say) can bind one remote spec to the same label, each under its own directory.
   const remoteByKey = new Map<string, RemoteApiSpec>()
+  const localByKey = new Map<string, ResolvedApiSpec>()
+  // A navigation reference that lists no operations had every one of them generated, under `api-reference` unless its `directory` says otherwise.
+  // The top-level `api` setting generates nothing.
+  const generatedDirectory = (reference: MintlifyApiSpecReference): string | undefined => reference.directory
+    ?? (navigationReferences.includes(reference) && listsNothing(reference) ? DEFAULT_ENDPOINT_DIRECTORY : undefined)
   const mountDirectory = (remote: RemoteApiSpec | undefined, reference: MintlifyApiSpecReference): void => {
-    const directory = reference.directory?.replace(/^\/+|\/+$/g, '')
+    const directory = generatedDirectory(reference)?.replace(/^\/+|\/+$/g, '')
     if (!remote || !directory) return
     const mount = remote.directories?.find((existing) => existing.directory === directory)
     if (!mount) {
@@ -1700,6 +1854,9 @@ function resolveMintlifyApiSpecs(
     const dedupeKey = `${reference.kind}:${reference.value}:${reference.tabLabel ?? ''}`
     if (seen.has(dedupeKey)) {
       mountDirectory(remoteByKey.get(dedupeKey), reference)
+      // The top-level `api` setting binds a spec and generates nothing: a navigation reference sharing it brings the directory its operations were generated under.
+      const local = localByKey.get(dedupeKey)
+      if (local && local.directory === undefined && local.generatedDirectory === undefined && reference.directory === undefined) local.generatedDirectory = generatedDirectory(reference)
       const shared = groupTargets.get(dedupeKey)
       if (shared && !shared.unlisted) {
         if (reference.operationsWithheld) shared.withheld = true
@@ -1778,10 +1935,12 @@ function resolveMintlifyApiSpecs(
       ...(reference.pageOnly ? { pageOnly: true } : {}),
       sourcePath: match.relativePath,
       directory: reference.directory,
+      ...(reference.directory === undefined && generatedDirectory(reference) ? { generatedDirectory: generatedDirectory(reference) } : {}),
       ...(groups ? { groups } : {}),
       ...(deferWarning ? { endpointPages: endpointPagesOf(reference), directoryWarning } : {}),
     }
     specs.push(spec)
+    localByKey.set(dedupeKey, spec)
     groupTargets.set(dedupeKey, { target: spec, unlisted: listsNothing(reference), withheld: reference.operationsWithheld === true, ...(groups ? { directory: endpointPagesOf(reference)?.directory ?? null } : {}) })
   }
   for (const { target, unlisted, withheld } of groupTargets.values()) {
@@ -1939,7 +2098,7 @@ function viewSpecPathItem(document: unknown, entry: Record<string, unknown>): { 
  * local `$ref`) has no endpoint page to link or redirect to. Malformed input
  * yields no operations rather than throwing.
  */
-function parseOpenApiOperationsForLinking(content: Buffer): Array<OpenApiOperationForLinking> {
+export function parseOpenApiOperationsForLinking(content: Buffer): Array<OpenApiOperationForLinking> {
   const document = readSpecDocument(content)
   return visibleOperations(document, isRecord(document) ? document.paths : undefined)
 }
@@ -2079,19 +2238,67 @@ function servedOperations(source: ApiOperationLinkSource, parsed: Map<string, Ar
 export const mountPrefix = (directory: string): string => directory.replace(/^\/+|\/+$/g, '').toLowerCase()
 
 /**
- * Mintlify's URL for an operation's generated page, `<directory>/<first tag>/<summary>`, and the title it carries: the summary, else the
- * operation id, else "METHOD /path". The redirects, the link map and the pages all read the URL here, so they cannot disagree about it.
- * `tag` and `leaf` are the two slugs; either is empty when nothing of its text is URL-safe.
+ * What Mintlify titles an operation's generated page: its summary, else "<Method> <words of the path>" (the method capitalised, the path
+ * lower-cased with each `/{param}/` read as one space, the other slashes dropped and `-` read as a space). The operation id is never used.
  */
-function mintlifyEndpointUrl(directory: string, operation: OpenApiOperationForLinking): { tag: string; leaf: string; url: string; title: string } {
-  const tag = mintlifyUrlSlug(operation.tag ?? 'default')
-  const leaf = mintlifyUrlSlug(operation.summary?.trim() || operation.operationId?.trim() || `${operation.method} ${operation.path}`)
-  return {
-    tag,
-    leaf,
-    url: `${directory}/${tag}/${leaf}`.replace(/^\/+|\/+$/g, ''),
-    title: operation.summary?.trim() || operation.operationId?.trim() || `${operation.method.toUpperCase()} ${operation.path}`,
+function mintlifyOperationTitle(operation: Pick<OpenApiOperationForLinking, 'method' | 'path' | 'summary'>): string {
+  const summary = operation.summary?.trim()
+  if (summary) return summary
+  const words = operation.path.toLowerCase().replace(/\/?\{[^}]*\}\/?/g, ' ').replace(/\//g, '').replace(/-/g, ' ').replace(/\s+/g, ' ').trim()
+  return `${operation.method.charAt(0).toUpperCase()}${operation.method.slice(1).toLowerCase()} ${words}`.trim()
+}
+
+/** The generated page of one operation: its URL, title and the two slugs the URL is made of. */
+interface MintlifyEndpoint {
+  /** The first tag's slug; empty for an untagged operation, which has no tag folder. */
+  tag: string
+  leaf: string
+  url: string
+  title: string
+  /** False when the tag or the title leaves nothing URL-safe: the operation has no page to reach. */
+  named: boolean
+}
+
+/**
+ * Mintlify's URL for the generated page of each operation a reference serves, in the order it served them: `<directory>/<first tag>/<title>`,
+ * with no tag folder for an untagged operation. Operations whose URL would repeat get `-1`, `-2`, ... after the first, which keeps the URL
+ * itself; a number never lands on a URL another summary spells out, so those keep their own. The redirects, the link map, the pages and the
+ * guesses at authored links all read their URLs here, so they cannot disagree. An operation passed twice has one URL.
+ */
+export function mintlifyEndpointUrls<T extends Pick<OpenApiOperationForLinking, 'method' | 'path' | 'tag' | 'summary'>>(directory: string, operations: ReadonlyArray<T>): Map<T, MintlifyEndpoint> {
+  const slugs = new Map<T, { tag: string; slug: string; folder: string; title: string; named: boolean }>()
+  // The URLs the titles spell out, which a generated number must step around.
+  const spelled = new Set<string>()
+  for (const operation of operations) {
+    if (slugs.has(operation)) continue
+    const title = mintlifyOperationTitle(operation)
+    const tag = operation.tag === undefined ? '' : mintlifyUrlSlug(operation.tag)
+    const slug = mintlifyUrlSlug(title)
+    const named = slug !== '' && (operation.tag === undefined || tag !== '')
+    const folder = [directory, tag].filter(Boolean).join('/')
+    slugs.set(operation, { tag, slug, folder, title, named })
+    if (named) spelled.add(`${folder}/${slug}`)
   }
+  const endpoints = new Map<T, MintlifyEndpoint>()
+  const taken = new Set<string>()
+  // The next number to try for a title that repeats.
+  const next = new Map<string, number>()
+  for (const [operation, { tag, slug, folder, title, named }] of slugs) {
+    let leaf = slug
+    if (named) {
+      let number = next.get(`${folder}/${slug}`) ?? 1
+      while (taken.has(`${folder}/${leaf}`) || (leaf !== slug && spelled.has(`${folder}/${leaf}`))) leaf = `${slug}-${number++}`
+      next.set(`${folder}/${slug}`, number)
+      taken.add(`${folder}/${leaf}`)
+    }
+    endpoints.set(operation, { tag, leaf, url: [folder, leaf].filter(Boolean).join('/'), title, named })
+  }
+  return endpoints
+}
+
+/** What titles an authored page that names an operation and has no title of its own (`titleOperationPages`): its summary, else its operation id, else "METHOD /path". Generated endpoint pages use `mintlifyOperationTitle`, which never reads the operation id. */
+function operationTitle(operation: OpenApiOperationForLinking): string {
+  return operation.summary?.trim() || operation.operationId?.trim() || `${operation.method.toUpperCase()} ${operation.path}`
 }
 
 export function apiOperationLinkMap(
@@ -2126,10 +2333,12 @@ export function apiOperationLinkMap(
     const base = source.prefix.replace(/^\/+|\/+$/g, '')
     const prefix = mountPrefix(source.prefix)
     if (prefix && specId !== undefined) prefixLandings.set(prefix, specId === 'default' ? '/api' : `/api/${specId}`)
-    for (const operation of servedOperations(source, parsedByFile)) {
-      const endpoint = mintlifyEndpointUrl(base, operation)
+    const served = servedOperations(source, parsedByFile)
+    const endpoints = mintlifyEndpointUrls(base, served)
+    for (const operation of served) {
+      const endpoint = endpoints.get(operation)!
       // An operation with no URL-safe tag or title has no page to reach.
-      if (specId === undefined && (!endpoint.tag || !endpoint.leaf)) continue
+      if (specId === undefined && !endpoint.named) continue
       const thallyHref = specId === undefined
         ? `/${endpoint.url}`
         : `/api/${specId}/${thallyOperationSlugSegments(operation.path, operation.method).join('/')}`
@@ -2165,8 +2374,8 @@ export function apiOperationLinkMap(
       // of them in practice) and avoids guessing which convention and
       // which leaf a given source actually used.
       const tagSegment = mintlifyOperationSlugSegment(operation.tag ?? 'default')
-      const { tag: mintlifyTag, leaf: mintlifyLeaf, url: canonical } = endpoint
-      if (mintlifyTag && mintlifyLeaf && !underDeeperMount(canonical, prefix)) {
+      const { tag: mintlifyTag, url: canonical } = endpoint
+      if (endpoint.named && !underDeeperMount(canonical, prefix)) {
         // A page is served at its own URL, so no endpoint URL of a mount whose operations are pages is redirected (and its duplicates were settled with the pages).
         if (specId !== undefined) {
           if (!mintlifyPages.has(canonical)) mintlifyPages.set(canonical, thallyHref)
@@ -2247,7 +2456,7 @@ export function linkApiMounts(
 }
 
 /** Mintlify's default `directory` for the pages it generates, when docs.json names none. */
-const DEFAULT_ENDPOINT_DIRECTORY = 'api-reference'
+export const DEFAULT_ENDPOINT_DIRECTORY = 'api-reference'
 
 /**
  * The folder the generated pages of a reference go under, without surrounding slashes. It becomes part of a file path below `src/content`,
@@ -2304,6 +2513,34 @@ function endpointDescription(description: string | undefined, title: string): st
   const sentence = /^(.+?[.!?])(?=\s|$)/.exec(text)?.[1] ?? text
   const limited = sentence.length > 300 ? `${sentence.slice(0, 297).replace(/\s+\S*$/, '')}...` : sentence
   return limited || title
+}
+
+/**
+ * The `api` bindings the migrator made for a spec that only pages name. Such a spec lives in a hidden tab of its own whose label
+ * (`OpenAPI: <spec>`) an author may give any tab, so the label says nothing; this does, as no authored tab can carry it. Copies of
+ * a tab share its `api` object, so the mark survives them.
+ */
+const pageOnlyBindings = new WeakSet<object>()
+
+/** Mark `api` as the binding of a spec only pages name, and return it. */
+export function pageOnlyApi(api: NonNullable<MigrationNavigationTab['api']>): NonNullable<MigrationNavigationTab['api']> {
+  pageOnlyBindings.add(api)
+  return api
+}
+
+/** The hidden tab the migrator made for a spec only pages name: never an authored tab, whatever its label. */
+export function isPageOnlyTab(tab: Pick<MigrationNavigationTab, 'api'>): boolean {
+  return Boolean(tab.api && pageOnlyBindings.has(tab.api))
+}
+
+/** The specs whose binding is marked page-only, as data: the mark itself does not survive a structured clone. */
+export function pageOnlySources(tabs: ReadonlyArray<Pick<MigrationNavigationTab, 'api'>>): Array<string> {
+  return [...new Set(tabs.flatMap((tab) => tab.api && isPageOnlyTab(tab) ? [tab.api.source] : []))]
+}
+
+/** Mark the hidden tabs of `sources` again, in a bundle that was cloned after conversion. */
+export function markPageOnlyTabs(tabs: ReadonlyArray<Pick<MigrationNavigationTab, 'api' | 'hidden'>>, sources: ReadonlyArray<string> = []): void {
+  for (const tab of tabs) if (tab.hidden && tab.api && sources.includes(tab.api.source)) pageOnlyApi(tab.api)
 }
 
 /** Put an API tab back among its siblings: after the nearest of the tabs that preceded it that is still there, else first when none preceded it, else last. */
@@ -2363,13 +2600,27 @@ export function addEndpointPages(options: {
   if (existing?.api) return null
   const byKey = new Map(operations.map((operation) => [`${operation.method} ${operation.path}`, operation]))
   const listed: Array<string> = []
-  const pageFor = (reference: string): string | undefined => {
+  const operationOf = (reference: string): OpenApiOperationForLinking | undefined => {
     const [method, ...path] = reference.trim().split(/\s+/)
-    const operation = byKey.get(`${method.toLowerCase()} ${path.join(' ')}`)
+    return byKey.get(`${method.toLowerCase()} ${path.join(' ')}`)
+  }
+  // Repeated URLs are numbered in the order the operations are listed.
+  const inListedOrder: Array<OpenApiOperationForLinking> = []
+  const collectListed = (nodes: ReadonlyArray<string | MigrationApiGroup>): void => {
+    for (const node of nodes) {
+      const operation = typeof node === 'string' ? operationOf(node) : undefined
+      if (operation) inListedOrder.push(operation)
+      else if (typeof node !== 'string') collectListed(node.pages)
+    }
+  }
+  collectListed(spec.groups)
+  const endpoints = mintlifyEndpointUrls(spec.target.directory, inListedOrder)
+  const pageFor = (reference: string): string | undefined => {
+    const operation = operationOf(reference)
     if (!operation) return undefined
     const key = `${operation.method.toUpperCase()} ${operation.path}`
-    const endpoint = mintlifyEndpointUrl(spec.target.directory, operation)
-    if (!endpoint.tag || !endpoint.leaf || Buffer.byteLength(`${endpoint.tag}.mdx`) > 255 || Buffer.byteLength(`${endpoint.leaf}.mdx`) > 255) {
+    const endpoint = endpoints.get(operation)!
+    if (!endpoint.named || Buffer.byteLength(`${endpoint.tag || endpoint.leaf}.mdx`) > 255 || Buffer.byteLength(`${endpoint.leaf}.mdx`) > 255) {
       if (!ledger.unnamed.includes(key)) ledger.unnamed.push(key)
       return undefined
     }
@@ -2424,7 +2675,7 @@ export function addEndpointPages(options: {
   if (!tabs.some((tab) => tab.api?.source === spec.assetPath)) {
     // The shape every hidden page-only binding has: a hidden tab lists no navigation and its spec serves no `/api/` pages, and a validator
     // that does not exempt hidden tabs from the empty-tab rule accepts an API tab unless it sets `navigation: false`.
-    insertApiTab(tabs, { tab: `OpenAPI: ${spec.source}`, hidden: true, api: { source: spec.assetPath } })
+    insertApiTab(tabs, { tab: `OpenAPI: ${spec.source}`, hidden: true, api: pageOnlyApi({ source: spec.assetPath }) })
   }
   return { operations: listed }
 }
@@ -2484,6 +2735,52 @@ export function qualifyDisplacedBareRefs(options: {
     const key = `${method.toLowerCase()} ${rest.join(' ')}`
     const reached = firstPublishing(before, key)
     if (reached !== undefined && reached !== firstPublishing(after, key)) page.openapi = withSpecRef(ref, qualifier(reached))
+  }
+}
+
+/**
+ * Title each page that names an operation (`openapi: post /links`) or a webhook (`openapi: webhook link.created`, read from the spec's `webhooks`)
+ * and has no title or heading of its own, as Mintlify does: by the operation
+ * (`operationTitle`), where the file name would otherwise give it ("Create" for `links/create.mdx`). A page that names its spec reads that spec;
+ * a bare reference reads the first spec of `specLookupOrder` that publishes the operation. A page whose operation no spec publishes keeps its
+ * title. `content` reads a spec by the source the tabs name it by.
+ */
+export function titleOperationPages(options: {
+  pages: Array<Pick<MigrationPage, 'openapi' | 'title' | 'titleFromFileName'>>
+  tabs: ReadonlyArray<Pick<MigrationNavigationTab, 'hidden' | 'api' | 'version'>>
+  versions?: ReadonlyArray<{ label: string }>
+  content: (source: string) => Buffer | undefined
+}): void {
+  const { pages, tabs, versions, content } = options
+  const order = specLookupOrder(tabs, versions)
+  const bySource = new Map<string, Map<string, OpenApiOperationForLinking>>()
+  const operationsOf = (source: string): Map<string, OpenApiOperationForLinking> => {
+    if (!bySource.has(source)) {
+      const spec = content(source)
+      const document = spec ? readSpecDocument(spec) : undefined
+      const operations = new Map<string, OpenApiOperationForLinking>()
+      for (const operation of visibleOperations(document, isRecord(document) ? document.paths : undefined)) operations.set(`${operation.method} ${operation.path}`, operation)
+      // A webhook is named by its key alone. When it has several operations the renderer serves the first once they are ordered by title.
+      for (const operation of visibleOperations(document, isRecord(document) ? document.webhooks : undefined)) {
+        const key = `webhook ${operation.path}`
+        const served = operations.get(key)
+        if (!served || operationTitle(operation).localeCompare(operationTitle(served)) < 0) operations.set(key, operation)
+      }
+      bySource.set(source, operations)
+    }
+    return bySource.get(source)!
+  }
+  for (const page of pages) {
+    const ref = page.titleFromFileName && page.openapi ? splitOpenApiRef(page.openapi) : null
+    if (!ref) continue
+    const [method, ...path] = ref.operation.trim().split(/\s+/)
+    const key = `${method.toLowerCase()} ${path.join(' ')}`
+    for (const source of ref.specRef ? [ref.specRef] : order) {
+      const operation = operationsOf(source).get(key)
+      if (!operation) continue
+      page.title = operationTitle(operation)
+      break
+    }
   }
 }
 
@@ -2908,27 +3205,7 @@ function staticSnippetProperties(attributes: string): Map<string, string> {
 function interpolateSnippet(snippet: string, attributes: string, children?: string): string {
   const properties = staticSnippetProperties(attributes)
   if (children !== undefined) properties.set('children', children.trim())
-  if (properties.size === 0) return snippet
-  snippet = bindSnippetProps(snippet, properties)
-  const isJsxSnippet = /<[A-Za-z][A-Za-z0-9]*/.test(snippet)
-  let fence = ''
-  return snippet.split('\n').map((line) => {
-    const marker = line.match(/^\s*(`{3,}|~{3,})/)?.[1]
-    if (marker) {
-      if (!fence) fence = marker[0]
-      else if (marker[0] === fence) fence = ''
-      return line
-    }
-    if (fence) return line
-    return line.replace(/\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (original, name: string) => {
-      const value = properties.get(name)
-      // Preserve MDX expression syntax: a literal replacement inside JSX
-      // would turn `<a href={url}>` into invalid `href=https://...`.
-      if (value === undefined) return original
-      if (name === 'children') return value
-      return isJsxSnippet ? `{${JSON.stringify(value)}}` : value
-    })
-  }).join('\n')
+  return bindSnippetProps(snippet, properties)
 }
 
 /**
@@ -2941,6 +3218,17 @@ function isolateFences(snippet: string, source: string, start: number, end: numb
   const before = source.slice(source.lastIndexOf('\n', start - 1) + 1, start)
   const after = source.slice(end, source.indexOf('\n', end) < 0 ? undefined : source.indexOf('\n', end))
   return `${fence.test(lines[0]) && /\S/.test(before) ? '\n' : ''}${snippet}${fence.test(lines[lines.length - 1]) && /\S/.test(after) ? '\n' : ''}`
+}
+
+/**
+ * A snippet replaces its tag in the middle of the page, so the lines after its first must sit
+ * where the tag did, after a list marker if one leads the line. Otherwise they leave the
+ * element or list item that held the tag.
+ */
+function alignToTag(snippet: string, source: string, start: number): string {
+  const before = source.slice(source.lastIndexOf('\n', start - 1) + 1, start)
+  const indent = /^[ \t]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)?$/.test(before) ? before.replace(/\S/g, ' ') : before.match(/^[ \t]*/)![0]
+  return indentSnippetLines(snippet, indent)
 }
 
 /** Extract JSX from a statically declared snippet component before inlining it. */
@@ -3233,8 +3521,11 @@ function preserveLinkedAnchors(pages: Array<MigrationPage>): void {
       const tableCell = line.match(/^ {0,3}\|\s*([^|]+?)\s*\|/)
       if (tableCell && !/^[:\s-]+$/.test(tableCell[1])) tableCells.push({ index, text: tableCell[1] })
       const match = line.match(/^ {0,3}#{1,6}\s+(.+?)\s*#*\s*$/)
-      return match ? { index, text: mdxVisibleText(match[1].replace(/\s*\{\/\*\s*#\S+?\s*\*\/\}$/, ''), definitions) } : null
-    }).filter((entry): entry is { index: number; text: string } => entry !== null)
+      if (!match) return null
+      const source = match[1].replace(/\s*\{\/\*\s*#\S+?\s*\*\/\}$/, '')
+      // `own`: the text the renderer makes the id from, which leaves out inline components and what they hold.
+      return { index, text: mdxVisibleText(source, definitions), own: mdxTextWithoutInlineElements(source, definitions) }
+    }).filter((entry): entry is { index: number; text: string; own: string | undefined } => entry !== null)
     const existing = new Set<string>()
     replaceOutsideCode(page.body, (text) => {
       for (const match of text.matchAll(/\bid=(?:"([^"]+)"|'([^']+)')/g)) existing.add(match[1] ?? match[2])
@@ -3253,7 +3544,7 @@ function preserveLinkedAnchors(pages: Array<MigrationPage>): void {
     const headingSlugs = new Map<string, number>()
     const slugCounts = new Map<string, number>()
     for (const heading of headings) {
-      const slug = heading.text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')
+      const slug = (heading.own ?? heading.text).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')
       existing.add(slug)
       const seen = slugCounts.get(slug) ?? 0
       slugCounts.set(slug, seen + 1)
@@ -3982,23 +4273,26 @@ function inlineMdxSnippets(
     for (const [componentName, snippet] of snippets) {
       segment = segment
         .replace(new RegExp(`<${componentName}((?:\\s[^>]*)?)\\s*/>`, 'g'), (tag: string, attributes: string, offset: number, source: string) => {
-          return isolateFences(closeOpenCodeFence(interpolateSnippet(snippet, attributes)), source, offset, offset + tag.length)
+          return isolateFences(alignToTag(closeOpenCodeFence(interpolateSnippet(snippet, attributes)), source, offset), source, offset, offset + tag.length)
         })
         .replace(new RegExp(`<${componentName}((?:\\s[^>]*)?)>([\\s\\S]*?)<\\/${componentName}>`, 'g'), (tag: string, attributes: string, children: string, offset: number, source: string) => {
-          return isolateFences(closeOpenCodeFence(interpolateSnippet(snippet, attributes, children)), source, offset, offset + tag.length)
+          return isolateFences(alignToTag(closeOpenCodeFence(interpolateSnippet(snippet, attributes, children)), source, offset), source, offset, offset + tag.length)
         })
     }
     const tagLabel = (filePath: string): string => platform === 'fern' ? `Included file ${filePath}` : `Snippet file="${filePath}"`
     return segment.replace(platform === 'fern' ? FERN_MARKDOWN_TAG_PATTERN : SNIPPET_TAG_PATTERN, (tag: string, doubleQuoted: string | undefined, singleQuoted: string | undefined, offset: number, source: string) => {
       const filePath = (doubleQuoted ?? singleQuoted)!
       try {
-        // Mintlify's documented form is relative to `snippets/`; sites also write
-        // the full `/snippets/x.mdx` (or a page-relative) path.
+        // Mintlify's documented form is relative to `snippets/`, and its legacy
+        // `_snippets/` folder is searched next (`snippets/` wins when both hold
+        // the file); sites also write the full `/snippets/x.mdx` (or a
+        // page-relative) path.
         const candidate = (platform === 'fern' ? [
           // Fern's absolute include paths are rooted at fern/, never snippets/.
           () => resolveSnippetPath(filePath, currentFile, repositoryRoot, siteRoot),
         ] : [
           () => withinRealRoot(resolveWithin(siteRoot, `snippets/${filePath}`), repositoryRoot),
+          () => withinRealRoot(resolveWithin(siteRoot, `_snippets/${filePath}`), repositoryRoot),
           () => resolveSnippetPath(filePath, currentFile, repositoryRoot, siteRoot),
         ]).map((resolveCandidate) => {
           try { return resolveCandidate() } catch { return undefined }
@@ -4006,7 +4300,7 @@ function inlineMdxSnippets(
         if (!candidate) throw new Error('file not found')
         const blocked = blockInline(candidate, filePath, tagLabel(filePath))
         if (blocked) return blocked
-        return isolateFences(closeOpenCodeFence(inlineMdxSnippets(
+        return isolateFences(alignToTag(closeOpenCodeFence(inlineMdxSnippets(
           withoutFrontmatter(readFileSync(candidate, 'utf8')),
           candidate,
           repositoryRoot,
@@ -4016,7 +4310,7 @@ function inlineMdxSnippets(
           globalAliases,
           gate,
           platform,
-        )), source, offset, offset + tag.length)
+        )), source, offset), source, offset, offset + tag.length)
       } catch {
         warnings.push({
           code: 'missing-page',
@@ -4049,14 +4343,20 @@ function inlineMdxSnippets(
  */
 function injectOpenApiSpecs(
   config: MigrationDocsConfig,
-  specs: Array<{ filename: string; sourcePath?: string; tabLabel?: string; parentTab?: string; icon?: string; hidden?: boolean; generatedNavigation?: boolean; pageReferenced?: boolean; groups?: Array<MigrationApiGroup>; navigation?: false }>,
+  specs: Array<{ filename: string; sourcePath?: string; tabLabel?: string; parentTab?: string; icon?: string; hidden?: boolean; pageOnly?: boolean; generatedNavigation?: boolean; pageReferenced?: boolean; groups?: Array<MigrationApiGroup>; navigation?: false }>,
   warnings?: Array<MigrationWarning>,
 ): MigrationDocsConfig {
   const tabs = config.tabs.map((tab) => ({ ...tab }))
   for (const spec of specs) {
-    const apiTab = spec.tabLabel
-      ? tabs.find((tab) => tab.tab === spec.tabLabel)
-      : tabs.find((tab) => tab.tab.toLowerCase().includes('api'))
+    const hiddenLabel = `OpenAPI: ${spec.sourcePath ?? spec.filename}`
+    // A spec only pages name (a label of the migrator's own, or none) never takes an existing tab: it always has the hidden tab of its own,
+    // and no authored tab is taken for one, whatever its label. That tab belongs to that spec: no other spec takes it over either.
+    const ownTab = spec.pageOnly || (spec.hidden && !spec.tabLabel)
+    const apiTab = ownTab
+      ? undefined
+      : spec.tabLabel
+        ? tabs.find((tab) => tab.tab === spec.tabLabel)
+        : tabs.find((tab) => tab.tab.toLowerCase().includes('api') && !isPageOnlyTab(tab))
     if (apiTab) {
       // Thally binds one API spec per tab; a second spec that resolves to
       // the same tab would otherwise silently replace the first one's
@@ -4065,7 +4365,7 @@ function injectOpenApiSpecs(
         const source = specAssetPath(spec.filename)
         // Pages that name this spec still resolve it from a hidden tab, which lists no navigation of its own.
         const pageBound = spec.pageReferenced && !tabs.some((tab) => tab.api?.source === source)
-        if (pageBound) insertApiTab(tabs, { tab: `OpenAPI: ${spec.sourcePath ?? spec.filename}`, hidden: true, api: { source } })
+        if (pageBound) insertApiTab(tabs, { tab: hiddenLabel, hidden: true, api: pageOnlyApi({ source }) })
         warnings.push({
           code: 'unsupported-config',
           message: `Tab "${apiTab.tab}" already uses another OpenAPI spec, and Thally supports one API spec per tab, so "${source}" ${pageBound
@@ -4086,11 +4386,13 @@ function injectOpenApiSpecs(
         ...(spec.groups ? { groups: spec.groups } : {}),
       }
     } else {
+      const api = { source: specAssetPath(spec.filename), ...(spec.navigation === false ? { navigation: false } : {}), ...(spec.groups ? { groups: spec.groups } : {}) }
+      if (ownTab) pageOnlyApi(api)
       insertApiTab(tabs, {
-        tab: spec.tabLabel ?? 'API Reference',
+        tab: spec.tabLabel ?? (spec.hidden ? hiddenLabel : 'API Reference'),
         ...(spec.icon ? { icon: spec.icon } : {}),
         ...(spec.hidden ? { hidden: true } : {}),
-        api: { source: specAssetPath(spec.filename), ...(spec.navigation === false ? { navigation: false } : {}), ...(spec.groups ? { groups: spec.groups } : {}) },
+        api,
       }, spec.parentTab)
     }
   }
@@ -4113,6 +4415,72 @@ function componentSourceIdentity(sourceUrl: string, repositoryDir: string, siteR
 }
 
 /** Import an already-available repository directory into a canonical bundle. */
+/**
+ * Project name for a Docusaurus migration, in the order the source itself would
+ * trust it. A config whose `title` only exists at build time leaves the
+ * projection empty; scaffolding the starter's placeholder in that case makes a
+ * successful import look like a named site, so fall back to the source's own
+ * name and say where it came from. The checkout directory is not a source name
+ * (migration clones into a temporary "repository" path), so the repository is
+ * read from the source URL instead.
+ */
+interface DocusaurusProjectName {
+  name: string
+  /** Set when the name came from the source rather than its config. */
+  origin?: string
+}
+
+/** The source's own package name, without a scope that names the publisher. */
+function sourcePackageName(repositoryDir: string): string | undefined {
+  try {
+    // Package metadata is untrusted source input too: a symlink must not turn
+    // the branding fallback into a read outside the checkout, and a special or
+    // oversized file must not block or exhaust a migration.
+    const path = withinRealRoot(resolveWithin(repositoryDir, 'package.json'), repositoryDir)
+    const metadata = lstatSync(path)
+    if (!metadata.isFile() || metadata.size > MAX_PAGE_BYTES) return undefined
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as { name?: unknown }
+    if (typeof parsed.name !== 'string') return undefined
+    return parsed.name.split('/').pop()?.trim() || undefined
+  } catch {
+    return undefined
+  }
+}
+
+function docusaurusProjectName(
+  settings: DocusaurusSiteSettings,
+  repositoryDir: string,
+  sourceUrl: string,
+): DocusaurusProjectName | undefined {
+  const configured = settings.navbarTitle ?? settings.name
+  if (configured) return { name: configured }
+  const packageName = sourcePackageName(repositoryDir)
+  if (packageName) return { name: packageName, origin: 'the source package.json name' }
+  const sourceName = (() => {
+    try {
+      const segment = new URL(sourceUrl).pathname.split('/').filter(Boolean).pop()
+      return segment ? decodeURIComponent(segment).replace(/\.git$/i, '') : undefined
+    } catch {
+      return undefined
+    }
+  })()
+  if (sourceName) return { name: sourceName, origin: 'the source repository name' }
+  const sourceHost = (() => {
+    try {
+      return new URL(sourceUrl).hostname || undefined
+    } catch {
+      return undefined
+    }
+  })()
+  return sourceHost ? { name: sourceHost, origin: 'the source host' } : undefined
+}
+
+const DOCUSAURUS_IDENTITY_LABELS = {
+  title: 'site title',
+  tagline: 'site tagline',
+  navbarTitle: 'navbar title',
+} as const
+
 export function migrateRepository(options: RepositoryMigrationOptions): MigrationBundle {
   const repositoryDir = options.repositoryDir
   const platform = options.platform ?? detectRepositoryPlatform(repositoryDir, options.docsDir)
@@ -4181,6 +4549,8 @@ export function migrateRepository(options: RepositoryMigrationOptions): Migratio
   let mintlifyConfig: Record<string, unknown> | null = null
   /** The API tabs of the projected navigation that list operations and nothing else: left out of `docsConfig.tabs` until their spec is bound. */
   let mintlifyApiTabSlots: MintlifyNavigationResult['apiTabSlots'] = []
+  /** Groups whose `directory` setting has their root page list the group's pages as cards. */
+  let mintlifyDirectories: MintlifyNavigationResult['directories'] = []
   /** Access each navigation appearance of a Mintlify page imposes, keyed like page references. */
   const mintlifyNavigationAccess = new Map<string, Array<NavigationAccess>>()
   let fernRawConfig: Record<string, unknown> | null = null
@@ -4232,6 +4602,7 @@ export function migrateRepository(options: RepositoryMigrationOptions): Migratio
         })
         docsConfig = projected.docsConfig
         mintlifyApiTabSlots = projected.apiTabSlots
+        mintlifyDirectories = projected.directories
         warnings.push(...projected.warnings)
         for (const repo of projected.gatedSourceRefs) gatedSourceRepos.add(repo.toLowerCase())
         for (const appearance of projected.referenceAccess) {
@@ -4387,6 +4758,7 @@ export function migrateRepository(options: RepositoryMigrationOptions): Migratio
       }
     : undefined
   const sourceBudget = options.maxSourceFiles ?? MAX_SOURCE_FILES
+  const totalAssetBudget = options.maxTotalAssetBytes ?? MAX_TOTAL_ASSET_BYTES
   const scannedFiles = scanFiles(contentRoot, repositoryDir, warnings, discoveryRank, sourceBudget)
   const mintignoreFilteredFiles = mintignoreMatcher
     ? scannedFiles.filter((file) => !mintignoreMatcher.ignores(file.relativePath))
@@ -4757,9 +5129,15 @@ export function migrateRepository(options: RepositoryMigrationOptions): Migratio
       skipped++
       continue
     }
-    const rootFilename = !file.relativePath.includes('/') ? basename(file.relativePath).toLowerCase() : ''
-    if (REPOSITORY_ONLY_DOCUMENTS.has(rootFilename) && !exactReferenceMap.has(exactReferenceKey(file.relativePath))) {
+    const filename = basename(file.relativePath).toLowerCase()
+    const isRootRepositoryOnly = !file.relativePath.includes('/') && REPOSITORY_ONLY_DOCUMENTS.has(filename)
+    const isMintlifyIgnored = platform === 'mintlify' && MINTLIFY_DEFAULT_IGNORED_DOCUMENTS.has(filename)
+    if ((isRootRepositoryOnly || isMintlifyIgnored) && !exactReferenceMap.has(exactReferenceKey(file.relativePath))) {
       skipped++
+      // Root repository files were always skipped quietly; say so for the rest, which may hold real text.
+      if (!isRootRepositoryOnly) {
+        warnings.push({ code: 'skipped-file', message: 'Mintlify does not publish README.md, LICENSE.md, CHANGELOG.md or CONTRIBUTING.md files (its default ignore list), so this file was not imported. Add it to the navigation to import it anyway.', source: file.relativePath })
+      }
       continue
     }
     if (!['.md', '.mdx'].includes(extname(file.relativePath).toLowerCase())) {
@@ -4896,6 +5274,8 @@ export function migrateRepository(options: RepositoryMigrationOptions): Migratio
         { headingMarkers: platform === 'mintlify' },
       )
     }
+    // Relative to `componentRoot`, like the component warnings for this page, so one page has one label.
+    const pageWarningSource = relative(componentRoot, file.absolutePath).replace(/\\/g, '/')
     if (componentMigrator) {
       const warningsBeforeTransform = warnings.length
       raw = componentMigrator.transform(raw, file.absolutePath)
@@ -4931,7 +5311,7 @@ export function migrateRepository(options: RepositoryMigrationOptions): Migratio
         warnings.push({
           code: 'unsupported-config',
           message: 'A suspected math span looked like it needed converting, but doing so broke the page; the page was kept as originally authored instead.',
-          source: relative(repositoryDir, file.absolutePath).replace(/\\/g, '/'),
+          source: pageWarningSource,
         })
       }
       raw = escapeFernLiteralBraces(protectedMath.body)
@@ -4946,7 +5326,7 @@ export function migrateRepository(options: RepositoryMigrationOptions): Migratio
     const page = parseMarkdownPage({
       id,
       navigationId,
-      warn: (message) => warnings.push({ code: 'unsupported-config', message, source: relative(repositoryDir, file.absolutePath).replace(/\\/g, '/') }),
+      warn: (message) => warnings.push({ code: 'unsupported-config', message, source: pageWarningSource }),
       ...(locale ? { locale } : {}),
       raw,
       platform,
@@ -4999,7 +5379,7 @@ export function migrateRepository(options: RepositoryMigrationOptions): Migratio
       warnings.push({
         code: 'unsupported-config',
         message: `The page's frontmatter is not valid YAML (${page.frontmatterError}); the page was kept and as much of its metadata as could be read was used.`,
-        source: relative(repositoryDir, file.absolutePath).replace(/\\/g, '/'),
+        source: pageWarningSource,
       })
     }
     if (platform === 'fern' && !page.navTitle) {
@@ -5255,6 +5635,10 @@ export function migrateRepository(options: RepositoryMigrationOptions): Migratio
     : undefined
   const hasRootStylesheet = Boolean(rootStylesheetPath && existsSync(rootStylesheetPath)
     && lstatSync(rootStylesheetPath).isFile() && !lstatSync(rootStylesheetPath).isSymbolicLink())
+  // Names this migration gives the stylesheet: its directory in `public/migrated/`, and the prefix of its keyframes.
+  const rootStyleIdentity = mintlifyProjectRoot
+    ? createHash('sha256').update(componentSourceIdentity(options.sourceUrl, repositoryDir, mintlifyProjectRoot)).digest('hex').slice(0, 12)
+    : ''
   let rootStyleProjection: ReturnType<typeof projectAuthoredStyles> | undefined
   let rootNavbarButtons: ReturnType<typeof navbarLinkButtons> = []
   let rootStyleProblem: 'unsafe' | 'parse' | undefined
@@ -5273,11 +5657,13 @@ export function migrateRepository(options: RepositoryMigrationOptions): Migratio
           // Restricted pages' markup must not keep a rule (and the image its
           // url() names) public; rules only they use are dropped.
           ...pages.filter((page) => !restrictedPages.has(page)).map((page) => page.body),
-          ...(componentMigrator?.files() ?? []).map((file) => typeof file.content === 'string' ? file.content : ''),
           // Site-wide scripts build markup of their own (a CTA card, say) that the stylesheet is meant for.
           ...files.filter((file) => isMintlifyServedScriptOrStyle(file.relativePath) && extname(file.relativePath).toLowerCase() === '.js'
             && lstatSync(file.absolutePath).size <= MAX_PAGE_BYTES).map((file) => readFileSync(file.absolutePath, 'utf8')),
-        ])
+        ], [
+          // A copied component builds its class names at run time, so every string in one may be a class.
+          ...(componentMigrator?.files() ?? []).flatMap((file) => typeof file.content === 'string' && /\.[cm]?[jt]sx?$/i.test(file.path) ? [file.content] : []),
+        ], `src-${rootStyleIdentity}`)
       } catch {
         rootStyleProblem = 'parse'
       }
@@ -5322,13 +5708,25 @@ export function migrateRepository(options: RepositoryMigrationOptions): Migratio
     }
     assetCandidates.push({ file, assetPath, size: candidateSize })
   }
-  // Copy assets that pages actually reference before unreferenced ones, so a
-  // tight budget drops decorative/unused files first instead of screenshots
-  // a page links to (each group keeps its original scan order).
+  // A full budget must not cost the site its look. Copy first what the site itself loads (its
+  // stylesheets, scripts and fonts) and what docs.json names (logo, favicon, background), then the
+  // assets pages reference, then the rest, so a tight budget drops decorative/unused files first
+  // (each group keeps its original scan order).
+  const configAssetPaths = new Set<string>()
+  // A name with no slash (`logo.svg`) is lowercased into the loose set. In the config, which sits at the
+  // site root, it can only mean the root file of that name, so it earns the same priority as a full path.
+  const configLooseNames = new Set<string>()
+  addPathReferences(platform === 'mintlify'
+    ? JSON.stringify(mintlifyConfig ?? {})
+    : JSON.stringify([docsConfig, docusaurusProjectRoot ? readDocusaurusSiteSettings(docusaurusProjectRoot) : null]), '', configAssetPaths, configLooseNames, docusaurusPaths(''))
+  if (fernRawConfig) addFernConfigPathReferences(fernRawConfig, configAssetPaths, configLooseNames)
+  const isSiteAsset = (candidate: AssetCandidate): boolean => siteAssetPaths.has(candidate.assetPath) || configAssetPaths.has(candidate.assetPath)
+    || (!candidate.assetPath.includes('/') && configLooseNames.has(candidate.assetPath.toLowerCase()))
   const isReferenced = (candidate: AssetCandidate): boolean => referencedAssetPaths.has(candidate.assetPath)
   const orderedAssetCandidates = [
-    ...assetCandidates.filter((candidate) => isReferenced(candidate)),
-    ...assetCandidates.filter((candidate) => !isReferenced(candidate)),
+    ...assetCandidates.filter((candidate) => isSiteAsset(candidate)),
+    ...assetCandidates.filter((candidate) => !isSiteAsset(candidate) && isReferenced(candidate)),
+    ...assetCandidates.filter((candidate) => !isSiteAsset(candidate) && !isReferenced(candidate)),
   ]
   const quarantinedPageCount = quarantinedFiles.length
   // Two files can map to one public path (`logo.png` and `public/logo.png`);
@@ -5366,7 +5764,8 @@ export function migrateRepository(options: RepositoryMigrationOptions): Migratio
     && !(isPublicReachable(assetPath) && !(failClosedAssets && (destinationCounts.get(assetPath) ?? 0) > 1))
   let withheldAssetCount = 0
   let unreferencedAssetCount = 0
-  let totalAssetBytes = 0
+  // The root stylesheet is written after the assets, so its bytes are set aside before any is copied.
+  let totalAssetBytes = !rootStyleProblem && rootStyleProjection?.css.trim() ? Buffer.byteLength(rootStyleProjection.css) : 0
   // One summary warning per skip reason, not one per file: a repository with
   // hundreds of oversized assets would otherwise bury every other warning.
   const overBudgetAssets: Array<string> = []
@@ -5375,7 +5774,7 @@ export function migrateRepository(options: RepositoryMigrationOptions): Migratio
   const ambiguouslyNamedAssets: Array<string> = []
   for (const { file, assetPath, size } of orderedAssetCandidates) {
     const individualLimit = referencedAssetPaths.has(assetPath) ? MAX_REFERENCED_ASSET_BYTES : MAX_ASSET_BYTES
-    if (size > individualLimit || totalAssetBytes + size > MAX_TOTAL_ASSET_BYTES) {
+    if (size > individualLimit || totalAssetBytes + size > totalAssetBudget) {
       overBudgetAssets.push(file.relativePath)
       if (referencedAssetPaths.has(assetPath)) overBudgetReferenced++
       continue
@@ -5426,19 +5825,16 @@ export function migrateRepository(options: RepositoryMigrationOptions): Migratio
       const copiedPath = font.path ? fontAssetByRelative.get(font.path) : undefined
       const copied = copiedPath !== undefined && assets.some((asset) => asset.path === copiedPath)
       const detail = font.remote
-        ? `its source ${font.source} is a remote URL and was not downloaded`
+        ? `its source ${font.source} is a remote URL and was not downloaded, so put a copy in public/`
         : !font.path
-          ? `its source ${font.source} is not a safe local .woff/.woff2/.ttf/.otf path inside the docs directory and was not imported`
+          ? `its source ${font.source} is not a safe local .woff/.woff2/.ttf/.otf path inside the docs directory and was not imported, so put a copy in public/`
           : !copiedPath
-            ? `its source file ${font.source} was not found in the docs directory`
+            ? `its source file ${font.source} was not found in the docs directory, so put a copy in public/`
             : copied
               ? `its file was copied to public/${copiedPath}`
               : null
       if (detail === null) continue
-      warnings.push({
-        code: 'unsupported-config',
-        message: `Self-hosted font "${font.family}" is not applied: Thally's fonts setting loads Google Fonts by family only; ${detail}. The family name was still mapped, which loads a Google font of that name if one exists.`,
-      })
+      warnings.push(selfHostedFontWarning(font.family, detail))
     }
   }
   if (overBudgetAssets.length > 0) {
@@ -5462,7 +5858,7 @@ export function migrateRepository(options: RepositoryMigrationOptions): Migratio
   // Thally owns the navbar, cards and footer through docs.json and its theme.
   if (hasRootStylesheet && rootStylesheetPath && mintlifyProjectRoot) {
     const size = lstatSync(rootStylesheetPath).size
-    if (size > MAX_ASSET_BYTES || totalAssetBytes + size > MAX_TOTAL_ASSET_BYTES) {
+    if (size > MAX_ASSET_BYTES) {
       warnings.push({ code: 'limit-reached', message: 'Mintlify root style.css exceeded the asset budget and was not imported.', source: 'style.css' })
     } else if (rootStyleProblem === 'unsafe') {
       warnings.push({ code: 'unsupported-config', message: 'Mintlify root style.css contains a CSS import or unsafe URL; review and import it manually.', source: 'style.css' })
@@ -5482,18 +5878,51 @@ export function migrateRepository(options: RepositoryMigrationOptions): Migratio
           },
         }
       }
-      if (rootStyleProjection.omittedSelectors > 0) warnings.push({
+      const { omittedSelectors, omittedAtRules } = rootStyleProjection
+      if (omittedSelectors + omittedAtRules.length > 0) warnings.push({
         code: 'unsupported-config',
         source: 'style.css',
-        message: `Skipped ${rootStyleProjection.omittedSelectors} stylesheet selector${rootStyleProjection.omittedSelectors === 1 ? '' : 's'} that target platform-owned or unreferenced markup. Recreate any intentional shell customization with Thally configuration.`,
+        message: `Skipped ${[
+          omittedSelectors ? `${omittedSelectors} stylesheet selector${omittedSelectors === 1 ? '' : 's'} that target platform-owned or unreferenced markup, or the page itself (html, body) rather than its content` : '',
+          omittedAtRules.length ? `${omittedAtRules.length} at-rule${omittedAtRules.length === 1 ? '' : 's'} (${omittedAtRules.slice(0, 5).join(', ')}${omittedAtRules.length > 5 ? `, and ${omittedAtRules.length - 5} more` : ''}) that no kept rule uses or that apply to the whole page` : '',
+        ].filter(Boolean).join(' and ')}. Recreate any intentional shell customization with Thally configuration.`,
+      })
+      if (rootStyleProjection.omittedNestedRules > 0) warnings.push({
+        code: 'unsupported-config',
+        source: 'style.css',
+        message: `Skipped ${rootStyleProjection.omittedNestedRules} rule${rootStyleProjection.omittedNestedRules === 1 ? '' : 's'} nested inside other rules (CSS nesting) in the style.css stylesheet: Thally confines each kept rule to the page content, and a nested selector is read relative to the rule around it. Write them as separate rules to keep them.`,
+      })
+      if (rootStyleProjection.skippedProperties.length > 0) warnings.push({
+        code: 'unsupported-config',
+        source: 'style.css',
+        message: `Left out of the style.css stylesheet: ${rootStyleProjection.skippedProperties.map((name) => `@property ${name}`).join(', ')}. A registration applies to the whole page, so Thally keeps one only when an imported rule reads the property and the site's own :root or .dark block declares properties with the same prefix (--ifx-, say), which shows the name is the site's and not the Thally shell's. Recreate an intentional registration in a stylesheet of your own.`,
+      })
+      const { skippedVariables: unused, skippedThemeDeclarations: otherDeclarations } = rootStyleProjection
+      if (unused.length + otherDeclarations > 0) warnings.push({
+        code: 'unsupported-config',
+        source: 'style.css',
+        message: `Left out of the theme blocks (:root, .dark) of style.css: ${[
+          unused.length ? `${unused.join(', ')} (no imported rule uses ${unused.length === 1 ? 'it' : 'them'})` : '',
+          otherDeclarations ? `${otherDeclarations} other declaration${otherDeclarations === 1 ? '' : 's'} that would restyle the page itself` : '',
+        ].filter(Boolean).join('; ')}. Recreate an intentional change with Thally configuration.`,
       })
       if (rootStyleProjection.css.trim()) {
-        const identity = createHash('sha256').update(componentSourceIdentity(options.sourceUrl, repositoryDir, mintlifyProjectRoot)).digest('hex').slice(0, 12)
-        const assetPath = `migrated/${identity}/style.css`
+        // Thally renders a custom-mode page with no content container, so the page brings its own for the kept rules to apply to.
+        let bare = 0
+        for (const page of pages.filter((candidate) => candidate.mode === 'custom')) {
+          const body = wrapPageContent(page.body)
+          if (body === undefined) bare += 1
+          else page.body = body
+        }
+        if (bare > 0) warnings.push({
+          code: 'unsupported-config',
+          source: 'style.css',
+          message: `${bare} page${bare === 1 ? ' uses' : 's use'} \`mode: custom\`, which Thally renders without a page content container, and could not be given one (it has no content, or an export follows its content), so the rules kept from style.css do not apply there. Move the export above the content, or style the page inline.`,
+        })
+        const assetPath = `migrated/${rootStyleIdentity}/style.css`
         const content = Buffer.from(rootStyleProjection.css)
         assets.push({ path: assetPath, content })
         docsConfig = { ...docsConfig, stylesheets: [...(docsConfig.stylesheets ?? []), `/${assetPath}`] }
-        totalAssetBytes += content.length
       }
     }
   }
@@ -5761,6 +6190,8 @@ export function migrateRepository(options: RepositoryMigrationOptions): Migratio
       if (withheldSpecRefs.some((ref) => specRefMatches(ref, spec.sourcePath, true))) warnSharedSpec(spec.sourcePath, withheldOperations.get(spec))
     }
     let pageSpecs: Array<{ filename: string; sourcePath?: string }> = resolvedSpecs
+    /** The spec the repository scan found and bound to a hidden tab already: the page-only binding below skips it. */
+    let hiddenScanSource: string | undefined
     if (resolvedSpecs.length > 0) {
       const namedByPages = new Set(pages.filter((page) => !restrictedPages.has(page)).map((page) => specNamedByPage(page.openapi, resolvedSpecs)))
       for (const spec of resolvedSpecs) {
@@ -5820,7 +6251,7 @@ export function migrateRepository(options: RepositoryMigrationOptions): Migratio
       // A mount whose operations are pages is served by them: only its links need a map, never a redirect.
       const mountOf = (spec: ResolvedApiSpec): { prefix?: string; operations?: Array<string> } => endpointSpecs.has(spec)
         ? { prefix: spec.endpointPages?.directory, operations: spec.endpointOperations }
-        : { prefix: spec.directory }
+        : { prefix: spec.directory ?? spec.generatedDirectory }
       if (remoteApiSpecs.length > 0) {
         // A remote tab that binds ahead of these shifts their ids, so hydration links every mount, local and remote, once the downloads have settled.
         localApiMounts.push(...resolvedSpecs.flatMap((spec) => {
@@ -5861,7 +6292,20 @@ export function migrateRepository(options: RepositoryMigrationOptions): Migratio
           if (!assets.some((asset) => asset.path === specAssetPath(filename))) {
             assets.push(specAsset(filename, pruned.content))
           }
-          docsConfig = injectOpenApiSpecs(docsConfig, [{ filename }])
+          // Mintlify finds this spec by itself and adds no tab for it: a page that names one of its operations renders it, so the
+          // spec is bound to a hidden tab, as a spec only pages name is. The renderer reads a bare `openapi: "GET /x"` from the first spec
+          // that publishes it, visible tabs first and then hidden ones in order, so this binding is made here, ahead of the page-only
+          // ones, where the visible tab stood: no bare reference reaches another spec. A remote spec bound later keeps the visible tab,
+          // which sits before it as it always did.
+          const namedByPage = remoteApiSpecs.length === 0 && pages.some((page) => {
+            const ref = !restrictedPages.has(page) && page.openapi ? splitOpenApiRef(page.openapi) : null
+            return Boolean(ref) && (!ref!.specRef || specNamedByPage(page.openapi, [fallbackSpec, ...allSpecs]) === fallbackSpec)
+          })
+          if (!namedByPage) docsConfig = injectOpenApiSpecs(docsConfig, [{ filename }])
+          else {
+            docsConfig = injectOpenApiSpecs(docsConfig, [{ filename, sourcePath: fallback.relativePath, tabLabel: `OpenAPI: ${fallback.relativePath}`, hidden: true }])
+            hiddenScanSource = fallback.relativePath
+          }
           pageSpecs = [{ filename, sourcePath: fallback.relativePath }]
           if (withheldSpecRefs.some(matches)) warnSharedSpec(fallback.relativePath, pruned.excluded)
         }
@@ -5875,7 +6319,7 @@ export function migrateRepository(options: RepositoryMigrationOptions): Migratio
       if (withheldSpecRefs.some((ref) => specRefMatches(ref, spec.sourcePath, true))) warnSharedSpec(spec.sourcePath, withheldOperations.get(spec))
     }
     if (pageOnlySpecs.length > 0) {
-      docsConfig = injectOpenApiSpecs(docsConfig, pageOnlySpecs, warnings)
+      docsConfig = injectOpenApiSpecs(docsConfig, pageOnlySpecs.filter((spec) => spec.sourcePath !== hiddenScanSource), warnings)
       pageSpecs = [...pageSpecs, ...pageOnlySpecs]
     }
     const notKeptPublic = [...new Set(unownedOperations.filter((operation) => withheldKeys.has(operationKey(operation))))]
@@ -5895,6 +6339,18 @@ export function migrateRepository(options: RepositoryMigrationOptions): Migratio
       return sameName ? 'the file could not be read as an OpenAPI document' : `no file exists at "${key}"`
     }
     rewriteMintlifyPageSpecRefs(pages.filter((page) => !generatedEndpointPages.has(page)), pageSpecs, new Set(remoteApiSpecs.map((spec) => spec.url)), warnings, explainMissingSpec)
+    // With a remote spec still to download, hydration titles the pages once every spec is bound, since a bare reference may reach either kind.
+    if (remoteApiSpecs.length === 0) {
+      titleOperationPages({
+        pages,
+        tabs: docsConfig.tabs,
+        versions: docsConfig.navigation?.versions,
+        content: (source) => {
+          const asset = assets.find((entry) => entry.path === source)
+          return asset ? Buffer.from(asset.content) : undefined
+        },
+      })
+    }
     // Mintlify operation pages carry no "OpenAPI specification" line.
     if (docsConfig.tabs.some((tab) => tab.api)) docsConfig = { ...docsConfig, api: { ...docsConfig.api, specLink: false } }
   }
@@ -6089,7 +6545,12 @@ export function migrateRepository(options: RepositoryMigrationOptions): Migratio
     const linkIndex = rootLinkIndex()
     const resolveLink = (target: string): string | undefined => mainSiteLinkTarget(target, ref.mountPath, linkIndex, unresolvedLinks)
     for (const sourcePage of ref.pages) {
-      const page = { ...sourcePage, body: prefixRootLinks(sourcePage.body, ref.mountPath, resolveLink) }
+      const page = {
+        ...sourcePage,
+        body: prefixRootLinks(sourcePage.body, ref.mountPath, resolveLink),
+        // A link to a path of the sub-site is placed like a root-absolute link in its body.
+        ...(sourcePage.externalUrl?.startsWith('/') ? { externalUrl: mountedLinkTarget(sourcePage.externalUrl, ref.mountPath, resolveLink) } : {}),
+      }
       if (taken.has(page.id)) {
         warnings.push({ code: 'collision', message: `sourceRef ${ref.repo} page "${page.id}" already exists in this site and was skipped.` })
         continue
@@ -6144,6 +6605,7 @@ export function migrateRepository(options: RepositoryMigrationOptions): Migratio
       if (source) page.body = rewriteFernRelativePageLinks(page.body, source, routes)
     }
   }
+  appendMintlifyDirectories(pages, mintlifyDirectories, warnings)
   preserveLinkedAnchors(pages)
   if (platform === 'fern' && fernRawConfig) {
     const sourceSiteUrl = fernSourceSiteUrl(fernRawConfig)
@@ -6183,7 +6645,9 @@ export function migrateRepository(options: RepositoryMigrationOptions): Migratio
       linkRedirects.push({ source, destination: page.externalUrl, permanent: false })
     }
   }
-  if (linkRedirects.length > 0) docsConfig = { ...docsConfig, redirects: [...(docsConfig.redirects ?? []), ...linkRedirects] }
+  // A link to a path of this site can send visitors in a circle (back to its own page, to another link, or through a
+  // redirect). The earlier redirects win and the loop is reported; no page list is passed because a link hides its page on purpose.
+  if (linkRedirects.length > 0) docsConfig = dropConflictingRedirects({ ...docsConfig, redirects: [...(docsConfig.redirects ?? []), ...linkRedirects] }, [], warnings)
 
   if (pages.length === 0) {
     const reasons = warnings.map((warning) => warning.message)
@@ -6200,7 +6664,26 @@ export function migrateRepository(options: RepositoryMigrationOptions): Migratio
     ? readDocusaurusSiteSettings(docusaurusProjectRoot!)
     : undefined
   const presentation = docusaurusSettings ? readDocusaurusPresentation(docusaurusProjectRoot!) : undefined
+  const docusaurusIdentity = docusaurusSettings
+    ? docusaurusProjectName(docusaurusSettings, repositoryDir, options.sourceUrl)
+    : undefined
   if (docusaurusSettings) {
+    for (const field of docusaurusSettings.unresolvedIdentity ?? []) {
+      const namesTheProject = field === 'title' || field === 'navbarTitle'
+      const fallback = namesTheProject && docusaurusIdentity?.origin
+        ? ` The project name was taken from ${docusaurusIdentity.origin}.`
+        : ''
+      warnings.push({
+        code: 'unsupported-config',
+        message: `The Docusaurus ${DOCUSAURUS_IDENTITY_LABELS[field]} could not be read without running the config and was left out of the migration.${fallback} Use a string literal, or plain data in an imported module, to import it.`,
+      })
+    }
+    for (const token of docusaurusSettings.unresolvedCopyright ?? []) {
+      warnings.push({
+        code: 'unsupported-config',
+        message: `The Docusaurus footer copyright references ${token}, which could not be read without running the config, so the placeholder was removed. Use a literal value, or plain data in an imported module, to import it.`,
+      })
+    }
     if (presentation) {
       assets.push({ path: '_thally/source-theme.css', content: Buffer.from(presentation.css) })
       docsConfig = { ...docsConfig, stylesheets: [...(docsConfig.stylesheets ?? []), '/_thally/source-theme.css'], ...(presentation.headingFont ? { fonts: { ...docsConfig.fonts, heading: { family: presentation.headingFont, weight: ['400', '500', '600', '700'] } } } : {}) }
@@ -6471,6 +6954,9 @@ export function migrateRepository(options: RepositoryMigrationOptions): Migratio
   })
   pages.push(...sourceRefPages)
   assets.push(...sourceRefAssets)
+  // After the sub-sites' assets are mounted, so every path is where its file lands.
+  const cloudflareWarning = cloudflareAssetWarning(assets)
+  if (cloudflareWarning) warnings.push(cloudflareWarning)
   return {
     sourceUrl: options.sourceUrl,
     sourceKind: 'repository',
@@ -6480,6 +6966,7 @@ export function migrateRepository(options: RepositoryMigrationOptions): Migratio
     ...(importedSourceRefs.length > 0 ? { sourceRefs: importedSourceRefs } : {}),
     ...(remoteApiSpecs.length > 0 ? { remoteApiSpecs } : {}),
     ...(remoteApiSpecs.length > 0 && localApiMounts.length > 0 ? { localApiMounts } : {}),
+    ...(remoteApiSpecs.length > 0 && pageOnlySources(docsConfig.tabs).length > 0 ? { pageOnlySpecs: pageOnlySources(docsConfig.tabs) } : {}),
     ...(componentMigrator ? { componentFiles: componentMigrator.files() } : {}),
     ...(quarantinedFiles.length > 0 ? { quarantinedFiles } : {}),
     ...(droppedGatedFiles.length > 0 ? { droppedGatedPages: droppedGatedFiles.length } : {}),
@@ -6495,9 +6982,9 @@ export function migrateRepository(options: RepositoryMigrationOptions): Migratio
         ...(typeof fernRawConfig.title === 'string' ? { name: fernRawConfig.title } : {}),
         ...(themeColors ? { colors: themeColors } : {}),
       },
-    } : docusaurusSettings && (docusaurusSettings.name || docusaurusSettings.description || themeColors) ? {
+    } : docusaurusSettings && (docusaurusIdentity?.name || docusaurusSettings.description || themeColors) ? {
       site: {
-        ...(docusaurusSettings.navbarTitle || docusaurusSettings.name ? { name: docusaurusSettings.navbarTitle ?? docusaurusSettings.name } : {}),
+        ...(docusaurusIdentity?.name ? { name: docusaurusIdentity.name } : {}),
         ...(docusaurusSettings.description ? { description: docusaurusSettings.description } : {}),
         ...(themeColors ? { colors: themeColors } : {}),
       },

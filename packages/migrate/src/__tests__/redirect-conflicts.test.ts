@@ -5,6 +5,10 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { createContext, Script } from 'node:vm'
 
+import { checkCustomRoutes } from 'next/dist/lib/load-custom-routes.js'
+import { modifyRouteRegex } from 'next/dist/lib/redirect-status.js'
+import { getPathMatch } from 'next/dist/shared/lib/router/utils/path-match.js'
+import { prepareDestination } from 'next/dist/shared/lib/router/utils/prepare-destination.js'
 import { describe, expect, it } from 'vitest'
 
 import { migrateRepository, migrateUrl, type MigrationFetcher } from '../index.js'
@@ -81,9 +85,9 @@ describe('Mintlify redirects that would loop or hide a page', () => {
     const redirects = bundle.docsConfig.redirects ?? []
     expect(bundle.pages.map((page) => page.id)).toContain('introduction')
     // Mintlify served the root index at `/`: the root stays the page and `/introduction` stays an alias of it.
-    expect(redirects).toContainEqual({ source: '/introduction', destination: '/' })
+    expect(redirects).toContainEqual({ source: '/introduction', destination: '/', permanent: true })
     expect(redirects.some((redirect) => redirect.source === '/')).toBe(false)
-    expect(redirects).toContainEqual({ source: '/old', destination: '/guide' })
+    expect(redirects).toContainEqual({ source: '/old', destination: '/guide', permanent: true })
     expect(redirectCycle(redirects)).toBeNull()
     expect(messages(bundle)).not.toContain('/introduction')
   })
@@ -97,7 +101,7 @@ describe('Mintlify redirects that would loop or hide a page', () => {
       guide: '---\ntitle: Guide\n---\n\nBody.',
     })
     const redirects = bundle.docsConfig.redirects ?? []
-    expect(redirects).toContainEqual({ source: '/', destination: '/guide' })
+    expect(redirects).toContainEqual({ source: '/', destination: '/guide', permanent: true })
     expect(redirects.some((redirect) => redirect.source === '/introduction')).toBe(false)
     expect(redirectCycle(redirects)).toBeNull()
   })
@@ -112,7 +116,7 @@ describe('Mintlify redirects that would loop or hide a page', () => {
     })
     const redirects = bundle.docsConfig.redirects ?? []
     expect(redirects.map((redirect) => redirect.source)).not.toContain('/Guide')
-    expect(redirects).toContainEqual({ source: '/old', destination: '/guide' })
+    expect(redirects).toContainEqual({ source: '/old', destination: '/guide', permanent: true })
     expect(messages(bundle)).toContain('Skipped 1 redirect from /Guide: that URL differs only in letter case from a page in this site, so on a server that ignores letter case it would hide that page. If your host matches URLs case-sensitively, add it back to docs.json.')
     expect(messages(bundle)).not.toMatch(/Self-redirect|also a page/)
   })
@@ -122,7 +126,7 @@ describe('Mintlify redirects that would loop or hide a page', () => {
       redirects: [{ source: '/old', destination: '/guide' }],
       navigation: { groups: [{ group: 'Start', pages: ['index', 'guide'] }] },
     }, { index: '# Home\n\nWelcome.', guide: '# Guide\n\nBody.' })
-    expect(bundle.docsConfig.redirects).toContainEqual({ source: '/old', destination: '/guide' })
+    expect(bundle.docsConfig.redirects).toContainEqual({ source: '/old', destination: '/guide', permanent: true })
     expect(messages(bundle)).not.toMatch(/hide|circle/)
   })
 
@@ -132,10 +136,108 @@ describe('Mintlify redirects that would loop or hide a page', () => {
       navigation: { groups: [{ group: 'Start', pages: ['index'] }] },
     }, { index: '# Home\n\nWelcome.' })
     const redirects = bundle.docsConfig.redirects ?? []
-    expect(redirects).toContainEqual({ source: '/a', destination: '/b' })
+    expect(redirects).toContainEqual({ source: '/a', destination: '/b', permanent: true })
     expect(redirects.some((redirect) => redirect.source === '/b')).toBe(false)
     expect(redirectCycle(redirects)).toBeNull()
     expect(messages(bundle)).toContain('/b')
+  })
+})
+
+describe('Mintlify catch-all redirects whose prefix is a page', () => {
+  it('keeps a trailing :path* redirect for deeper paths, so the page it also matched at zero segments stays reachable', () => {
+    const bundle = mintlify({
+      redirects: [
+        { source: '/docs/sdks/typescript/:path*', destination: '/docs/sdks/typescript' },
+        { source: '/old', destination: '/docs/sdks/typescript' },
+      ],
+      navigation: { groups: [{ group: 'Start', pages: ['index', 'docs/sdks/typescript'] }] },
+    }, {
+      index: '---\ntitle: Home\n---\n\nWelcome.',
+      'docs/sdks/typescript': '---\ntitle: TypeScript\n---\n\nBody.',
+    })
+    const redirects = bundle.docsConfig.redirects ?? []
+    expect(bundle.pages.map((page) => page.id)).toContain('docs/sdks/typescript')
+    expect(redirects).toContainEqual({ source: '/docs/sdks/typescript/:path+', destination: '/docs/sdks/typescript', permanent: true })
+    expect(redirects.map((redirect) => redirect.source)).not.toContain('/docs/sdks/typescript/:path*')
+    expect(redirects).toContainEqual({ source: '/old', destination: '/docs/sdks/typescript', permanent: true })
+    expect(messages(bundle)).not.toMatch(/Skipped|circle|hide/)
+  })
+})
+
+describe('Mintlify root catch-all redirects', () => {
+  it('keeps the home page reachable at /, since /:path* also matches the root', () => {
+    const bundle = mintlify({
+      redirects: [{ source: '/:path*', destination: 'https://example.com/docs' }],
+      navigation: { groups: [{ group: 'Start', pages: ['index', 'guide'] }] },
+    }, {
+      index: '---\ntitle: Home\n---\n\nWelcome.',
+      guide: '---\ntitle: Guide\n---\n\nBody.',
+    })
+    expect(bundle.pages.map((page) => page.id)).toContain('introduction')
+    const redirects = bundle.docsConfig.redirects ?? []
+    expect(redirects).toContainEqual({ source: '/:path+', destination: 'https://example.com/docs', permanent: true })
+    expect(redirects.map((redirect) => redirect.source)).not.toContain('/:path*')
+  })
+})
+
+describe('Mintlify redirects to an address outside the site', () => {
+  // docs.json of dub.co: live Mintlify answers both with a 308 to the external address.
+  const external = [
+    { source: '/docs/examples', destination: 'https://github.com/dubinc/examples' },
+    { source: '/docs/integrations/zapier', destination: 'https://dub.co/integrations/zapier' },
+  ]
+
+  it('carries them through a repository migration unchanged, with no warning about them', () => {
+    const bundle = mintlify({
+      redirects: [...external, { source: '/evil', destination: '//evil.example' }, { source: '/script', destination: 'javascript:alert(1)' }],
+      navigation: { groups: [{ group: 'Start', pages: ['index'] }] },
+    }, { index: '---\ntitle: Home\n---\n\nWelcome.' })
+    const redirects = bundle.docsConfig.redirects ?? []
+    for (const redirect of external) expect(redirects).toContainEqual({ ...redirect, permanent: true })
+    expect(redirects.map((redirect) => redirect.source)).not.toContain('/evil')
+    expect(redirects.map((redirect) => redirect.source)).not.toContain('/script')
+    expect(bundle.warnings.filter((warning) => /docs\/examples|zapier/.test(warning.message))).toEqual([])
+    expect(messages(bundle)).toContain('Skipped 2 redirects from /evil, /script')
+  })
+
+  it('treats one as the end of a chain, so a page it also names is not mistaken for a loop', () => {
+    const warnings: Array<{ code: 'unsupported-config'; message: string }> = []
+    const input: MigrationDocsConfig = { tabs: [], redirects: [...external, { source: '/a', destination: '/docs/examples' }] }
+    expect(dropUnroutableRedirects(input, warnings)).toBe(input)
+    expect(dropConflictingRedirects(input, [{ id: 'introduction' }], warnings)).toBe(input)
+    expect(warnings).toEqual([])
+  })
+
+  it("is composed by Next's own matcher with the scheme and host intact", () => {
+    for (const { source, destination } of external) {
+      expect(() => checkCustomRoutes([{ source, destination, permanent: false }], 'redirect')).not.toThrow()
+      const match = getPathMatch(source, { removeUnnamedParams: true, strict: true })
+      const { parsedDestination, newUrl } = prepareDestination({ appendParamsToQuery: false, destination, params: match(source) as Record<string, string>, query: {} })
+      expect(`${parsedDestination.protocol}//${parsedDestination.hostname}${newUrl}`).toBe(destination)
+    }
+  })
+})
+
+describe('Mintlify redirect status through a repository migration', () => {
+  it('makes an authored redirect permanent by default and leaves the redirects the migrator adds temporary', () => {
+    const bundle = mintlify({
+      redirects: [
+        { source: '/old', destination: '/guide' },
+        { source: '/kept-temporary', destination: '/guide', permanent: false },
+        { source: '/docs/examples', destination: 'https://github.com/dubinc/examples' },
+      ],
+      navigation: { groups: [{ group: 'Start', pages: ['index', 'section/overview'] }] },
+    }, {
+      index: '---\ntitle: Home\n---\n\nWelcome.',
+      guide: '---\ntitle: Guide\n---\n\nBody.',
+      'section/overview': '---\ntitle: Section\n---\n\nBody.',
+    })
+    const redirects = bundle.docsConfig.redirects ?? []
+    expect(redirects).toContainEqual({ source: '/old', destination: '/guide', permanent: true })
+    expect(redirects).toContainEqual({ source: '/kept-temporary', destination: '/guide', permanent: false })
+    expect(redirects).toContainEqual({ source: '/docs/examples', destination: 'https://github.com/dubinc/examples', permanent: true })
+    // The route aliases the migrator creates on its own keep the flag they were made with.
+    expect(redirects).toContainEqual({ source: '/section', destination: '/section/overview', permanent: false })
   })
 })
 
@@ -231,7 +333,7 @@ describe('URL migration redirects', () => {
       throw new Error(`missing fixture: ${url}`)
     }
     const bundle = await migrateUrl({ sourceUrl, platform: 'mintlify', fetcher })
-    expect(bundle.docsConfig.redirects).toContainEqual({ source: '/old', destination: '/introduction' })
+    expect(bundle.docsConfig.redirects).toContainEqual({ source: '/old', destination: '/introduction', permanent: true })
     expect((bundle.docsConfig.redirects ?? []).map((redirect) => redirect.source)).not.toContain('/client/c++/intro')
     expect(messages(bundle)).toContain('Skipped 1 redirect from /client/c++/intro')
   })
@@ -249,6 +351,177 @@ describe('dropConflictingRedirects', () => {
     ]
     const warnings: Array<{ code: 'unsupported-config'; message: string }> = []
     expect(dropConflictingRedirects(config(redirects), pages, warnings).redirects).toEqual(redirects)
+    expect(warnings).toEqual([])
+  })
+
+  it('rewrites a trailing :name* to :name+ when its zero-segment reading is a page, keeping the destination and flags', () => {
+    const warnings: Array<{ code: 'unsupported-config'; message: string }> = []
+    const result = dropConflictingRedirects(config([
+      { source: '/guide/:path*', destination: '/guide' },
+      { source: '/section/:path*', destination: '/docs/section/:path*', permanent: true },
+      { source: '/fr/guide/:rest*', destination: '/x?y=1' },
+    ]), pages, warnings)
+    expect(result.redirects).toEqual([
+      { source: '/guide/:path+', destination: '/guide' },
+      { source: '/section/:path+', destination: '/docs/section/:path*', permanent: true },
+      { source: '/fr/guide/:rest+', destination: '/x?y=1' },
+    ])
+    expect(warnings).toEqual([])
+  })
+
+  it('rewrites a trailing :name* whose zero-segment reading is its own destination, even when no page is there', () => {
+    const warnings: Array<{ code: 'unsupported-config'; message: string }> = []
+    const result = dropConflictingRedirects(config([
+      { source: '/docs/:path*', destination: '/docs' },
+      { source: '/api/:path*', destination: '/api/?view=all#top' },
+      { source: '/:path*', destination: '/' },
+    ]), pages, warnings)
+    expect(result.redirects).toEqual([
+      { source: '/docs/:path+', destination: '/docs' },
+      { source: '/api/:path+', destination: '/api/?view=all#top' },
+      { source: '/:path+', destination: '/' },
+    ])
+    expect(warnings).toEqual([])
+  })
+
+  it('rewrites a root catch-all whose destination is elsewhere, because the home page is served at /', () => {
+    const warnings: Array<{ code: 'unsupported-config'; message: string }> = []
+    const result = dropConflictingRedirects(config([
+      { source: '/:path*', destination: 'https://example.com/docs', permanent: true },
+    ]), pages, warnings)
+    expect(result.redirects).toEqual([{ source: '/:path+', destination: 'https://example.com/docs', permanent: true }])
+    expect(warnings).toEqual([])
+    const match = getPathMatch('/:path+', { removeUnnamedParams: true, strict: true })
+    expect(match('/')).toBe(false)
+    expect(match('/anything/deeper')).toEqual({ path: ['anything', 'deeper'] })
+  })
+
+  it('leaves a root catch-all alone when nothing else answers at /', () => {
+    const noHome = config([{ source: '/:path*', destination: 'https://example.com/docs' }])
+    expect(dropConflictingRedirects(noHome, [{ id: 'guide' }], [])).toBe(noHome)
+  })
+
+  it('rewrites a root catch-all when / has a redirect of its own, in either order, so that redirect is the one that fires', () => {
+    const shadowing = config([{ source: '/:path*', destination: 'https://example.com/docs' }, { source: '/', destination: '/guide' }])
+    expect(dropConflictingRedirects(shadowing, [{ id: 'guide' }], []).redirects).toEqual([
+      { source: '/:path+', destination: 'https://example.com/docs' },
+      { source: '/', destination: '/guide' },
+    ])
+    const rootFirst = config([{ source: '/', destination: '/guide' }, { source: '/:path*', destination: 'https://example.com/docs' }])
+    expect(dropConflictingRedirects(rootFirst, pages, []).redirects).toEqual([
+      { source: '/', destination: '/guide' },
+      { source: '/:path+', destination: 'https://example.com/docs' },
+    ])
+  })
+
+  describe('a catch-all that ends in a slash', () => {
+    /** The matcher `next start` builds for a redirect source: strict path-to-regexp plus Next's optional trailing slash. */
+    const served = (source: string) => getPathMatch(source, { strict: true, removeUnnamedParams: true, regexModifier: (regex) => modifyRouteRegex(regex, ['/_next']) })
+
+    it('reads the zero-segment path of /:path*/ as the root, like /:path*, and narrows it', () => {
+      expect(served('/:path*/')('/')).toEqual({})
+      const warnings: Array<{ code: 'unsupported-config'; message: string }> = []
+      const result = dropConflictingRedirects(config([{ source: '/:path*/', destination: 'https://example.com/docs', permanent: true }]), pages, warnings)
+      expect(result.redirects).toEqual([{ source: '/:path+/', destination: 'https://example.com/docs', permanent: true }])
+      expect(warnings).toEqual([])
+      expect(() => checkCustomRoutes([{ ...result.redirects![0], permanent: true }], 'redirect')).not.toThrow()
+      expect(served(result.redirects![0].source)('/')).toBe(false)
+      expect(served(result.redirects![0].source)('/old/deeper/')).toEqual({ path: ['old', 'deeper'] })
+    })
+
+    it('narrows /x/:path*/ in the same cases as /x/:path*: a page or its own destination at the prefix', () => {
+      const result = dropConflictingRedirects(config([
+        { source: '/guide/:path*/', destination: '/guide' },
+        { source: '/fr/guide/:rest*/', destination: '/x' },
+        { source: '/docs/:path*/', destination: '/docs?view=all' },
+        { source: '/Guide/:path*/', destination: '/x' },
+      ]), pages, [])
+      expect(result.redirects).toEqual([
+        { source: '/guide/:path+/', destination: '/guide' },
+        { source: '/fr/guide/:rest+/', destination: '/x' },
+        { source: '/docs/:path+/', destination: '/docs?view=all' },
+        { source: '/Guide/:path+/', destination: '/x' },
+      ])
+    })
+
+    it('leaves a slashed catch-all alone when its zero-segment reading is neither a page nor its destination, and when nothing answers at /', () => {
+      const input = config([
+        { source: '/old/:path*/', destination: '/new/:path*' },
+        { source: '/legacy/:path*/', destination: '/guide' },
+      ])
+      expect(dropConflictingRedirects(input, pages, [])).toBe(input)
+      const noHome = config([{ source: '/:path*/', destination: 'https://example.com/docs' }])
+      expect(dropConflictingRedirects(noHome, [{ id: 'guide' }], [])).toBe(noHome)
+    })
+
+    it('keeps the narrowed source through a second pass, which is how a remote spec and then the repository both see it', () => {
+      const once = dropConflictingRedirects(config([{ source: '/:path*/', destination: 'https://example.com/docs' }, { source: '/guide/:path*/', destination: '/guide' }]), pages, [])
+      const warnings: Array<{ code: 'unsupported-config'; message: string }> = []
+      expect(dropConflictingRedirects(dropUnroutableRedirects(once, warnings), pages, warnings)).toBe(once)
+      expect(warnings).toEqual([])
+    })
+  })
+
+  it('judges the zero-segment reading under both readings of letter case', () => {
+    const result = dropConflictingRedirects(config([
+      { source: '/Guide/:path*', destination: '/x' },
+      { source: '/DOCS/api/:rest*', destination: '/docs/API' },
+    ]), pages, [])
+    expect(result.redirects).toEqual([
+      { source: '/Guide/:path+', destination: '/x' },
+      { source: '/DOCS/api/:rest+', destination: '/docs/API' },
+    ])
+  })
+
+  it('leaves a catch-all alone when its zero-segment reading is neither a page nor its destination', () => {
+    const input = config([
+      { source: '/old/:path*', destination: '/new/:path*' },
+      { source: '/legacy/:path*', destination: '/guide' },
+      { source: '/docs/:slug*', destination: '/docs/v2/:slug*' },
+    ])
+    const warnings: Array<{ code: 'unsupported-config'; message: string }> = []
+    expect(dropConflictingRedirects(input, pages, warnings)).toBe(input)
+    expect(warnings).toEqual([])
+  })
+
+  it('leaves a source alone unless its only pattern is a final :name* segment', () => {
+    const input = config([
+      { source: '/guide/*/:path*', destination: '/guide' },
+      { source: '/guide/*', destination: '/guide' },
+      { source: '/:lang/guide/:path*', destination: '/guide' },
+      { source: '/guide/:a*/:b*', destination: '/guide' },
+      { source: '/guide/:path+', destination: '/guide' },
+      { source: '/guide/:path', destination: '/guide' },
+    ])
+    expect(dropConflictingRedirects(input, pages, [])).toBe(input)
+  })
+
+  it('leaves /introduction/:path* -> / alone: like /introduction -> /, it only retires an alias of the root page', () => {
+    const input = config([{ source: '/introduction/:path*', destination: '/' }])
+    expect(dropConflictingRedirects(input, pages, [])).toBe(input)
+    const rootRedirected = config([{ source: '/', destination: '/guide' }, { source: '/introduction/:path*', destination: '/' }])
+    expect(dropConflictingRedirects(rootRedirected, pages, []).redirects).toEqual([{ source: '/', destination: '/guide' }, { source: '/introduction/:path+', destination: '/' }])
+  })
+
+  it('writes a redirect Next accepts, which no longer matches the page but still matches deeper paths', () => {
+    const [{ source, destination }, pair] = dropConflictingRedirects(config([
+      { source: '/guide/:path*', destination: '/guide' },
+      { source: '/section/:path*', destination: '/docs/section/:path*' },
+    ]), pages, []).redirects!
+    for (const redirect of [{ source, destination }, pair]) expect(() => checkCustomRoutes([{ ...redirect, permanent: false }], 'redirect')).not.toThrow()
+    const match = getPathMatch(source, { removeUnnamedParams: true, strict: true })
+    expect(match('/guide')).toBe(false)
+    expect(match('/guide/overview')).toEqual({ path: ['overview'] })
+    expect(prepareDestination({ appendParamsToQuery: false, destination, params: match('/guide/a/b') as Record<string, string | Array<string>>, query: {} }).newUrl).toBe('/guide')
+    const matchPair = getPathMatch(pair.source, { removeUnnamedParams: true, strict: true })
+    expect(matchPair('/section')).toBe(false)
+    expect(prepareDestination({ appendParamsToQuery: false, destination: pair.destination, params: matchPair('/section/a/b') as Record<string, string | Array<string>>, query: {} }).newUrl).toBe('/docs/section/a/b')
+  })
+
+  it('does not rewrite a source it already rewrote, so a second pass over a migrated set changes nothing', () => {
+    const once = dropConflictingRedirects(config([{ source: '/guide/:path*', destination: '/guide' }]), pages, [])
+    const warnings: Array<{ code: 'unsupported-config'; message: string }> = []
+    expect(dropConflictingRedirects(dropUnroutableRedirects(once, warnings), pages, warnings)).toBe(once)
     expect(warnings).toEqual([])
   })
 
@@ -524,6 +797,243 @@ describe('dropUnroutableRedirects', () => {
     expect(warnings).toHaveLength(2)
     expect(warnings[0].message).toBe('Self-redirect from /docs/models/ to /docs/models was omitted.')
     expect(warnings[1].message).toContain('Skipped 2 redirects from /sdk/c++/users, /sdk/c++/groups')
+  })
+
+  it('keeps a source that ends in a :name+ catch-all, and still omits a literal + before it', () => {
+    const warnings: Array<{ code: 'unsupported-config'; message: string }> = []
+    const result = dropUnroutableRedirects(config([
+      { source: '/docs/sdks/:path+', destination: '/docs/sdks' },
+      { source: '/sdk/c++/:rest+', destination: '/x' },
+      { source: '/docs/:path+/more', destination: '/x' },
+    ]), warnings)
+    expect(result.redirects).toEqual([{ source: '/docs/sdks/:path+', destination: '/docs/sdks' }])
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0].message).toContain('Skipped 2 redirects from /sdk/c++/:rest+, /docs/:path+/more')
+  })
+
+  describe('route syntax in a destination', () => {
+    /** The path `next start` redirects to when this destination is followed, or the error it throws while compiling it. */
+    const followed = (destination: string, params: Record<string, string | Array<string>> = {}): string => prepareDestination({ appendParamsToQuery: false, destination, params, query: {} }).newUrl
+
+    it('percent-encodes + ( ) in the path, which Next cannot compile raw, for an address off the site and on it', () => {
+      const input: Redirects = [
+        { source: '/a', destination: 'https://example.com/a+b' },
+        { source: '/b', destination: 'https://example.com/(group)/x?y=1+2#top' },
+        { source: '/c', destination: '/c++(d)' },
+        { source: '/d/:path*', destination: '/new+x/:path*' },
+      ]
+      for (const { destination } of input.slice(0, 3)) expect(() => followed(destination), destination).toThrow()
+      const warnings: Array<{ code: 'unsupported-config'; message: string }> = []
+      const result = dropUnroutableRedirects(config(input), warnings)
+      expect(result.redirects).toEqual([
+        { source: '/a', destination: 'https://example.com/a%2Bb' },
+        { source: '/b', destination: 'https://example.com/%28group%29/x?y=1+2#top' },
+        { source: '/c', destination: '/c%2B%2B%28d%29' },
+        { source: '/d/:path*', destination: '/new%2Bx/:path*' },
+      ])
+      expect(warnings).toEqual([])
+      expect(() => checkCustomRoutes(result.redirects!.map((redirect) => ({ ...redirect, permanent: true })), 'redirect')).not.toThrow()
+      // Next sends the visitor to the same path the source docs named: %2B and %28 decode to the + and ( written there.
+      expect(decodeURIComponent(followed(result.redirects![0].destination))).toBe('/a+b')
+      expect(decodeURIComponent(followed(result.redirects![1].destination))).toBe('/(group)/x#top')
+      expect(decodeURIComponent(followed(result.redirects![2].destination))).toBe('/c++(d)')
+      expect(followed(result.redirects![3].destination, { path: ['x', 'y'] })).toBe('/new%2Bx/x/y')
+    })
+
+    it('leaves [ ] { }, a percent escape, the query, the fragment and a :param segment as written, since Next compiles them as they are', () => {
+      const input = config([
+        { source: '/a', destination: 'https://example.com/a[b]/{c}/x%2By' },
+        { source: '/b', destination: '/d[e]/%28f%29?q=a+(b)#h' },
+        { source: '/c/:path*', destination: '/new/:path*' },
+        { source: '/d', destination: 'https://example.com:8080/x' },
+      ])
+      expect(dropUnroutableRedirects(input, [])).toBe(input)
+      for (const { destination } of input.redirects!.filter((redirect) => !redirect.source.includes(':'))) expect(() => followed(destination), destination).not.toThrow()
+    })
+
+    it('omits a redirect whose host holds route syntax, which a host cannot escape, and says so once', () => {
+      const warnings: Array<{ code: 'unsupported-config'; message: string }> = []
+      expect(() => followed('https://a+b.example.com/x')).toThrow()
+      expect(() => followed('https://a(b).example.com/x')).toThrow()
+      const result = dropUnroutableRedirects(config([
+        { source: '/a', destination: 'https://a+b.example.com/x' },
+        { source: '/b', destination: 'https://a(b).example.com/x' },
+        { source: '/c', destination: 'https://example.com/x' },
+      ]), warnings)
+      expect(result.redirects).toEqual([{ source: '/c', destination: 'https://example.com/x' }])
+      expect(warnings.map((warning) => warning.message)).toEqual([
+        'Skipped 2 redirects from /a (a+b.example.com), /b (a(b).example.com): the address each leads to has a host name that is not valid (a host name has only letters, digits, hyphens, underscores and dots, then an optional :port), so following them would fail. Check these redirects in the source docs.',
+      ])
+    })
+
+    // Next compiles the host as the URL parser decodes it, so `exa%2Bmple.com` reaches path-to-regexp as `exa+mple.com`.
+    it('omits a redirect whose host, once decoded, is not a valid DNS name, and says why', () => {
+      const hosts = ['exa%2Bmple.com', 'exa%28mple.com', 'exa%7Bmple.com', 'a..example.com', '-bad.example.com']
+      for (const host of hosts.slice(0, 3)) expect(() => followed(`https://${host}/x`), host).toThrow()
+      const warnings: Array<{ code: 'unsupported-config'; message: string }> = []
+      const result = dropUnroutableRedirects(config([
+        ...hosts.map((host, index) => ({ source: `/r${index}`, destination: `https://${host}/x` })),
+        { source: '/keep', destination: 'https://example.com/x' },
+      ]), warnings)
+      expect(result.redirects).toEqual([{ source: '/keep', destination: 'https://example.com/x' }])
+      expect(warnings).toHaveLength(1)
+      expect(warnings[0].message).toContain('from /r0 (exa+mple.com), /r1 (exa(mple.com), /r2 (exa{mple.com), /r3 (a..example.com)')
+      expect(warnings[0].message).toContain('has a host name that is not valid (a host name has only letters, digits, hyphens, underscores and dots')
+    })
+
+    it('keeps a host written with percent escapes, capitals, an underscore, an international name, an IP address or a port, which Next compiles as plain text', () => {
+      const input = config([
+        { source: '/a', destination: 'https://ex%61mple.com/x' },
+        { source: '/b', destination: 'https://EXAMPLE.com/x' },
+        { source: '/c', destination: 'https://münchen.de/x' },
+        { source: '/d', destination: 'https://xn--mnchen-3ya.de/x' },
+        { source: '/e', destination: 'http://127.0.0.1:3000/x' },
+        { source: '/f', destination: 'https://docs.example.com:8443/x?y=1' },
+        { source: '/g', destination: 'https://example.com./x' },
+        { source: '/h', destination: 'https://my_app.example.com/x' },
+      ])
+      for (const { destination } of input.redirects!) expect(() => followed(destination), destination).not.toThrow()
+      const warnings: Array<{ code: 'unsupported-config'; message: string }> = []
+      expect(dropUnroutableRedirects(input, warnings)).toBe(input)
+      expect(warnings).toEqual([])
+    })
+
+    // A destination may only use the parameters its source defines: Next throws `Expected "oops" to be a string` for any other,
+    // and a destination on the site is refused at build time (`destination has segments not in source or has`).
+    describe('a :name in the destination that the source does not define', () => {
+      const build = (redirects: Redirects) => checkCustomRoutes(redirects.map((redirect) => ({ ...redirect, permanent: true })), 'redirect')
+      const quiet = (run: () => unknown) => {
+        const error = console.error
+        console.error = () => {}
+        try {
+          return run()
+        } finally {
+          console.error = error
+        }
+      }
+
+      it('writes the colon as %3A in an address off the site, which Next then redirects to as written', () => {
+        expect(() => followed('https://example.com/docs/:oops')).toThrow('Expected "oops" to be a string')
+        const warnings: Array<{ code: 'unsupported-config'; message: string }> = []
+        const result = dropUnroutableRedirects(config([{ source: '/old', destination: 'https://example.com/docs/:oops?x=:oops#top' }]), warnings)
+        expect(result.redirects).toEqual([{ source: '/old', destination: 'https://example.com/docs/%3Aoops?x=:oops#top' }])
+        expect(warnings).toEqual([])
+        expect(followed(result.redirects![0].destination)).toBe('/docs/%3Aoops#top')
+        expect(decodeURIComponent(followed(result.redirects![0].destination))).toBe('/docs/:oops#top')
+      })
+
+      it('does the same for a path on the site, which also fails the build as written', () => {
+        quiet(() => expect(() => build([{ source: '/old', destination: '/docs/:oops' }])).toThrow())
+        const result = dropUnroutableRedirects(config([{ source: '/old', destination: '/docs/:oops' }]), [])
+        expect(result.redirects).toEqual([{ source: '/old', destination: '/docs/%3Aoops' }])
+        expect(() => build(result.redirects!)).not.toThrow()
+        expect(followed(result.redirects![0].destination)).toBe('/docs/%3Aoops')
+      })
+
+      it('writes a colon that is not the start of a name, or sits inside a segment, the same way', () => {
+        const input = [
+          { source: '/a', destination: 'https://example.com/times/10:30' },
+          { source: '/b', destination: '/ratio/:' },
+          { source: '/c', destination: '/x/a:b/c' },
+          { source: '/d', destination: '/y/:*/z/:+' },
+        ]
+        for (const { destination } of input) expect(() => followed(destination), destination).toThrow()
+        const result = dropUnroutableRedirects(config(input), [])
+        expect(result.redirects!.map((redirect) => redirect.destination)).toEqual(['https://example.com/times/10%3A30', '/ratio/%3A', '/x/a%3Ab/c', '/y/%3A%2A/z/%3A%2B'])
+        for (const { destination } of result.redirects!) expect(() => followed(destination), destination).not.toThrow()
+      })
+
+      it('keeps every parameter the source defines, whether the destination is on the site or off it', () => {
+        const input = config([
+          { source: '/a/:id', destination: '/b/:id' },
+          { source: '/c/:path*', destination: 'https://example.com/d/:path*' },
+          { source: '/e/:one/:two', destination: 'https://example.com/:two/:one/:one' },
+          { source: '/f/:rest+', destination: '/g/:rest+' },
+          { source: '/h/:section/:rest*', destination: '/i/:section/:rest*' },
+        ])
+        const warnings: Array<{ code: 'unsupported-config'; message: string }> = []
+        expect(dropUnroutableRedirects(input, warnings)).toBe(input)
+        expect(warnings).toEqual([])
+        expect(followed('https://example.com/:two/:one/:one', { one: '1', two: '2' })).toBe('/2/1/1')
+      })
+
+      it('encodes only the parameters the source lacks, in a destination that also uses its own', () => {
+        const result = dropUnroutableRedirects(config([{ source: '/a/:id', destination: '/b/:id/:other/:id' }]), [])
+        expect(result.redirects).toEqual([{ source: '/a/:id', destination: '/b/:id/%3Aother/:id' }])
+        expect(followed(result.redirects![0].destination, { id: '7' })).toBe('/b/7/%3Aother/7')
+      })
+
+      it('omits a wildcard the source does not have, and says why', () => {
+        // `:rest+` throws when it is followed, `:rest*` is left out of the address it sends visitors to, and a site path with either fails the build.
+        expect(() => followed('https://example.com/docs/:rest+')).toThrow('Expected "rest" to be an array')
+        expect(followed('https://example.com/docs/:rest*')).toBe('/docs')
+        quiet(() => expect(() => build([{ source: '/a', destination: '/docs/:rest*' }])).toThrow())
+        const warnings: Array<{ code: 'unsupported-config'; message: string }> = []
+        const result = dropUnroutableRedirects(config([
+          { source: '/a', destination: '/docs/:rest*' },
+          { source: '/b/:id', destination: 'https://example.com/docs/:rest+' },
+          { source: '/keep', destination: '/docs' },
+        ]), warnings)
+        expect(result.redirects).toEqual([{ source: '/keep', destination: '/docs' }])
+        expect(warnings.map((warning) => warning.message)).toEqual([
+          'Redirect from /a to /docs/:rest* was omitted: its destination has :rest*, a wildcard the source does not have, so there is nothing to fill it with.',
+          'Redirect from /b/:id to https://example.com/docs/:rest+ was omitted: its destination has :rest+, a wildcard the source does not have, so there is nothing to fill it with.',
+        ])
+      })
+
+      it('omits a destination that writes a wildcard of the source without its * or +, which Next cannot compile either', () => {
+        expect(() => followed('/b/:p', { p: ['x'] })).toThrow('multi-match')
+        const warnings: Array<{ code: 'unsupported-config'; message: string }> = []
+        const result = dropUnroutableRedirects(config([
+          { source: '/a/:p*', destination: '/b/:p' },
+          { source: '/c/:p+', destination: 'https://example.com/:p/x' },
+          { source: '/d/:p', destination: '/e/:p' },
+        ]), warnings)
+        expect(result.redirects).toEqual([{ source: '/d/:p', destination: '/e/:p' }])
+        expect(warnings.map((warning) => warning.message)).toEqual([
+          'Redirect from /a/:p* to /b/:p was omitted: :p matches several path segments in the source, so its destination has to write it :p* or :p+, and Next.js cannot follow it otherwise.',
+          'Redirect from /c/:p+ to https://example.com/:p/x was omitted: :p matches several path segments in the source, so its destination has to write it :p* or :p+, and Next.js cannot follow it otherwise.',
+        ])
+      })
+
+      it('carries the redirect through a Mintlify migration in a form Next follows', () => {
+        const bundle = mintlify({
+          redirects: [{ source: '/old', destination: 'https://example.com/:oops' }, { source: '/older', destination: '/guide/:oops' }],
+          navigation: { groups: [{ group: 'Start', pages: ['index', 'guide'] }] },
+        }, { index: '# Home\n\nWelcome.', guide: '# Guide\n\nBody.' })
+        const redirects = bundle.docsConfig.redirects ?? []
+        expect(redirects).toContainEqual({ source: '/old', destination: 'https://example.com/%3Aoops', permanent: true })
+        expect(redirects).toContainEqual({ source: '/older', destination: '/guide/%3Aoops', permanent: true })
+        expect(() => build(redirects)).not.toThrow()
+        for (const { destination } of redirects) expect(() => followed(destination), destination).not.toThrow()
+      })
+
+      it('does not change a destination again on a second pass', () => {
+        const once = dropUnroutableRedirects(config([{ source: '/a', destination: 'https://example.com/:oops' }, { source: '/b/:id', destination: '/c/:id/:x' }]), [])
+        const warnings: Array<{ code: 'unsupported-config'; message: string }> = []
+        expect(dropUnroutableRedirects(once, warnings)).toBe(once)
+        expect(warnings).toEqual([])
+      })
+    })
+
+    it('does not encode again on a second pass, which is how a remote spec and then the repository both see a redirect', () => {
+      const once = dropUnroutableRedirects(config([{ source: '/a', destination: 'https://example.com/a+b' }]), [])
+      const warnings: Array<{ code: 'unsupported-config'; message: string }> = []
+      expect(dropUnroutableRedirects(once, warnings)).toBe(once)
+      expect(warnings).toEqual([])
+    })
+
+    it('carries a Mintlify redirect to an address with + or ( ) in its path through a migration in a form Next can follow', () => {
+      const bundle = mintlify({
+        redirects: [{ source: '/old', destination: 'https://example.com/a+b' }, { source: '/older', destination: '/guide(v2)' }],
+        navigation: { groups: [{ group: 'Start', pages: ['index', 'guide'] }] },
+      }, { index: '# Home\n\nWelcome.', guide: '# Guide\n\nBody.' })
+      const redirects = bundle.docsConfig.redirects ?? []
+      expect(redirects).toContainEqual({ source: '/old', destination: 'https://example.com/a%2Bb', permanent: true })
+      expect(redirects).toContainEqual({ source: '/older', destination: '/guide%28v2%29', permanent: true })
+      expect(() => checkCustomRoutes(redirects.map((redirect) => ({ ...redirect, permanent: true })), 'redirect')).not.toThrow()
+      for (const { destination } of redirects) expect(() => followed(destination), destination).not.toThrow()
+    })
   })
 
   it('leaves a redirect between two cases of one address to the conflict check, which says why', () => {

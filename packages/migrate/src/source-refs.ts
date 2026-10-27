@@ -11,7 +11,7 @@ import { lstatSync, readdirSync, readFileSync, realpathSync, rmSync, unlinkSync 
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 import { replaceOutsideCodeAndComments } from './mdx.js'
-import { migrateRepository } from './repository.js'
+import { isCloudflareAssetWarning, migrateRepository } from './repository.js'
 import type { MigrationAsset, MigrationDocsConfig, MigrationFetcher, MigrationNavigationGroup, MigrationPage, MigrationWarning, RenderedMigrationFile } from './types.js'
 import { defaultMigrationFetcher } from './url.js'
 
@@ -182,15 +182,20 @@ export function mainSiteLinkTarget(target: string, mountPath: string, index: Roo
   return undefined
 }
 
+/** One root-absolute target of a sub-site page: under the mount path, unless it already is or `resolve` places it elsewhere. */
+export function mountedLinkTarget(target: string, mountPath: string, resolve?: (target: string) => string | undefined): string {
+  const mounted = `/${mountPath}`
+  // A link already under the mount path is left alone: prefixing it again would break it.
+  if (target === mounted || ['/', '?', '#'].some((next) => target.startsWith(mounted + next))) return target
+  return resolve?.(target) ?? `${mounted}${target}`
+}
+
 /**
  * Prefix every root-absolute link/image/asset target in a page body with the mount path, unless `resolve` places it elsewhere.
  * Component source passes `markdown: false` so code that merely resembles a Markdown link is left alone.
  */
 export function prefixRootLinks(body: string, mountPath: string, resolve?: (target: string) => string | undefined, markdown = true): string {
-  const mounted = `/${mountPath}`
-  // A link already under the mount path is left alone: prefixing it again would break it.
-  const alreadyMounted = (target: string): boolean => target === mounted || ['/', '?', '#'].some((next) => target.startsWith(mounted + next))
-  const fix = (target: string): string => alreadyMounted(target) ? target : resolve?.(target) ?? `${mounted}${target}`
+  const fix = (target: string): string => mountedLinkTarget(target, mountPath, resolve)
   return replaceOutsideCodeAndComments(body, (text) => text
     .replace(markdown ? /(\]\(<?)(\/(?!\/)[^\s)>]*)/g : /(?!)/g, (_match, before: string, target: string) => `${before}${fix(target)}`)
     .replace(/(\b(?:href|src|to|poster)=(['"]))(\/(?!\/)[^'"\n]*)\2/g, (_match, before: string, quote: string, target: string) => `${before}${fix(target)}${quote}`)
@@ -261,7 +266,8 @@ export function importSourceRef(mapping: SourceRefMapping, repositoryDir: string
     componentNamespace: mapping.mountPath,
   })
   const prefix = (message: string): string => `[${mapping.repo}] ${message}`
-  const warnings: Array<MigrationWarning> = bundle.warnings.filter((warning) => !/dashboard access settings/i.test(warning.message)).slice(0, MAX_FORWARDED_WARNINGS).map((warning) => ({ ...warning, message: prefix(stripControlCharacters(withheldNotSaved(warning.message))), ...(warning.source ? { source: stripControlCharacters(warning.source) } : {}) }))
+  // The main migration lists oversized assets itself, once they are mounted and their paths are final.
+  const warnings: Array<MigrationWarning> = bundle.warnings.filter((warning) => !/dashboard access settings/i.test(warning.message) && !isCloudflareAssetWarning(warning)).slice(0, MAX_FORWARDED_WARNINGS).map((warning) => ({ ...warning, message: prefix(stripControlCharacters(withheldNotSaved(warning.message))), ...(warning.source ? { source: stripControlCharacters(warning.source) } : {}) }))
   if (bundle.warnings.length > MAX_FORWARDED_WARNINGS) {
     warnings.push({ code: 'unsupported-config', message: prefix(`${bundle.warnings.length - MAX_FORWARDED_WARNINGS} more migration warnings were omitted.`) })
   }

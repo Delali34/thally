@@ -6,7 +6,7 @@
  * project checkout—or unrelated source files—into the deployed function.
  */
 
-export { parseMdxContent } from './content/parse.js'
+export { parseMdxContent, parseMdxTree } from './content/parse.js'
 export { projectMdxAudience } from './content/audience.js'
 export type { ContentAudience } from './content/audience.js'
 export { mdxToMarkdown } from './content/to-markdown.js'
